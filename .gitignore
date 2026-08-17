@@ -1,0 +1,73 @@
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Logs, diagnostics, recordings, and local data
+*.log
+logs/
+diagnostics/
+recordings/
+crash-dumps/
+local-data/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+coverage/
+
+# Rust
+target/
+# Cargo.lock is committed for this application workspace.
+
+# Java / Gradle
+.gradle/
+**/build/
+out/
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.war
+*.ear
+
+# Native toolchains
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+
+# Test artifacts
+.coverage
+.nyc_output/
+test-results/
+performance-results/raw/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
