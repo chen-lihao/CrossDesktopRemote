@@ -1,0 +1,77 @@
+name: crossdesktopremote
+
+services:
+  postgres:
+    image: postgres:17.10-alpine3.23
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${CROSSDESKTOP_POSTGRES_DB:-crossdesktop}
+      POSTGRES_USER: ${CROSSDESKTOP_POSTGRES_USER:-crossdesktop}
+      POSTGRES_PASSWORD: ${CROSSDESKTOP_POSTGRES_PASSWORD:-crossdesktop_dev_only}
+    ports:
+      - "127.0.0.1:${CROSSDESKTOP_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks:
+      - control_plane
+
+  redis:
+    image: redis:7.2.14-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${CROSSDESKTOP_REDIS_PASSWORD:-crossdesktop_dev_only}
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${CROSSDESKTOP_REDIS_PASSWORD:-crossdesktop_dev_only}
+    ports:
+      - "127.0.0.1:${CROSSDESKTOP_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD --no-auth-warning ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks:
+      - control_plane
+
+  coturn:
+    image: coturn/coturn:4.15.0-r0-alpine
+    restart: unless-stopped
+    command:
+      - -c
+      - /etc/coturn/turnserver.conf
+      - --realm=${CROSSDESKTOP_TURN_REALM:-crossdesktopremote.local}
+      - --static-auth-secret=${CROSSDESKTOP_TURN_SECRET:-crossdesktop_dev_only}
+    ports:
+      - "${CROSSDESKTOP_TURN_PORT:-3478}:3478/tcp"
+      - "${CROSSDESKTOP_TURN_PORT:-3478}:3478/udp"
+      - "49160-49200:49160-49200/udp"
+    volumes:
+      - ../turn/turnserver.dev.conf:/etc/coturn/turnserver.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "turnutils_stunclient 127.0.0.1 -p 3478 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - realtime
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  control_plane:
+  realtime:

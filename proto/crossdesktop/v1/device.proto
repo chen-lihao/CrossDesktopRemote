@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package crossdesktop.v1;
+
+import "crossdesktop/v1/capability.proto";
+import "crossdesktop/v1/common.proto";
+
+option java_multiple_files = true;
+option java_package = "com.crossdesktopremote.protocol.v1";
+option java_outer_classname = "DeviceProto";
+
+message DeviceSummary {
+  string device_id = 1;
+  string display_name = 2;
+  Platform platform = 3;
+  bool online = 4;
+  uint64 last_seen_at_unix_ms = 5;
+  ClientCapabilities capabilities = 6;
+}
+
+message GetDeviceRequest {
+  RequestContext context = 1;
+  string device_id = 2;
+}
+
+message GetDeviceResponse {
+  DeviceSummary device = 1;
+  ErrorStatus error = 2;
+}

@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**方案设计完成，工程代码尚未开始。** 本仓库目前包含架构、可行性、协作规则和进展记录，没有可启动的客户端或服务端。不要将下文“目标启动方式”误认为当前已经可执行。
+> 当前状态：**M0 工程基线已建立并通过本机统一验收。** PostgreSQL、Redis、coturn、Java/Flyway、Protobuf 三语言生成、Rust C ABI、Flutter 响应式壳层、macOS/Android/iOS Simulator 构建均已验证。远程采集、硬编、WebRTC 媒体闭环和输入控制尚未实现。
 
 ## 项目定位
 
@@ -111,7 +111,7 @@ flowchart LR
 
 ## 仓库结构
 
-当前仓库只有项目文档。目标结构如下，目录将在对应阶段创建：
+当前目录边界、三类主要工程、协议生成、本地基础设施和统一验收入口已经建立；平台采集/输入适配和端到端媒体功能仍未实现：
 
 ```text
 CrossDesktopRemote/
@@ -123,7 +123,8 @@ CrossDesktopRemote/
 │   ├── protocol/                # Rust 协议类型
 │   ├── media-core/              # 媒体抽象与帧管线
 │   ├── transfer-core/           # 文件传输
-│   └── security-core/           # 设备身份与会话安全
+│   ├── security-core/           # 设备身份与会话安全
+│   └── client-ffi/              # 面向 Flutter/原生壳的窄 C ABI
 ├── platform/
 │   ├── windows/
 │   ├── macos/
@@ -143,6 +144,7 @@ CrossDesktopRemote/
 │   ├── network-lab/
 │   └── performance/
 ├── docs/
+├── scripts/                     # 工具链检查与官方生成器入口
 ├── AGENT.md
 ├── 项目进展情况.md
 ├── 实现方案.md
@@ -151,50 +153,106 @@ CrossDesktopRemote/
 
 ## 开发环境
 
-工程脚手架建立后，预计需要：
+当前已验证：
 
-- Flutter SDK 与各目标平台工具链。
-- Rust stable toolchain、Cargo 与平台交叉编译依赖。
+- Flutter 3.47.0 stable、Dart 3.13.0；Rust/Cargo 1.97.1。
+- Protobuf Compiler 35.1、Buf 1.72.0、`protoc-gen-dart` 25.0.0。
+- OpenJDK 17、Docker 28.0.1、Compose 2.33.1、CMake 4.2.0。
+- Android SDK 36.0.0、Xcode 26.6、CocoaPods 1.17.0；`flutter doctor` 已认可 Android 和 Apple 工具链。
+- Android NDK 28.2.13676358、`cargo-ndk` 4.1.2 及三个 Android Rust target。
+- Spring 工程使用官方生成的 Gradle 9.5.1 Wrapper。
+
+完整跨平台开发仍需要：
+
+- Flutter 各目标平台工具链。
+- Rust 平台交叉编译依赖。
 - 团队统一的 JDK LTS 与 Gradle Wrapper。
 - Docker 与 Docker Compose，用于 PostgreSQL、Redis、coturn 和本地可观测性。
 - Windows SDK/Visual Studio Build Tools、Xcode、Android Studio，以及 Linux PipeWire/Portal 开发包。
 
-具体版本必须由脚手架和锁文件固定；README 不提前写死尚未验证的版本号。
+工具的绝对路径和环境变量用法见[工程搭建说明](./docs/工程搭建.md)。当前登录 Shell 未继承 Flutter/Rust 的用户 PATH 时，统一脚本仍可通过 `CROSSDESKTOP_FLUTTER_BIN` 和 `CROSSDESKTOP_ANDROID_NDK_HOME` 显式定位工具。
 
-## 当前启动方式
+## 本地启动与验收
 
-当前没有可运行源代码，因而没有有效的启动命令。现阶段可以审阅：
+启动 PostgreSQL、Redis 和 coturn：
+
+```bash
+./scripts/dev-up.sh
+
+# 查看状态
+docker compose -f infra/deploy/compose.dev.yaml ps
+```
+
+启动 Java 控制平面：
+
+```bash
+SPRING_PROFILES_ACTIVE=local \
+  ./services/control-plane-java/gradlew \
+  -p services/control-plane-java \
+  bootRun
+
+# 服务启动后
+curl http://localhost:8080/actuator/health
+```
+
+执行完整 M0 基线验收：
+
+```bash
+CROSSDESKTOP_FLUTTER_BIN=/Volumes/zhiti-1T/Library/flutter/bin \
+CROSSDESKTOP_ANDROID_NDK_HOME=/Volumes/zhiti-1T/Library/android-sdk/ndk/28.2.13676358 \
+  ./scripts/check-all.sh
+```
+
+也可以分别执行：
+
+```bash
+./scripts/generate-proto.sh
+
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+cd apps/client_flutter
+flutter analyze
+flutter test
+flutter build macos --debug
+flutter build apk --debug
+flutter build ios --simulator --debug
+
+./services/control-plane-java/gradlew \
+  -p services/control-plane-java \
+  test
+```
+
+当前验收结果：
+
+| 模块 | 已通过 | 未通过或未完成 |
+| --- | --- | --- |
+| Flutter | 响应式壳层、`analyze`、3 个测试、macOS/Android/iOS Simulator build | Windows、Linux 尚未在对应系统构建；实际设备运行待验证 |
+| Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
+| Java | PostgreSQL/Redis local/test 配置、Flyway V1、测试、启动和健康检查 | 身份、设备、会话、信令等业务 API 尚未实现 |
+| Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |
+| Infrastructure | PostgreSQL、Redis、coturn Compose 均健康 | 当前仅本地开发配置；生产密钥、TLS、高可用尚未配置 |
+
+相关说明：
 
 - [实现方案.md](./实现方案.md)
 - [可行性分析.md](./可行性分析.md)
 - [项目进展情况.md](./项目进展情况.md)
 - [AGENT.md](./AGENT.md)
+- [工程搭建说明](./docs/工程搭建.md)
 
-## 目标开发与启动方式
+## 工程复现方式
 
-以下是工程脚手架需要实现的统一接口，**目前尚不可执行**：
+三类框架工程已经通过对应生成命令创建；以下脚本保留用于新环境复现，不会覆盖已存在工程：
 
 ```bash
-# 启动 PostgreSQL、Redis、coturn 等本地依赖
-docker compose -f infra/deploy/compose.dev.yaml up -d
-
-# 启动 Java 控制平面
-./gradlew :services:control-plane-java:bootRun
-
-# 运行 Rust 测试
-cargo test --workspace
-
-# 启动 Flutter 桌面客户端（示例）
-flutter run -d windows
-flutter run -d macos
-flutter run -d linux
-
-# 启动移动客户端（示例）
-flutter run -d android
-flutter run -d ios
+./scripts/bootstrap-spring.sh
+./scripts/bootstrap-flutter.sh  # 已安装；新终端需先配置 PATH
+./scripts/bootstrap-rust.sh     # 已安装；新终端需先配置 PATH
 ```
 
-脚手架完成后，以上命令必须由 CI 或本地验证真实运行后才能从“目标命令”改为“正式启动命令”。
+这些脚本用于新环境复现，不覆盖已存在工程。协议生成、本地依赖和统一验收应分别使用 `generate-proto.sh`、`dev-up.sh` 和 `check-all.sh`。
 
 ## 目标部署方式
 
@@ -235,4 +293,4 @@ flutter run -d ios
 
 ## 当前里程碑
 
-当前位于 **M0：立项与技术风险准备**。竞品调研、实现方案、可行性和技术栈决策已完成；下一步是建立工程脚手架并启动 Windows 端到端性能原型。
+当前位于 **M0：立项与技术风险准备**。工程基线已通过本机统一验收；下一步进入 **M1 Windows 性能原型**，建立 DXGI/Windows Graphics Capture → H.264 硬编 → WebRTC → 硬解/原生纹理 → 输入回传闭环，并补做 Windows/Linux 原生构建、Android 真机 FFI 和 macOS 动态库应用打包验证。

@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package crossdesktop.v1;
+
+option java_multiple_files = true;
+option java_package = "com.crossdesktopremote.protocol.v1";
+option java_outer_classname = "CapabilityProto";
+
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_WINDOWS = 1;
+  PLATFORM_MACOS = 2;
+  PLATFORM_LINUX = 3;
+  PLATFORM_ANDROID = 4;
+  PLATFORM_IOS = 5;
+}
+
+enum DeviceRole {
+  DEVICE_ROLE_UNSPECIFIED = 0;
+  DEVICE_ROLE_CONTROLLER = 1;
+  DEVICE_ROLE_HOST = 2;
+}
+
+enum VideoCodec {
+  VIDEO_CODEC_UNSPECIFIED = 0;
+  VIDEO_CODEC_H264 = 1;
+  VIDEO_CODEC_H265 = 2;
+  VIDEO_CODEC_AV1 = 3;
+}
+
+enum PermissionScope {
+  PERMISSION_SCOPE_UNSPECIFIED = 0;
+  PERMISSION_SCOPE_VIEW_SCREEN = 1;
+  PERMISSION_SCOPE_CONTROL_INPUT = 2;
+  PERMISSION_SCOPE_READ_CLIPBOARD = 3;
+  PERMISSION_SCOPE_WRITE_CLIPBOARD = 4;
+  PERMISSION_SCOPE_TRANSFER_FILE = 5;
+  PERMISSION_SCOPE_CAPTURE_SCREENSHOT = 6;
+  PERMISSION_SCOPE_RECORD_SESSION = 7;
+}
+
+message DisplayCapability {
+  uint32 max_width = 1;
+  uint32 max_height = 2;
+  uint32 max_frames_per_second = 3;
+  bool supports_multiple_displays = 4;
+}
+
+message ClientCapabilities {
+  Platform platform = 1;
+  repeated DeviceRole roles = 2;
+  repeated VideoCodec video_codecs = 3;
+  repeated PermissionScope permission_scopes = 4;
+  DisplayCapability display = 5;
+  bool supports_unattended_access = 6;
+  bool supports_file_resume = 7;
+}

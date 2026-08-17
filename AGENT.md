@@ -19,7 +19,7 @@ git status --short --branch
 rg --files
 ```
 
-仓库当前处于方案完成、代码未开始阶段。没有构建文件时，不得声称已编译、启动或测试通过。
+仓库当前已完成 M0 工程基线。Java/Flyway、Flutter 响应式壳层、Rust C ABI、Protobuf 三语言生成、本地 PostgreSQL/Redis/coturn 及统一检查已在 macOS 开发机通过；macOS、Android 和 iOS Simulator 构建也已验证。不得把“工程基线通过”声称为远程桌面业务功能或跨平台发布已经完成。
 
 ## 2. 固定技术决策
 
@@ -118,7 +118,10 @@ rg --files
 - 修改文件使用小而可审阅的补丁，避免无关格式化。
 - 不覆盖用户的既有改动；遇到冲突先说明。
 - 生成代码与构建产物不得手工编辑，必须由工具重新生成。
+- Flutter、Rust 和 Spring Boot 骨架分别通过 `scripts/bootstrap-flutter.sh`、`scripts/bootstrap-rust.sh`、`scripts/bootstrap-spring.sh` 生成；不得手写替代框架生成物。
 - 协议变更必须说明兼容性、版本和旧客户端行为。
+- `proto/` 是跨语言协议唯一来源；不得手工修改 `build/generated` 下的 Java/Dart/Rust 生成物。
+- 本机全量门禁优先运行 `scripts/check-all.sh`；只改文档时至少运行 `git diff --check`。
 - 架构决策变化同步修改两份方案、README 和进展日志。
 
 ## 8. 测试与完成定义

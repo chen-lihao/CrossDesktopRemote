@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package crossdesktop.v1;
+
+import "crossdesktop/v1/capability.proto";
+import "crossdesktop/v1/common.proto";
+
+option java_multiple_files = true;
+option java_package = "com.crossdesktopremote.protocol.v1";
+option java_outer_classname = "SessionProto";
+
+enum SessionMode {
+  SESSION_MODE_UNSPECIFIED = 0;
+  SESSION_MODE_ATTENDED = 1;
+  SESSION_MODE_UNATTENDED = 2;
+  SESSION_MODE_VIEW_ONLY = 3;
+}
+
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_REQUESTED = 1;
+  SESSION_STATE_AUTHORIZING = 2;
+  SESSION_STATE_CONNECTING = 3;
+  SESSION_STATE_CONNECTED = 4;
+  SESSION_STATE_RECONNECTING = 5;
+  SESSION_STATE_CLOSING = 6;
+  SESSION_STATE_CLOSED = 7;
+  SESSION_STATE_FAILED = 8;
+}
+
+message CreateSessionRequest {
+  RequestContext context = 1;
+  string controller_device_id = 2;
+  string host_device_id = 3;
+  SessionMode mode = 4;
+  repeated PermissionScope requested_permissions = 5;
+}
+
+message SessionTicket {
+  string session_id = 1;
+  bytes opaque_ticket = 2;
+  uint64 expires_at_unix_ms = 3;
+  repeated PermissionScope granted_permissions = 4;
+}
+
+message CreateSessionResponse {
+  SessionTicket ticket = 1;
+  ErrorStatus error = 2;
+}
+
+message SessionStateChanged {
+  string session_id = 1;
+  SessionState state = 2;
+  ErrorStatus error = 3;
+  uint64 occurred_at_unix_ms = 4;
+}

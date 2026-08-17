@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/client-ffi",
+    "crates/session-core",
+    "crates/protocol",
+    "crates/media-core",
+    "crates/transfer-core",
+    "crates/security-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Proprietary"
+publish = false

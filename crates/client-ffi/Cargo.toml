@@ -1,0 +1,12 @@
+[package]
+name = "client-ffi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "crossdesktop_core"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+session-core = { path = "../session-core" }

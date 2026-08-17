@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package crossdesktop.v1;
+
+import "crossdesktop/v1/common.proto";
+
+option java_multiple_files = true;
+option java_package = "com.crossdesktopremote.protocol.v1";
+option java_outer_classname = "SignalingProto";
+
+enum SignalType {
+  SIGNAL_TYPE_UNSPECIFIED = 0;
+  SIGNAL_TYPE_OFFER = 1;
+  SIGNAL_TYPE_ANSWER = 2;
+  SIGNAL_TYPE_ICE_CANDIDATE = 3;
+  SIGNAL_TYPE_RENEGOTIATE = 4;
+  SIGNAL_TYPE_CLOSE = 5;
+}
+
+message SignalEnvelope {
+  RequestContext context = 1;
+  string session_id = 2;
+  string sender_device_id = 3;
+  string recipient_device_id = 4;
+  SignalType type = 5;
+
+  // The receiving boundary must reject payloads larger than 256 KiB.
+  bytes payload = 6;
+}
