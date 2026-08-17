@@ -1,0 +1,35 @@
+import 'dart:math';
+
+enum RemoteRole { host, controller }
+
+String generateRoomCode([Random? random]) {
+  final source = random ?? Random.secure();
+  return (source.nextInt(900000) + 100000).toString();
+}
+
+bool isValidRoomCode(String value) => RegExp(r'^[0-9]{6}$').hasMatch(value);
+
+Uri buildSignalingUri({
+  required String serverUrl,
+  required String roomCode,
+  required RemoteRole role,
+}) {
+  final baseUri = Uri.parse(serverUrl.trim());
+  if (baseUri.scheme != 'ws' && baseUri.scheme != 'wss') {
+    throw const FormatException('信令地址必须使用 ws:// 或 wss://');
+  }
+  if (baseUri.host.isEmpty) {
+    throw const FormatException('信令地址缺少主机名或 IP');
+  }
+  if (!isValidRoomCode(roomCode)) {
+    throw const FormatException('连接码必须是 6 位数字');
+  }
+
+  return baseUri.replace(
+    queryParameters: {
+      ...baseUri.queryParameters,
+      'room': roomCode,
+      'role': role.name,
+    },
+  );
+}

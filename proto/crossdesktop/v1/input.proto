@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package crossdesktop.v1;
+
+option java_multiple_files = true;
+option java_package = "com.crossdesktopremote.protocol.v1";
+option java_outer_classname = "InputProto";
+
+enum RemotePointerMode {
+  REMOTE_POINTER_MODE_UNSPECIFIED = 0;
+  REMOTE_POINTER_MODE_ABSOLUTE = 1;
+  REMOTE_POINTER_MODE_RELATIVE = 2;
+}
+
+enum RemotePointerPhase {
+  REMOTE_POINTER_PHASE_UNSPECIFIED = 0;
+  REMOTE_POINTER_PHASE_MOVE = 1;
+  REMOTE_POINTER_PHASE_DOWN = 2;
+  REMOTE_POINTER_PHASE_UP = 3;
+  REMOTE_POINTER_PHASE_SCROLL = 4;
+}
+
+enum RemotePointerButton {
+  REMOTE_POINTER_BUTTON_UNSPECIFIED = 0;
+  REMOTE_POINTER_BUTTON_LEFT = 1;
+  REMOTE_POINTER_BUTTON_RIGHT = 2;
+  REMOTE_POINTER_BUTTON_MIDDLE = 3;
+}
+
+message RemoteDisplayDescriptor {
+  string display_id = 1;
+  string name = 2;
+  uint32 pixel_width = 3;
+  uint32 pixel_height = 4;
+  bool is_primary = 5;
+}
+
+message RemoteDisplayListChanged {
+  repeated RemoteDisplayDescriptor displays = 1;
+  string selected_display_id = 2;
+}
+
+message RemotePointerInput {
+  uint32 protocol_version = 1;
+  uint64 sequence = 2;
+  string display_id = 3;
+  RemotePointerMode mode = 4;
+  RemotePointerPhase phase = 5;
+  RemotePointerButton button = 6;
+  double normalized_x = 7;
+  double normalized_y = 8;
+  double movement_x = 9;
+  double movement_y = 10;
+  double scroll_x = 11;
+  double scroll_y = 12;
+  uint32 click_count = 13;
+}
+
+message RemoteKeyboardInput {
+  uint32 protocol_version = 1;
+  uint64 sequence = 2;
+  string phase = 3;
+  string key = 4;
+  repeated string modifiers = 5;
+  string committed_text = 6;
+}
+
+message RemoteHostControlStatus {
+  uint32 protocol_version = 1;
+  bool screen_capture_granted = 2;
+  bool accessibility_granted = 3;
+  string error_code = 4;
+}

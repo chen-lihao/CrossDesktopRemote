@@ -5,4 +5,6 @@
 
 控制平面只负责身份、设备、授权、信令、策略和审计，不处理视频热路径。
 
-当前 Spring Boot 基座已接入本地 PostgreSQL/Redis 和 Flyway V1；测试、`local` profile 启动及 Actuator 健康检查均通过。最小安全策略匿名放行健康检查并默认拒绝其他请求。身份、设备、会话授权、WebSocket 信令、策略和审计业务仍未实现。
+当前 Spring Boot 基座已接入本地 PostgreSQL/Redis 和 Flyway V1；测试、`local` profile 启动及 Actuator 健康检查均通过。`/ws/signaling` 开发态双端房间只接受六位连接码、host/controller 两个角色、白名单消息类型和 64KiB 消息上限。Mac 必须先注册连接码；连接码 5 分钟有效、只允许一个控制端成功消费，并对同一来源一分钟内 5 次失败尝试限流，相关单元和真实 WebSocket 集成测试已通过。
+
+该信令端点仅用于局域网原型。TTL、单次消费和限流目前只在单 JVM 内存中实现；尚无用户身份、设备签名、独立短期会话票据、Redis 跨实例路由或 WSS，不能部署到公网。其他 HTTP 路径仍默认拒绝。

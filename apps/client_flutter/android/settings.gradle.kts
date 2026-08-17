@@ -17,6 +17,18 @@ pluginManagement {
     }
 }
 
+dependencyResolutionManagement {
+    repositories {
+        maven {
+            name = "JitPackAudioSwitch"
+            url = uri("https://jitpack.io")
+            content {
+                includeGroup("com.github.davidliu")
+            }
+        }
+    }
+}
+
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
     id("com.android.application") version "9.1.0" apply false

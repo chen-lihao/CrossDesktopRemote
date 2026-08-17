@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已建立并通过本机统一验收。** PostgreSQL、Redis、coturn、Java/Flyway、Protobuf 三语言生成、Rust C ABI、Flutter 响应式壳层、macOS/Android/iOS Simulator 构建均已验证。远程采集、硬编、WebRTC 媒体闭环和输入控制尚未实现。
+> 当前状态：**M0 工程基线已完成，M1 iPad→Mac 局域网原型进行中。** 已建立五分钟有效、单次消费并按来源限流的开发态连接码，验证成功后被控端自动建立 WebRTC；客户端已支持 Mac 控制/共享角色切换、应用级消息反馈、触控板/直接触控、可见软键盘、适应/填满/沉浸全屏、720p/1080p/2K/原画档位和单路多显示器切换。macOS 和 iOS 真机目标构建通过；系统权限与真实输入仍需物理双设备人工验收。
 
 ## 项目定位
 
@@ -78,6 +78,7 @@ flowchart LR
 
 - Java 控制平面负责身份、设备、授权、信令、策略和审计，不处理正常会话的视频转码。
 - Flutter 负责页面、状态和响应式布局，不接收或逐帧绘制 RGBA/YUV 数据。
+- M1 Apple 原型由 `flutter_webrtc` 在原生层完成媒体与视频视图，Dart 只管理会话和小型控制消息；阶段结束后再根据性能数据决定是否替换插件路径。
 - 视频走原生 GPU 采集、硬编、WebRTC、硬解和原生 Texture 路径。
 - 屏幕、输入、文件和剪贴板优先在两端 P2P 传输；TURN 只转发加密数据。
 - coturn 独立部署，不使用 Java 重写 STUN/TURN 数据面。
@@ -88,7 +89,7 @@ flowchart LR
 | --- | --- | --- |
 | 跨端 UI | Flutter / Dart | 桌面、手机、平板的页面、状态和响应式交互 |
 | 客户端核心 | Rust | 会话、协议、权限、安全、文件、剪贴板和传输抽象 |
-| 实时传输 | WebRTC | ICE、STUN/TURN、RTP、DataChannel 和拥塞控制 |
+| 实时传输 | WebRTC；原型使用 `flutter_webrtc` 1.6.x | ICE、STUN/TURN、RTP、DataChannel、Apple 原生渲染和拥塞控制 |
 | Windows | C/C++、DXGI、Windows Graphics Capture | 采集、输入、系统服务和硬件媒体 |
 | macOS/iOS | Swift、ScreenCaptureKit、VideoToolbox | Apple 平台捕获、媒体、权限和系统集成 |
 | Linux | C/C++、PipeWire、XDG Portal、X11 | Wayland/X11 捕获、输入和硬件媒体 |
@@ -111,7 +112,7 @@ flowchart LR
 
 ## 仓库结构
 
-当前目录边界、三类主要工程、协议生成、本地基础设施和统一验收入口已经建立；平台采集/输入适配和端到端媒体功能仍未实现：
+当前目录边界、三类主要工程、协议生成、本地基础设施和统一验收入口已经建立；Apple 纵向原型已进入双设备人工验收，其他平台媒体适配仍未实现：
 
 ```text
 CrossDesktopRemote/
@@ -195,6 +196,25 @@ SPRING_PROFILES_ACTIVE=local \
 curl http://localhost:8080/actuator/health
 ```
 
+运行 iPad→Mac 局域网原型：
+
+```bash
+# 终端 1：保持 Java 信令服务运行
+SPRING_PROFILES_ACTIVE=local \
+  ./services/control-plane-java/gradlew \
+  -p services/control-plane-java \
+  bootRun
+
+# 终端 2：启动 Flutter 客户端；Mac 可选择“共享本机”或“控制其他设备”
+cd apps/client_flutter
+flutter run -d macos
+
+# iPad 控制端（替换为 flutter devices 显示的设备 ID）
+flutter run -d <ipad-device-id>
+```
+
+Mac 选择“共享本机”，先点击“设置远程输入权限”，然后点击“开始共享本机”；iPad 的“附近设备”会通过 Bonjour 自动显示被控端，点击后只需输入相同六位连接码。未过期的正确连接码验证成功后自动建立会话，不再需要被控端二次允许。如果网络禁止 mDNS，仍可从“控制端可用连接地址”列表选择对应 Wi-Fi/有线地址手动输入。macOS 的屏幕录制和事件注入权限必须由本机用户在系统设置中授予；未授权时会话降级为仅观看。当前连接码信令只用于开发环境，不可暴露到公网。
+
 执行完整 M0 基线验收：
 
 ```bash
@@ -228,9 +248,9 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter | 响应式壳层、`analyze`、3 个测试、macOS/Android/iOS Simulator build | Windows、Linux 尚未在对应系统构建；实际设备运行待验证 |
+| Flutter | 响应式壳层、持久会话、Apple Bonjour、角色切换、全局消息、动态画面/全屏、触控与可见键盘、清晰度档位和单路多屏切换；`analyze`、16 个常规测试、macOS/iOS 真机目标 build | 系统权限、真实输入和多屏需物理双设备复验；Windows、Linux 尚未构建 |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
-| Java | PostgreSQL/Redis local/test 配置、Flyway V1、测试、启动和健康检查 | 身份、设备、会话、信令等业务 API 尚未实现 |
+| Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、每来源限流和 8 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |
 | Infrastructure | PostgreSQL、Redis、coturn Compose 均健康 | 当前仅本地开发配置；生产密钥、TLS、高可用尚未配置 |
 
@@ -241,6 +261,7 @@ flutter build ios --simulator --debug
 - [项目进展情况.md](./项目进展情况.md)
 - [AGENT.md](./AGENT.md)
 - [工程搭建说明](./docs/工程搭建.md)
+- [局域网发现与跨平台适配](./docs/局域网发现与跨平台适配.md)
 
 ## 工程复现方式
 
@@ -293,4 +314,4 @@ flutter build ios --simulator --debug
 
 ## 当前里程碑
 
-当前位于 **M0：立项与技术风险准备**。工程基线已通过本机统一验收；下一步进入 **M1 Windows 性能原型**，建立 DXGI/Windows Graphics Capture → H.264 硬编 → WebRTC → 硬解/原生纹理 → 输入回传闭环，并补做 Windows/Linux 原生构建、Android 真机 FFI 和 macOS 动态库应用打包验证。
+当前位于 **M1：iPad 控制 Mac 局域网纵向原型**。选择 Apple 设备组合是为了让单人开发先完成第一个真实远控闭环。下一门禁是物理 iPad 与 Mac 在同一局域网完成 720p30 画面、点击/拖动/滚动、10 分钟资源稳定和断线释放；通过后再优化 1080p60、TURN 和 30 分钟稳定性，随后进入 Windows GPU 性能原型。

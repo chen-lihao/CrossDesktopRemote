@@ -22,7 +22,7 @@ class SettingsPage extends StatelessWidget {
               ListTile(
                 leading: Icon(Icons.speed_outlined),
                 title: Text('画质与性能'),
-                subtitle: Text('自动协商，MVP 默认目标为 1080p60'),
+                subtitle: Text('支持自动、720p、1080p、2K 和原画档位'),
               ),
             ],
           ),

@@ -10,7 +10,7 @@
 | `build-rust-core-android.sh` | 使用 cargo-ndk 构建 Android 三个 ABI 的 Rust 动态库 | 是，三个 `.so` 已打包进 Debug APK |
 | `generate-proto.sh` | 生成 Java、Dart、Rust Protobuf v1 绑定 | 是，三语言检查通过 |
 | `dev-up.sh` | 启动并等待 PostgreSQL、Redis、coturn 健康 | 是，三个服务健康 |
-| `check-all.sh` | 执行 infra、Proto、Rust、Java、Flutter 基线验收 | 是，全流程通过 |
+| `check-all.sh` | 执行 infra、Proto、Rust、Java、Flutter、macOS/iOS Simulator/Android 基线验收 | 是；Apple 原型接入后全流程通过 |
 
 所有脚本都应从仓库内执行，并在目标工程已存在时停止或跳过，避免覆盖已有实现。
 

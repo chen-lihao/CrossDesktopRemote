@@ -1,5 +1,5 @@
 name: cross_desktop_remote
-description: "A new Flutter project."
+description: "Cross-platform remote desktop controller and host client."
 publish_to: 'none'
 version: 0.1.0+1
 
@@ -10,6 +10,7 @@ dependencies:
   fixnum: ^1.1.1
   flutter:
     sdk: flutter
+  flutter_webrtc: ^1.6.0
   protobuf: ^6.0.0
 
 dev_dependencies:

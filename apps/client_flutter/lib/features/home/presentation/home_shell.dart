@@ -1,4 +1,11 @@
+import 'dart:async';
+
+import 'package:cross_desktop_remote/core/discovery/lan_discovery_service.dart';
+import 'package:cross_desktop_remote/core/platform/device_capabilities.dart';
+import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
+import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/devices/presentation/devices_page.dart';
+import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/sessions/presentation/sessions_page.dart';
 import 'package:cross_desktop_remote/features/settings/presentation/settings_page.dart';
 import 'package:flutter/material.dart';
@@ -12,7 +19,7 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   static const _desktopBreakpoint = 840.0;
 
   static const _destinations = <NavigationDestination>[
@@ -33,9 +40,64 @@ class _HomeShellState extends State<HomeShell> {
     ),
   ];
 
-  static const _pages = <Widget>[DevicesPage(), SessionsPage(), SettingsPage()];
-
   int _selectedIndex = HomeSection.devices.index;
+  late final DeviceCapabilities _capabilities;
+  late RemoteRole _role;
+  late RemoteSessionController _session;
+  late LanDiscoveryService _discovery;
+  late List<Widget> _pages;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _capabilities = DeviceCapabilities.current();
+    _role = _capabilities.canHost ? RemoteRole.host : RemoteRole.controller;
+    _createWorkspace();
+  }
+
+  void _createWorkspace() {
+    _session = RemoteSessionController(role: _role);
+    _discovery = createLanDiscoveryService();
+    _pages = <Widget>[
+      DevicesPage(
+        session: _session,
+        discoveryService: _discovery,
+        capabilities: _capabilities,
+        onRoleChanged: _changeRole,
+      ),
+      SessionsPage(session: _session),
+      const SettingsPage(),
+    ];
+  }
+
+  void _changeRole(RemoteRole nextRole) {
+    if (nextRole == _role ||
+        (nextRole == RemoteRole.host && !_capabilities.canHost) ||
+        (nextRole == RemoteRole.controller && !_capabilities.canControl)) {
+      return;
+    }
+    final previousSession = _session;
+    final previousDiscovery = _discovery;
+    setState(() {
+      _role = nextRole;
+      _selectedIndex = HomeSection.devices.index;
+      _createWorkspace();
+    });
+    previousSession.dispose();
+    unawaited(previousDiscovery.dispose());
+    AppMessenger.show(
+      nextRole == RemoteRole.host ? '已切换为共享本机' : '已切换为控制其他设备',
+      level: AppMessageLevel.success,
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_session.refreshHostPermissions());
+    }
+  }
 
   void _select(int index) {
     setState(() => _selectedIndex = index);
@@ -74,7 +136,12 @@ class _HomeShellState extends State<HomeShell> {
                         .toList(growable: false),
                   ),
                   const VerticalDivider(width: 1),
-                  Expanded(child: _pages[_selectedIndex]),
+                  Expanded(
+                    child: IndexedStack(
+                      index: _selectedIndex,
+                      children: _pages,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -89,7 +156,9 @@ class _HomeShellState extends State<HomeShell> {
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          body: SafeArea(child: _pages[_selectedIndex]),
+          body: SafeArea(
+            child: IndexedStack(index: _selectedIndex, children: _pages),
+          ),
           bottomNavigationBar: NavigationBar(
             selectedIndex: _selectedIndex,
             onDestinationSelected: _select,
@@ -98,5 +167,13 @@ class _HomeShellState extends State<HomeShell> {
         );
       },
     );
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(_discovery.dispose());
+    _session.dispose();
+    super.dispose();
   }
 }

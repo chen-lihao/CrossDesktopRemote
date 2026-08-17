@@ -9,6 +9,7 @@ proto_files=(
     "$proto_root/crossdesktop/v1/common.proto"
     "$proto_root/crossdesktop/v1/capability.proto"
     "$proto_root/crossdesktop/v1/device.proto"
+    "$proto_root/crossdesktop/v1/input.proto"
     "$proto_root/crossdesktop/v1/session.proto"
     "$proto_root/crossdesktop/v1/signaling.proto"
 )

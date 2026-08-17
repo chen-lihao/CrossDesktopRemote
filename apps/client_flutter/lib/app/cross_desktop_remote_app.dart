@@ -1,5 +1,6 @@
 import 'package:cross_desktop_remote/app/routes.dart';
 import 'package:cross_desktop_remote/app/theme.dart';
+import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:flutter/material.dart';
 
 class CrossDesktopRemoteApp extends StatelessWidget {
@@ -10,6 +11,7 @@ class CrossDesktopRemoteApp extends StatelessWidget {
     return MaterialApp(
       title: 'CrossDesktopRemote',
       debugShowCheckedModeBanner: false,
+      scaffoldMessengerKey: AppMessenger.scaffoldMessengerKey,
       theme: CrossDesktopTheme.light(),
       darkTheme: CrossDesktopTheme.dark(),
       themeMode: ThemeMode.system,

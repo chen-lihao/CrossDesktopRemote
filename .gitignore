@@ -40,6 +40,7 @@ target/
 
 # Java / Gradle
 .gradle/
+**/gradle/gradle-daemon-jvm.properties
 **/build/
 out/
 *.class

@@ -59,6 +59,8 @@ fi
     "$flutter_bin_dir/flutter" analyze
     CROSSDESKTOP_CORE_LIBRARY="$core_library" "$flutter_bin_dir/flutter" test
     "$flutter_bin_dir/flutter" build macos --debug
+    "$flutter_bin_dir/flutter" build ios --simulator --debug
+    test -d "$repo_root/apps/client_flutter/build/ios/Debug-iphonesimulator/Runner.app"
     "$flutter_bin_dir/flutter" build apk --debug
 )
 

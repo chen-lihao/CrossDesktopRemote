@@ -8,6 +8,7 @@ fn main() {
         "common.proto",
         "capability.proto",
         "device.proto",
+        "input.proto",
         "session.proto",
         "signaling.proto",
     ]

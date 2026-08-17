@@ -11,7 +11,7 @@ public class SecurityConfiguration {
 	@Bean
 	SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
 		http.authorizeHttpRequests(authorize -> authorize
-				.requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
+				.requestMatchers("/actuator/health", "/actuator/health/**", "/ws/signaling").permitAll()
 				.anyRequest().denyAll());
 
 		return http.build();

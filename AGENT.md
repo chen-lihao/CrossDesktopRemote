@@ -19,7 +19,7 @@ git status --short --branch
 rg --files
 ```
 
-仓库当前已完成 M0 工程基线。Java/Flyway、Flutter 响应式壳层、Rust C ABI、Protobuf 三语言生成、本地 PostgreSQL/Redis/coturn 及统一检查已在 macOS 开发机通过；macOS、Android 和 iOS Simulator 构建也已验证。不得把“工程基线通过”声称为远程桌面业务功能或跨平台发布已经完成。
+仓库当前已完成 M0 工程基线，并进入 M1 iPad→Mac 局域网原型。开发态连接码已有 5 分钟 TTL、单次消费和每来源限流，验证后自动建立 WebRTC；动态比例/全屏、触控板/直接触控、软键盘、Mac 权限状态和单路多显示器切换已编码。macOS、iOS Simulator 和物理 iPad 构建通过。真实双设备输入、多屏热插拔和稳定性仍需人工验收，不得声称完整远控或生产安全已经完成。
 
 ## 2. 固定技术决策
 
@@ -43,6 +43,7 @@ rg --files
 - 不用 Dart Canvas 重绘实时 2K/4K 视频。
 - 不在 UI isolate 执行文件哈希、编解码、网络重传或大文件读写。
 - 视频通过原生 Texture/Platform View 显示。
+- M1 Apple 原型允许锁定使用 `flutter_webrtc 1.6.x` 缩短单人验证周期；它只能承载原生媒体/传输和小型控制消息，不改变视频帧不得进入 Dart 堆的规则。
 
 ### Rust Core
 
@@ -132,6 +133,7 @@ rg --files
 - Rust：fmt、clippy、unit/integration test，协议和文件解析增加 fuzz/property test。
 - Java：format/checkstyle、unit/integration test、数据库迁移、WebSocket 压测。
 - Native：目标系统编译、权限、热插拔、设备重置和内存/线程检查。
+- 局域网发现：业务层仅依赖 `LanDiscoveryService`；平台层使用 DNS-SD/mDNS 系统 API，不允许子网扫描或在 TXT 中发布凭据。
 - 协议：新旧版本互操作、大小限制、错误输入和超时。
 - 性能：记录硬件、OS、驱动、网络、内容、码率和各阶段指标。
 
