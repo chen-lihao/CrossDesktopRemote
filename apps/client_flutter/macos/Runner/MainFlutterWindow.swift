@@ -7,6 +7,9 @@ class MainFlutterWindow: NSWindow {
   private var inputChannel: FlutterMethodChannel?
   private var lanDiscoveryBridge: AppleLanDiscoveryBridge?
   private var pressedMouseButtons: Set<String> = []
+  private var captureColorDiagnostics: [String: Any] = [:]
+  private var colorDiagnosticsObserver: NSObjectProtocol?
+  private var grayscaleTestPanel: NSPanel?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -16,6 +19,13 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    colorDiagnosticsObserver = NotificationCenter.default.addObserver(
+      forName: Notification.Name("CrossDesktopRemoteCaptureColorDiagnostics"),
+      object: nil,
+      queue: .main
+    ) { [weak self] notification in
+      self?.captureColorDiagnostics = notification.userInfo as? [String: Any] ?? [:]
+    }
     registerInputChannel(binaryMessenger: flutterViewController.engine.binaryMessenger)
     lanDiscoveryBridge = AppleLanDiscoveryBridge(
       binaryMessenger: flutterViewController.engine.binaryMessenger
@@ -44,6 +54,13 @@ class MainFlutterWindow: NSWindow {
         result(self.openInputSettings())
       case "listDisplays":
         result(self.listDisplays())
+      case "getColorDiagnostics":
+        result(self.getColorDiagnostics())
+      case "showGrayscaleTestPattern":
+        self.showGrayscaleTestPattern()
+        result(nil)
+      case "openDisplaySettings":
+        result(self.openDisplaySettings())
       case "pointer":
         self.handlePointer(arguments: call.arguments, result: result)
       case "keyboard":
@@ -56,6 +73,12 @@ class MainFlutterWindow: NSWindow {
       }
     }
     inputChannel = channel
+  }
+
+  deinit {
+    if let colorDiagnosticsObserver {
+      NotificationCenter.default.removeObserver(colorDiagnosticsObserver)
+    }
   }
 
   private func hasInputAccess() -> Bool {
@@ -78,6 +101,15 @@ class MainFlutterWindow: NSWindow {
   private func openInputSettings() -> Bool {
     guard let url = URL(
       string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    ) else {
+      return false
+    }
+    return NSWorkspace.shared.open(url)
+  }
+
+  private func openDisplaySettings() -> Bool {
+    guard let url = URL(
+      string: "x-apple.systempreferences:com.apple.Displays-Settings.extension"
     ) else {
       return false
     }
@@ -318,6 +350,113 @@ class MainFlutterWindow: NSWindow {
         "height": Int(bounds.height),
         "isPrimary": displayId == CGMainDisplayID()
       ]
+    }
+  }
+
+  private func getColorDiagnostics() -> [String: Any] {
+    let displays = NSScreen.screens.compactMap { screen -> [String: Any]? in
+      guard let number = screen.deviceDescription[
+        NSDeviceDescriptionKey("NSScreenNumber")
+      ] as? NSNumber else {
+        return nil
+      }
+      let currentHeadroom = Double(screen.maximumExtendedDynamicRangeColorComponentValue)
+      let potentialHeadroom = Double(
+        screen.maximumPotentialExtendedDynamicRangeColorComponentValue
+      )
+      return [
+        "id": String(number.uint32Value),
+        "name": screen.localizedName,
+        "colorSpace": screen.colorSpace?.localizedName ?? "Unknown",
+        "hdrActive": currentHeadroom > 1.001,
+        "hdrCapable": potentialHeadroom > 1.001,
+        "currentEdrHeadroom": currentHeadroom,
+        "potentialEdrHeadroom": potentialHeadroom
+      ]
+    }
+    return [
+      "capture": captureColorDiagnostics,
+      "displays": displays
+    ]
+  }
+
+  private func showGrayscaleTestPattern() {
+    if grayscaleTestPanel == nil {
+      let panel = NSPanel(
+        contentRect: NSRect(x: 0, y: 0, width: 900, height: 520),
+        styleMask: [.titled, .closable, .resizable],
+        backing: .buffered,
+        defer: false
+      )
+      panel.title = "CrossDesktopRemote SDR 灰阶诊断"
+      panel.contentMinSize = NSSize(width: 720, height: 420)
+      panel.contentView = GrayscaleTestPatternView()
+      panel.isReleasedWhenClosed = false
+      grayscaleTestPanel = panel
+    }
+    grayscaleTestPanel?.center()
+    grayscaleTestPanel?.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+  }
+}
+
+private final class GrayscaleTestPatternView: NSView {
+  private let levels = [
+    0, 16, 32, 64, 96, 128, 160, 192,
+    219, 223, 227, 231, 235, 239, 243, 247, 251, 255
+  ]
+
+  override var isFlipped: Bool { true }
+
+  override func draw(_ dirtyRect: NSRect) {
+    super.draw(dirtyRect)
+    NSColor.black.setFill()
+    bounds.fill()
+
+    let titleAttributes: [NSAttributedString.Key: Any] = [
+      .font: NSFont.boldSystemFont(ofSize: 20),
+      .foregroundColor: NSColor.white
+    ]
+    let bodyAttributes: [NSAttributedString.Key: Any] = [
+      .font: NSFont.systemFont(ofSize: 13),
+      .foregroundColor: NSColor.white
+    ]
+    NSString(string: "SDR / Rec.709 灰阶诊断").draw(
+      at: NSPoint(x: 24, y: 20),
+      withAttributes: titleAttributes
+    )
+    NSString(string: "重点确认 235～255 每一格仍可区分；若合并成纯白，说明采集或 Range 映射仍有裁切。").draw(
+      at: NSPoint(x: 24, y: 52),
+      withAttributes: bodyAttributes
+    )
+
+    let columns = 6
+    let spacing: CGFloat = 10
+    let originY: CGFloat = 90
+    let patchWidth = (bounds.width - 48 - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+    let rows = Int(ceil(Double(levels.count) / Double(columns)))
+    let patchHeight = (bounds.height - originY - 28 - spacing * CGFloat(rows - 1)) / CGFloat(rows)
+
+    for (index, level) in levels.enumerated() {
+      let row = index / columns
+      let column = index % columns
+      let rect = NSRect(
+        x: 24 + CGFloat(column) * (patchWidth + spacing),
+        y: originY + CGFloat(row) * (patchHeight + spacing),
+        width: patchWidth,
+        height: patchHeight
+      )
+      let component = CGFloat(level) / 255
+      NSColor(srgbRed: component, green: component, blue: component, alpha: 1).setFill()
+      NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
+      let labelColor: NSColor = level >= 160 ? .black : .white
+      NSString(string: String(level)).draw(
+        at: NSPoint(x: rect.minX + 10, y: rect.minY + 8),
+        withAttributes: [
+          .font: NSFont.monospacedDigitSystemFont(ofSize: 14, weight: .semibold),
+          .foregroundColor: labelColor
+        ]
+      )
     }
   }
 }

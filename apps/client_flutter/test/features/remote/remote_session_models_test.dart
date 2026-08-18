@@ -43,4 +43,34 @@ void main() {
       );
     },
   );
+
+  test('color diagnostics preserve range and per-display HDR state', () {
+    final diagnostics = RemoteColorDiagnostics.fromMessage({
+      'capture': {
+        'pixelFormat': '420v/NV12',
+        'range': 'Video Range',
+        'colorPrimaries': 'ITU_R_709_2',
+        'transferFunction': 'ITU_R_709_2',
+        'yCbCrMatrix': 'ITU_R_709_2',
+        'colorSpace': 'ITU-R BT.709',
+        'captureDynamicRange': 'SDR',
+      },
+      'displays': [
+        {
+          'id': '2',
+          'name': 'Studio Display',
+          'colorSpace': 'Display P3',
+          'hdrActive': true,
+          'hdrCapable': true,
+          'currentEdrHeadroom': 1.6,
+          'potentialEdrHeadroom': 2.0,
+        },
+      ],
+    });
+
+    expect(diagnostics.pixelFormat, '420v/NV12');
+    expect(diagnostics.range, 'Video Range');
+    expect(diagnostics.captureDynamicRange, 'SDR');
+    expect(diagnostics.forDisplay('2')?.hdrActive, isTrue);
+  });
 }

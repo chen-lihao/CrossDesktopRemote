@@ -68,12 +68,14 @@ class RemoteSessionController extends ChangeNotifier {
   int _droppedMotionEvents = 0;
   double? _inputRoundTripMs;
   String? _selectedDisplayId;
+  String? _remoteDeviceId;
   String? _controlError;
   String? _error;
   DateTime? _lastControlUnavailableNotice;
   RemoteQualityProfile _selectedQuality = RemoteQualityProfile.automatic;
   int? _actualVideoWidth;
   int? _actualVideoHeight;
+  RemoteColorDiagnostics? _colorDiagnostics;
   String _statusMessage = '尚未连接';
   RemoteSessionState _state = RemoteSessionState.idle;
 
@@ -99,6 +101,8 @@ class RemoteSessionController extends ChangeNotifier {
 
   List<RemoteDisplay> get displays => _displays;
   String? get selectedDisplayId => _selectedDisplayId;
+  String? get remoteDeviceId => _remoteDeviceId;
+  RemoteColorDiagnostics? get colorDiagnostics => _colorDiagnostics;
   RemoteDisplay? get selectedDisplay {
     for (final display in _displays) {
       if (display.id == _selectedDisplayId) {
@@ -414,6 +418,26 @@ class RemoteSessionController extends ChangeNotifier {
     }
   }
 
+  void refreshColorDiagnostics() {
+    if (role == RemoteRole.controller) {
+      _sendControl({'type': 'refresh-color-diagnostics', 'version': 2});
+    }
+  }
+
+  void showRemoteGrayscaleTestPattern() {
+    if (role == RemoteRole.controller) {
+      _sendControl({'type': 'show-grayscale-test', 'version': 2});
+      _emitNotice('已要求被控 Mac 显示 SDR 灰阶图');
+    }
+  }
+
+  void openRemoteDisplaySettings() {
+    if (role == RemoteRole.controller) {
+      _sendControl({'type': 'open-display-settings', 'version': 2});
+      _emitNotice('已要求被控 Mac 打开显示器设置');
+    }
+  }
+
   Future<void> _createPeerConnection() async {
     final peerConnection = await createPeerConnection({
       'iceServers': <Map<String, dynamic>>[],
@@ -498,10 +522,12 @@ class RemoteSessionController extends ChangeNotifier {
           _publishHostState();
           _publishDisplayList();
           _publishQualityState();
+          unawaited(_publishColorDiagnostics());
         } else {
           refreshRemoteStatus();
           refreshRemoteDisplays();
           _sendControl({'type': 'refresh-quality', 'version': 2});
+          refreshColorDiagnostics();
         }
       } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
         unawaited(_releaseHostPointerButtons());
@@ -610,6 +636,12 @@ class RemoteSessionController extends ChangeNotifier {
         );
       case 'refresh-quality':
         _publishQualityState();
+      case 'refresh-color-diagnostics':
+        await _publishColorDiagnostics();
+      case 'show-grayscale-test':
+        await _inputBridge.showGrayscaleTestPattern();
+      case 'open-display-settings':
+        await _inputBridge.openDisplaySettings();
     }
   }
 
@@ -625,6 +657,7 @@ class RemoteSessionController extends ChangeNotifier {
     switch (message['type']) {
       case 'host-status':
         final previousInputAccess = _accessibilityGranted;
+        _remoteDeviceId = message['deviceId'] as String?;
         _screenCaptureGranted =
             message['screenCaptureGranted'] as bool? ?? false;
         _accessibilityGranted =
@@ -675,6 +708,17 @@ class RemoteSessionController extends ChangeNotifier {
         final messageText = message['message'] as String? ?? '画质切换失败';
         notifyListeners();
         _emitNotice(messageText, level: RemoteNoticeLevel.error);
+      case 'color-diagnostics':
+        final value = message['diagnostics'];
+        if (value is Map<String, dynamic>) {
+          _colorDiagnostics = RemoteColorDiagnostics.fromMessage(value);
+          notifyListeners();
+        }
+      case 'color-diagnostics-error':
+        _emitNotice(
+          message['message'] as String? ?? '读取被控设备色彩诊断失败',
+          level: RemoteNoticeLevel.warning,
+        );
       case 'input-ack':
         final sentAtMicros = (message['echoedSentAtUnixMicros'] as num?)
             ?.toInt();
@@ -740,10 +784,29 @@ class RemoteSessionController extends ChangeNotifier {
     _sendControl({
       'type': 'host-status',
       'version': 2,
+      'deviceId': Platform.localHostname.toLowerCase(),
       'screenCaptureGranted': _screenCaptureGranted,
       'accessibilityGranted': _accessibilityGranted == true,
       'inputReady': _accessibilityGranted == true,
     });
+  }
+
+  Future<void> _publishColorDiagnostics() async {
+    if (role != RemoteRole.host || !Platform.isMacOS) return;
+    try {
+      final diagnostics = await _inputBridge.getColorDiagnostics();
+      _sendControl({
+        'type': 'color-diagnostics',
+        'version': 2,
+        'diagnostics': diagnostics,
+      });
+    } catch (error) {
+      _sendControl({
+        'type': 'color-diagnostics-error',
+        'version': 2,
+        'message': '读取 Mac 色彩诊断失败：$error',
+      });
+    }
   }
 
   void _publishDisplayList() {
@@ -967,6 +1030,7 @@ class RemoteSessionController extends ChangeNotifier {
     _subscribeToDisplayChanges();
     _publishHostState();
     _publishDisplayList();
+    unawaited(_publishColorDiagnostics());
     notifyListeners();
   }
 
@@ -1063,6 +1127,12 @@ class RemoteSessionController extends ChangeNotifier {
     });
     await _applyVideoQuality(_selectedQuality);
     _publishDisplayList();
+    unawaited(
+      Future<void>.delayed(
+        const Duration(milliseconds: 300),
+        _publishColorDiagnostics,
+      ),
+    );
     notifyListeners();
   }
 
@@ -1172,6 +1242,8 @@ class RemoteSessionController extends ChangeNotifier {
     _displaySources = const [];
     _displays = const [];
     _selectedDisplayId = null;
+    _remoteDeviceId = null;
+    _colorDiagnostics = null;
     _screenCaptureGranted = false;
     if (role == RemoteRole.controller) {
       _accessibilityGranted = null;

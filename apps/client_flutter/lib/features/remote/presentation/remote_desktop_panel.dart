@@ -5,7 +5,9 @@ import 'package:cross_desktop_remote/core/input/remote_ime_input_adapter.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/remote_composed_text_editor.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_desktop_geometry.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/remote_display_adjustment.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_pointer_event_coalescer.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_text_input_synchronizer.dart';
@@ -163,6 +165,195 @@ Future<void> _showRemoteInputSettings(
   );
 }
 
+Future<void> _showRemoteDisplayAdjustment(
+  BuildContext context, {
+  required RemoteDisplayAdjustmentController adjustment,
+  required RemoteSessionController session,
+}) {
+  session.refreshColorDiagnostics();
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (context) => AnimatedBuilder(
+      animation: session,
+      builder: (context, _) => ValueListenableBuilder<RemoteDisplayAdjustment>(
+        valueListenable: adjustment,
+        builder: (context, value, _) {
+          final diagnostics = session.colorDiagnostics;
+          final display = diagnostics?.forDisplay(session.selectedDisplayId);
+          return SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(
+              20,
+              0,
+              20,
+              MediaQuery.viewInsetsOf(context).bottom + 24,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('显示调整', style: Theme.of(context).textTheme.titleLarge),
+                const SizedBox(height: 6),
+                const Text('设置按远程设备和显示器独立保存。采集端已裁切的高光无法在这里恢复。'),
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final mode in RemoteDisplayAdjustmentMode.values)
+                      ChoiceChip(
+                        label: Text(mode.label),
+                        selected: value.mode == mode,
+                        onSelected: (_) => adjustment.setMode(mode),
+                      ),
+                  ],
+                ),
+                if (value.mode == RemoteDisplayAdjustmentMode.custom) ...[
+                  const SizedBox(height: 16),
+                  Text('亮度 ${(value.brightness * 100).round()}'),
+                  Slider(
+                    value: value.brightness,
+                    min: -0.25,
+                    max: 0.25,
+                    divisions: 20,
+                    onChanged: (next) =>
+                        adjustment.updateCustom(brightness: next),
+                  ),
+                  Text('对比度 ${value.contrast.toStringAsFixed(2)}×'),
+                  Slider(
+                    value: value.contrast,
+                    min: 0.7,
+                    max: 1.3,
+                    divisions: 24,
+                    onChanged: (next) =>
+                        adjustment.updateCustom(contrast: next),
+                  ),
+                  Text('饱和度 ${value.saturation.toStringAsFixed(2)}×'),
+                  Slider(
+                    value: value.saturation,
+                    min: 0,
+                    max: 1.5,
+                    divisions: 30,
+                    onChanged: (next) =>
+                        adjustment.updateCustom(saturation: next),
+                  ),
+                ],
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: adjustment.reset,
+                    icon: const Icon(Icons.restart_alt),
+                    label: const Text('恢复当前显示器默认值'),
+                  ),
+                ),
+                const Divider(height: 28),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '色彩诊断',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '刷新色彩诊断',
+                      onPressed: session.refreshColorDiagnostics,
+                      icon: const Icon(Icons.refresh),
+                    ),
+                  ],
+                ),
+                if (diagnostics == null)
+                  const Text('等待被控 Mac 返回采集和显示器色彩信息……')
+                else ...[
+                  _ColorDiagnosticRow(
+                    label: '像素格式 / Range',
+                    value: '${diagnostics.pixelFormat} · ${diagnostics.range}',
+                  ),
+                  _ColorDiagnosticRow(
+                    label: '色彩原色',
+                    value: diagnostics.colorPrimaries,
+                  ),
+                  _ColorDiagnosticRow(
+                    label: '传递函数',
+                    value: diagnostics.transferFunction,
+                  ),
+                  _ColorDiagnosticRow(
+                    label: 'YCbCr Matrix',
+                    value: diagnostics.yCbCrMatrix,
+                  ),
+                  _ColorDiagnosticRow(
+                    label: '采集色彩空间 / 动态范围',
+                    value:
+                        '${diagnostics.colorSpace} · ${diagnostics.captureDynamicRange}',
+                  ),
+                  _ColorDiagnosticRow(
+                    label: '当前 Mac 显示器',
+                    value: display == null
+                        ? 'Unknown'
+                        : '${display.name} · ${display.colorSpace}',
+                  ),
+                  _ColorDiagnosticRow(
+                    label: 'HDR / EDR',
+                    value: display == null
+                        ? 'Unknown'
+                        : '${display.hdrActive ? '已开启' : '未开启'} · '
+                              '当前 ${display.currentEdrHeadroom.toStringAsFixed(2)}× / '
+                              '潜力 ${display.potentialEdrHeadroom.toStringAsFixed(2)}×',
+                  ),
+                ],
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: session.showRemoteGrayscaleTestPattern,
+                      icon: const Icon(Icons.gradient_outlined),
+                      label: const Text('在 Mac 显示灰阶图'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: session.openRemoteDisplaySettings,
+                      icon: const Icon(Icons.monitor_outlined),
+                      label: const Text('打开 Mac 显示器设置'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'A/B 验证：临时切换 Mac HDR 后刷新诊断并观察同一画面；关闭 HDR 只用于定位，不是正式修复。',
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    ),
+  );
+}
+
+class _ColorDiagnosticRow extends StatelessWidget {
+  const _ColorDiagnosticRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 150, child: Text(label)),
+          Expanded(child: SelectableText(value)),
+        ],
+      ),
+    );
+  }
+}
+
 class RemoteDesktopPanel extends StatefulWidget {
   const RemoteDesktopPanel({super.key, required this.session});
 
@@ -175,8 +366,10 @@ class RemoteDesktopPanel extends StatefulWidget {
 class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
   final _surfaceKey = GlobalKey<_RemoteDesktopSurfaceState>();
   final _inputSettings = ValueNotifier(const RemoteInputSettings());
+  final _displayAdjustment = RemoteDisplayAdjustmentController();
   RemoteViewFit _viewFit = RemoteViewFit.contain;
   bool _rendererAttached = true;
+  String? _displayAdjustmentTarget;
 
   @override
   void initState() {
@@ -184,6 +377,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
     widget.session.addListener(_handleSessionStateChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
+        _syncDisplayAdjustmentTarget();
         _showGestureGuideOnce(context, _inputSettings.value.pointerMode);
       }
     });
@@ -198,6 +392,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
         builder: (_) => _FullScreenRemoteDesktopPage(
           session: widget.session,
           inputSettings: _inputSettings,
+          displayAdjustment: _displayAdjustment,
           initialViewFit: _viewFit,
         ),
       ),
@@ -212,6 +407,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
   void dispose() {
     widget.session.removeListener(_handleSessionStateChanged);
     _inputSettings.dispose();
+    _displayAdjustment.dispose();
     super.dispose();
   }
 
@@ -219,6 +415,20 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
     if (!widget.session.canSendControl && _inputSettings.value.dragLock) {
       _inputSettings.value = _inputSettings.value.copyWith(dragLock: false);
     }
+    _syncDisplayAdjustmentTarget();
+  }
+
+  void _syncDisplayAdjustmentTarget() {
+    final deviceId = widget.session.remoteDeviceId;
+    final displayId = widget.session.selectedDisplayId;
+    final target = deviceId == null || displayId == null
+        ? null
+        : '$deviceId/$displayId';
+    if (_displayAdjustmentTarget == target) return;
+    _displayAdjustmentTarget = target;
+    unawaited(
+      _displayAdjustment.selectTarget(deviceId: deviceId, displayId: displayId),
+    );
   }
 
   void _setPointerMode(RemotePointerMode value) {
@@ -276,6 +486,11 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
                       settings: _inputSettings,
                       session: widget.session,
                     ),
+                    onDisplayAdjustment: () => _showRemoteDisplayAdjustment(
+                      context,
+                      adjustment: _displayAdjustment,
+                      session: widget.session,
+                    ),
                     onFullScreen: _openFullScreen,
                   ),
                 ),
@@ -286,6 +501,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
                           key: _surfaceKey,
                           session: widget.session,
                           inputSettings: inputSettings,
+                          displayAdjustment: _displayAdjustment,
                           viewFit: _viewFit,
                           onDragLockChanged: (value) {
                             _inputSettings.value = inputSettings.copyWith(
@@ -335,11 +551,13 @@ class _FullScreenRemoteDesktopPage extends StatefulWidget {
   const _FullScreenRemoteDesktopPage({
     required this.session,
     required this.inputSettings,
+    required this.displayAdjustment,
     required this.initialViewFit,
   });
 
   final RemoteSessionController session;
   final ValueNotifier<RemoteInputSettings> inputSettings;
+  final RemoteDisplayAdjustmentController displayAdjustment;
   final RemoteViewFit initialViewFit;
 
   @override
@@ -407,6 +625,7 @@ class _FullScreenRemoteDesktopPageState
                 key: _surfaceKey,
                 session: widget.session,
                 inputSettings: inputSettings,
+                displayAdjustment: widget.displayAdjustment,
                 viewFit: _viewFit,
                 onDragLockChanged: (value) {
                   widget.inputSettings.value = inputSettings.copyWith(
@@ -451,6 +670,11 @@ class _FullScreenRemoteDesktopPageState
                       settings: widget.inputSettings,
                       session: widget.session,
                     ),
+                    onDisplayAdjustment: () => _showRemoteDisplayAdjustment(
+                      context,
+                      adjustment: widget.displayAdjustment,
+                      session: widget.session,
+                    ),
                     onFullScreen: () => Navigator.of(context).pop(),
                     isFullScreen: true,
                   ),
@@ -474,6 +698,7 @@ class _RemoteToolbar extends StatelessWidget {
     required this.onKeyboard,
     required this.onHelp,
     required this.onInputSettings,
+    required this.onDisplayAdjustment,
     required this.onFullScreen,
     this.leading,
     this.foregroundColor,
@@ -488,6 +713,7 @@ class _RemoteToolbar extends StatelessWidget {
   final VoidCallback onKeyboard;
   final VoidCallback onHelp;
   final VoidCallback onInputSettings;
+  final VoidCallback onDisplayAdjustment;
   final VoidCallback onFullScreen;
   final Widget? leading;
   final Color? foregroundColor;
@@ -660,6 +886,11 @@ class _RemoteToolbar extends StatelessWidget {
                         : const Icon(Icons.high_quality_outlined),
                   ),
                   IconButton(
+                    tooltip: '显示调整与色彩诊断',
+                    onPressed: onDisplayAdjustment,
+                    icon: const Icon(Icons.tonality_outlined),
+                  ),
+                  IconButton(
                     tooltip: session.canSendControl ? '远程键盘' : '远程键盘（等待输入权限）',
                     onPressed: onKeyboard,
                     icon: const Icon(Icons.keyboard_outlined),
@@ -694,12 +925,14 @@ class _RemoteDesktopSurface extends StatefulWidget {
     super.key,
     required this.session,
     required this.inputSettings,
+    required this.displayAdjustment,
     required this.viewFit,
     required this.onDragLockChanged,
   });
 
   final RemoteSessionController session;
   final RemoteInputSettings inputSettings;
+  final RemoteDisplayAdjustmentController displayAdjustment;
   final RemoteViewFit viewFit;
   final ValueChanged<bool> onDragLockChanged;
 
@@ -937,12 +1170,22 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
               fit: StackFit.expand,
               children: [
                 const ColoredBox(color: Colors.black),
-                RTCVideoView(
-                  session.remoteRenderer,
-                  key: ValueKey(widget.viewFit),
-                  objectFit: widget.viewFit == RemoteViewFit.contain
-                      ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
-                      : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                ValueListenableBuilder<RemoteDisplayAdjustment>(
+                  valueListenable: widget.displayAdjustment,
+                  builder: (context, adjustment, child) {
+                    if (adjustment.isIdentity) return child!;
+                    return ColorFiltered(
+                      colorFilter: ColorFilter.matrix(adjustment.colorMatrix),
+                      child: child!,
+                    );
+                  },
+                  child: RTCVideoView(
+                    session.remoteRenderer,
+                    key: ValueKey(widget.viewFit),
+                    objectFit: widget.viewFit == RemoteViewFit.contain
+                        ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
+                        : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  ),
                 ),
                 Positioned.fill(
                   child: Listener(
@@ -1058,7 +1301,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                                   ),
                                 ),
                               IconButton(
-                                tooltip: '整句发送',
+                                tooltip: '本地编辑后发送（兼容）',
                                 onPressed: _showComposedTextDialog,
                                 icon: const Icon(Icons.edit_note),
                               ),
@@ -1464,38 +1707,12 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       await _hideNativeIme();
     }
     if (!mounted) return;
-    final controller = TextEditingController();
-    final text = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('整句发送'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          minLines: 2,
-          maxLines: 4,
-          autocorrect: true,
-          enableSuggestions: true,
-          decoration: const InputDecoration(hintText: '在本机完成整句输入后，一次发送到远程设备'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('发送'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
+    final text = await showRemoteComposedTextEditor(context);
     if (!mounted) return;
     if (text != null && text.isNotEmpty) {
       session.sendText(text);
       AppMessenger.show(
-        '整句文本已发送（${text.runes.length} 个字符）',
+        '本地编辑文本已发送（${text.runes.length} 个字符）',
         level: AppMessageLevel.success,
       );
     }

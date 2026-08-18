@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 iPad→Mac 局域网原型进行中。** 基本连接、画面和远程输入已经用户验证；客户端现已增加可测试触控手势、输入诊断、iOS 原生 IME 输入代理、Mac 共享状态自动恢复和更合理的桌面初始窗口。macOS 与 iOS 真机目标构建通过；原生 IME 的 Flutter/Swift 自动测试与 Simulator 构建通过，候选即时提交、退格手感和断开后重新发现仍需物理双设备复验。
+> 当前状态：**M0 工程基线已完成，M1 iPad→Mac 局域网原型进行中。** 基本连接、画面和远程输入已经用户验证；客户端现已增加稳定的本地编辑兼容输入、顶部全局消息、色彩/HDR 诊断、按显示器保存的显示调整，以及明确的 macOS SDR/Rec.709/Video-Range 采集管线。macOS、iOS Simulator、无签名 iOS 真机目标构建和 44 个 Flutter 测试通过；色彩、HDR A/B、输入法手感和断开后重新发现仍需物理双设备复验。
 
 ## 项目定位
 
@@ -78,7 +78,7 @@ flowchart LR
 
 - Java 控制平面负责身份、设备、授权、信令、策略和审计，不处理正常会话的视频转码。
 - Flutter 负责页面、状态和响应式布局，不接收或逐帧绘制 RGBA/YUV 数据。
-- M1 Apple 原型由 `flutter_webrtc` 在原生层完成媒体与视频视图，Dart 只管理会话和小型控制消息；阶段结束后再根据性能数据决定是否替换插件路径。
+- M1 Apple 原型由项目内维护的 `flutter_webrtc 1.6.0` fork 在原生层完成媒体与视频视图，Dart 只管理会话和小型控制消息；fork 明确约束 macOS SDR/Rec.709/Video-Range 采集，阶段结束后再根据性能数据决定继续维护或迁移到自有媒体适配器。
 - 视频走原生 GPU 采集、硬编、WebRTC、硬解和原生 Texture 路径。
 - 屏幕、输入、文件和剪贴板优先在两端 P2P 传输；TURN 只转发加密数据。
 - coturn 独立部署，不使用 Java 重写 STUN/TURN 数据面。
@@ -221,11 +221,21 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 - 触控板：单指移动/轻点、双指右键/滚动、双击第二下按住拖动；右下角提供左键、右键和拖拽锁定按钮。
 - 工具栏“更多”菜单提供两种模式的操作说明、指针/滚动灵敏度和输入延迟诊断。
 - iOS 远程键盘使用隐藏的原生 `UITextView` 输入代理：组合文本留在 UIKit，最终文本和退格作为独立可靠事件发送；默认界面不保存远端文本历史。
-- Apple 简体拼音从拉丁拼音转换为完整 CJK 候选时触发即时提交；“整句发送”保留为第三方输入法和特殊应用的兜底。
+- Apple 简体拼音从拉丁拼音转换为完整 CJK 候选时触发即时提交；“本地编辑后发送”作为第三方输入法和特殊应用的兼容入口，其控制器生命周期由独立页面管理。
 - Debug 版键盘栏提供隐私安全的 IME 诊断，只显示事件类型、长度和 CJK 标记，不记录实际输入内容。
 - Debug 版本可从“输入设置与诊断”发送固定中文诊断文本“你好”，用于区分 iPad IME 和 Mac Unicode 注入问题。
 
 物理设备验收步骤见 [iPad 控制 Mac 输入验收](./docs/iPad控制Mac输入验收.md)。
+
+### 显示调整与色彩诊断
+
+- 全局 Message 使用安全区下方、屏幕高度约 17% 的 Overlay，不再占据底部操作区域。
+- 远程工具栏“显示调整与色彩诊断”提供自动、标准 SDR、柔和高光和自定义亮度/对比度/饱和度；设置按远程设备和显示器独立保存。
+- 色彩诊断显示实际捕获像素格式、Full/Video Range、原色、传递函数、YCbCr Matrix、采集动态范围和 Mac 显示器 EDR headroom。
+- macOS 采集使用仓库内 `third_party/flutter_webrtc` fork：macOS 15+ 显式请求 SDR，使用 `420v` Video-Range NV12、ITU-R BT.709 色彩空间/矩阵并传播 PixelBuffer 色彩附件。
+- 工具栏可要求 Mac 显示 SDR 灰阶测试图和打开显示器设置，用于 HDR 开关 A/B；关闭 HDR 不是正式解决方案。
+
+物理色彩验收步骤见 [iPad 控制 Mac 色彩验收](./docs/iPad控制Mac色彩验收.md)。
 
 执行完整 M0 基线验收：
 
@@ -260,7 +270,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter | 响应式壳层、持久会话、Apple Bonjour、角色切换、共享自动恢复、全局消息、动态画面/全屏、手势状态机、iOS 原生 IME 代理、指针合并与诊断、清晰度档位和单路多屏切换；`analyze`、39 个常规测试、4 个 Swift 测试和 Apple build | 断开后重新发现、原生 IME 候选提交/退格、触控手感、延迟和多屏需物理双设备复验；Windows、Linux 尚未构建 |
+| Flutter | 响应式壳层、持久会话、Apple Bonjour、共享自动恢复、顶部 Overlay、本地编辑兼容输入、色彩/HDR 诊断、按屏显示调整、动态画面/全屏、手势状态机、iOS 原生 IME、清晰度和单路多屏；`analyze`、44 个常规测试、4 个 Swift 测试和 macOS/iOS Simulator/无签名真机目标 build | SDR 灰阶、HDR A/B、断开后重新发现、IME 候选/退格、触控手感、延迟和多屏需物理双设备复验；Windows、Linux 尚未构建 |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、每来源限流和 8 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |

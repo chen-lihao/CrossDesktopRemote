@@ -11,6 +11,7 @@ class CrossDesktopRemoteApp extends StatelessWidget {
     return MaterialApp(
       title: 'CrossDesktopRemote',
       debugShowCheckedModeBanner: false,
+      navigatorKey: AppMessenger.navigatorKey,
       scaffoldMessengerKey: AppMessenger.scaffoldMessengerKey,
       theme: CrossDesktopTheme.light(),
       darkTheme: CrossDesktopTheme.dark(),

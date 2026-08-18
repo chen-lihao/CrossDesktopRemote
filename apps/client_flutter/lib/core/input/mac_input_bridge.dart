@@ -54,6 +54,19 @@ class MacInputBridge {
     return values.map(MacDisplayInfo.fromMap).toList(growable: false);
   }
 
+  Future<Map<String, dynamic>> getColorDiagnostics() async {
+    final value = await _channel.invokeMethod<Object?>('getColorDiagnostics');
+    return _normalizeStringMap(value);
+  }
+
+  Future<void> showGrayscaleTestPattern() {
+    return _channel.invokeMethod<void>('showGrayscaleTestPattern');
+  }
+
+  Future<bool> openDisplaySettings() async {
+    return await _channel.invokeMethod<bool>('openDisplaySettings') ?? false;
+  }
+
   Future<void> sendPointer({
     required String phase,
     required double x,
@@ -108,4 +121,17 @@ class MacInputBridge {
   Future<void> releasePointerButtons() {
     return _channel.invokeMethod<void>('releasePointerButtons');
   }
+}
+
+Map<String, dynamic> _normalizeStringMap(Object? value) {
+  if (value is! Map) return const {};
+  return value.map(
+    (key, item) => MapEntry(key.toString(), _normalizePlatformValue(item)),
+  );
+}
+
+Object? _normalizePlatformValue(Object? value) {
+  if (value is Map) return _normalizeStringMap(value);
+  if (value is List) return value.map(_normalizePlatformValue).toList();
+  return value;
 }

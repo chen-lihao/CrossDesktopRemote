@@ -11,8 +11,10 @@ dependencies:
   fixnum: ^1.1.1
   flutter:
     sdk: flutter
-  flutter_webrtc: ^1.6.0
+  flutter_webrtc:
+    path: ../../third_party/flutter_webrtc
   protobuf: ^6.0.0
+  shared_preferences: ^2.5.5
 
 dev_dependencies:
   flutter_test:
