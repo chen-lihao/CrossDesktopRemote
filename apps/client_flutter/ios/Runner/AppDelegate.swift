@@ -5,6 +5,7 @@ import dnssd
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var lanDiscoveryBridge: AppleLanDiscoveryBridge?
+  private var remoteImeBridge: AppleRemoteImeBridge?
 
   override func application(
     _ application: UIApplication,
@@ -19,6 +20,13 @@ import dnssd
       forPlugin: "CrossDesktopRemoteLanDiscovery"
     ) {
       lanDiscoveryBridge = AppleLanDiscoveryBridge(
+        binaryMessenger: registrar.messenger()
+      )
+    }
+    if let registrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "CrossDesktopRemoteIme"
+    ) {
+      remoteImeBridge = AppleRemoteImeBridge(
         binaryMessenger: registrar.messenger()
       )
     }

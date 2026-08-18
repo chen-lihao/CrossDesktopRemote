@@ -54,6 +54,8 @@ message RemotePointerInput {
   double scroll_x = 11;
   double scroll_y = 12;
   uint32 click_count = 13;
+  uint64 sent_at_unix_micros = 14;
+  bool latency_probe = 15;
 }
 
 message RemoteKeyboardInput {
@@ -63,6 +65,14 @@ message RemoteKeyboardInput {
   string key = 4;
   repeated string modifiers = 5;
   string committed_text = 6;
+  uint64 sent_at_unix_micros = 7;
+}
+
+message RemoteInputAck {
+  uint32 protocol_version = 1;
+  uint64 sequence = 2;
+  string input_type = 3;
+  uint64 echoed_sent_at_unix_micros = 4;
 }
 
 message RemoteHostControlStatus {

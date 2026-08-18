@@ -4,8 +4,10 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:cross_desktop_remote/core/input/mac_input_bridge.dart';
+import 'package:cross_desktop_remote/core/input/remote_text_chunks.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_client.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
+import 'package:cross_desktop_remote/features/remote/application/remote_input_sequence_guard.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -35,9 +37,12 @@ class RemoteSessionController extends ChangeNotifier {
   final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
   final StreamController<RemoteNotice> _notices =
       StreamController<RemoteNotice>.broadcast(sync: true);
+  final RemoteInputSequenceGuard _inputSequenceGuard =
+      RemoteInputSequenceGuard();
 
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _controlChannel;
+  RTCDataChannel? _motionChannel;
   MediaStream? _localStream;
   RTCRtpSender? _videoSender;
   List<DesktopCapturerSource> _displaySources = const [];
@@ -58,8 +63,10 @@ class RemoteSessionController extends ChangeNotifier {
   bool _screenCaptureGranted = false;
   bool? _accessibilityGranted;
   int _inputSequence = 0;
-  int _lastReceivedInputSequence = 0;
   int _inputPermissionPollAttempts = 0;
+  int _motionEventsSinceProbe = 0;
+  int _droppedMotionEvents = 0;
+  double? _inputRoundTripMs;
   String? _selectedDisplayId;
   String? _controlError;
   String? _error;
@@ -79,6 +86,8 @@ class RemoteSessionController extends ChangeNotifier {
   bool? get accessibilityGranted => _accessibilityGranted;
   RemoteQualityProfile get selectedQuality => _selectedQuality;
   bool get qualityPending => _qualityPending;
+  double? get inputRoundTripMs => _inputRoundTripMs;
+  int get droppedMotionEvents => _droppedMotionEvents;
   String get qualityStatusLabel {
     final width = _actualVideoWidth;
     final height = _actualVideoHeight;
@@ -214,10 +223,15 @@ class RemoteSessionController extends ChangeNotifier {
       }
       return;
     }
-    _sendControl({
+    final isMotion = phase == 'move' || phase == 'scroll';
+    final probe = isMotion && ++_motionEventsSinceProbe >= 30;
+    if (probe) _motionEventsSinceProbe = 0;
+    final message = <String, dynamic>{
       'type': 'pointer',
       'version': 2,
       'sequence': ++_inputSequence,
+      'sentAtUnixMicros': DateTime.now().microsecondsSinceEpoch,
+      if (probe) 'latencyProbe': true,
       'displayId': displayId,
       'mode': mode,
       'phase': phase,
@@ -229,7 +243,12 @@ class RemoteSessionController extends ChangeNotifier {
       'movementY': movementY,
       'deltaX': deltaX,
       'deltaY': deltaY,
-    });
+    };
+    if (isMotion) {
+      _sendMotion(message);
+    } else {
+      _sendControl(message);
+    }
   }
 
   void sendKey({
@@ -245,6 +264,7 @@ class RemoteSessionController extends ChangeNotifier {
       'type': 'keyboard',
       'version': 2,
       'sequence': ++_inputSequence,
+      'sentAtUnixMicros': DateTime.now().microsecondsSinceEpoch,
       'inputType': 'key',
       'phase': phase,
       'key': key,
@@ -259,13 +279,16 @@ class RemoteSessionController extends ChangeNotifier {
       }
       return;
     }
-    _sendControl({
-      'type': 'keyboard',
-      'version': 2,
-      'sequence': ++_inputSequence,
-      'inputType': 'text',
-      'text': text,
-    });
+    for (final chunk in chunkRemoteText(text)) {
+      _sendControl({
+        'type': 'keyboard',
+        'version': 2,
+        'sequence': ++_inputSequence,
+        'sentAtUnixMicros': DateTime.now().microsecondsSinceEpoch,
+        'inputType': 'text',
+        'text': chunk,
+      });
+    }
   }
 
   void selectDisplay(String displayId) {
@@ -410,7 +433,7 @@ class RemoteSessionController extends ChangeNotifier {
       remoteRenderer.srcObject = event.streams.first;
       _setState(RemoteSessionState.streaming, '正在显示远程屏幕');
     };
-    peerConnection.onDataChannel = _attachControlChannel;
+    peerConnection.onDataChannel = _attachDataChannel;
     peerConnection.onConnectionState = (connectionState) {
       switch (connectionState) {
         case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
@@ -434,6 +457,22 @@ class RemoteSessionController extends ChangeNotifier {
           ..protocol = 'crossdesktop-control-v2',
       );
       _attachControlChannel(channel);
+      final motionChannel = await peerConnection.createDataChannel(
+        'input-motion',
+        RTCDataChannelInit()
+          ..ordered = false
+          ..maxRetransmitTime = 50
+          ..protocol = 'crossdesktop-input-motion-v2',
+      );
+      _attachMotionChannel(motionChannel);
+    }
+  }
+
+  void _attachDataChannel(RTCDataChannel channel) {
+    if (channel.label == 'input-motion') {
+      _attachMotionChannel(channel);
+    } else {
+      _attachControlChannel(channel);
     }
   }
 
@@ -450,6 +489,8 @@ class RemoteSessionController extends ChangeNotifier {
           refreshRemoteDisplays();
           _sendControl({'type': 'refresh-quality', 'version': 2});
         }
+      } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
+        unawaited(_releaseHostPointerButtons());
       }
       notifyListeners();
     };
@@ -457,6 +498,15 @@ class RemoteSessionController extends ChangeNotifier {
       if (message.isBinary || message.text.length > 16 * 1024) {
         return;
       }
+      unawaited(_handleControlMessage(message.text));
+    };
+  }
+
+  void _attachMotionChannel(RTCDataChannel channel) {
+    _motionChannel = channel;
+    channel.onDataChannelState = (_) => notifyListeners();
+    channel.onMessage = (message) {
+      if (message.isBinary || message.text.length > 16 * 1024) return;
       unawaited(_handleControlMessage(message.text));
     };
   }
@@ -490,11 +540,13 @@ class RemoteSessionController extends ChangeNotifier {
     }
     switch (message['type']) {
       case 'pointer':
-        if (!_acceptInputSequence(message)) {
+        final phase = message['phase'] as String? ?? 'move';
+        final isMotion = phase == 'move' || phase == 'scroll';
+        if (!_acceptInputSequence(message, motion: isMotion)) {
           return;
         }
         await _inputBridge.sendPointer(
-          phase: message['phase'] as String? ?? 'move',
+          phase: phase,
           x: (message['x'] as num?)?.toDouble() ?? 0,
           y: (message['y'] as num?)?.toDouble() ?? 0,
           displayId:
@@ -507,11 +559,12 @@ class RemoteSessionController extends ChangeNotifier {
           deltaX: (message['deltaX'] as num?)?.toDouble() ?? 0,
           deltaY: (message['deltaY'] as num?)?.toDouble() ?? 0,
         );
-        if (message['phase'] != 'move' && message['phase'] != 'scroll') {
+        if ((message['phase'] != 'move' && message['phase'] != 'scroll') ||
+            message['latencyProbe'] == true) {
           _acknowledgeInput(message);
         }
       case 'keyboard':
-        if (!_acceptInputSequence(message)) {
+        if (!_acceptInputSequence(message, motion: false)) {
           return;
         }
         if (message['inputType'] == 'text') {
@@ -546,13 +599,12 @@ class RemoteSessionController extends ChangeNotifier {
     }
   }
 
-  bool _acceptInputSequence(Map<String, dynamic> message) {
+  bool _acceptInputSequence(
+    Map<String, dynamic> message, {
+    required bool motion,
+  }) {
     final sequence = (message['sequence'] as num?)?.toInt() ?? 0;
-    if (sequence <= _lastReceivedInputSequence) {
-      return false;
-    }
-    _lastReceivedInputSequence = sequence;
-    return true;
+    return _inputSequenceGuard.accept(sequence, motion: motion);
   }
 
   void _handleControllerControlMessage(Map<String, dynamic> message) {
@@ -610,6 +662,16 @@ class RemoteSessionController extends ChangeNotifier {
         notifyListeners();
         _emitNotice(messageText, level: RemoteNoticeLevel.error);
       case 'input-ack':
+        final sentAtMicros = (message['echoedSentAtUnixMicros'] as num?)
+            ?.toInt();
+        if (sentAtMicros != null) {
+          final elapsedMicros =
+              DateTime.now().microsecondsSinceEpoch - sentAtMicros;
+          if (elapsedMicros >= 0) {
+            _inputRoundTripMs = elapsedMicros / 1000;
+            notifyListeners();
+          }
+        }
         if (!_inputConfirmed) {
           _inputConfirmed = true;
           _emitNotice('远程控制输入已生效', level: RemoteNoticeLevel.success);
@@ -625,15 +687,37 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   void _sendControl(Map<String, dynamic> message) {
-    final channel = _controlChannel;
+    _sendOnChannel(_controlChannel, message, reportFailure: true);
+  }
+
+  void _sendMotion(Map<String, dynamic> message) {
+    final channel =
+        _motionChannel?.state == RTCDataChannelState.RTCDataChannelOpen
+        ? _motionChannel
+        : _controlChannel;
+    if ((channel?.bufferedAmount ?? 0) > 64 * 1024) {
+      _droppedMotionEvents += 1;
+      notifyListeners();
+      return;
+    }
+    _sendOnChannel(channel, message, reportFailure: false);
+  }
+
+  void _sendOnChannel(
+    RTCDataChannel? channel,
+    Map<String, dynamic> message, {
+    required bool reportFailure,
+  }) {
     if (channel == null ||
         channel.state != RTCDataChannelState.RTCDataChannelOpen) {
       return;
     }
     unawaited(
       channel.send(RTCDataChannelMessage(jsonEncode(message))).catchError((_) {
-        _controlError = '控制通道发送失败';
-        notifyListeners();
+        if (reportFailure) {
+          _controlError = '控制通道发送失败';
+          notifyListeners();
+        }
       }),
     );
   }
@@ -663,6 +747,7 @@ class RemoteSessionController extends ChangeNotifier {
       'version': 2,
       'sequence': (message['sequence'] as num?)?.toInt() ?? 0,
       'inputType': message['type'],
+      'echoedSentAtUnixMicros': message['sentAtUnixMicros'],
     });
   }
 
@@ -1041,8 +1126,11 @@ class RemoteSessionController extends ChangeNotifier {
       }
     }
     await _signaling.close();
+    await _releaseHostPointerButtons();
     await _controlChannel?.close();
     _controlChannel = null;
+    await _motionChannel?.close();
+    _motionChannel = null;
     _displayRefreshTimer?.cancel();
     _displayRefreshTimer = null;
     _inputPermissionPollTimer?.cancel();
@@ -1079,11 +1167,23 @@ class RemoteSessionController extends ChangeNotifier {
     _inputConfirmed = false;
     _qualityPending = false;
     _inputSequence = 0;
-    _lastReceivedInputSequence = 0;
+    _inputSequenceGuard.reset();
     _inputPermissionPollAttempts = 0;
+    _motionEventsSinceProbe = 0;
+    _droppedMotionEvents = 0;
+    _inputRoundTripMs = null;
     _actualVideoWidth = null;
     _actualVideoHeight = null;
     _closing = false;
+  }
+
+  Future<void> _releaseHostPointerButtons() async {
+    if (role != RemoteRole.host || !Platform.isMacOS) return;
+    try {
+      await _inputBridge.releasePointerButtons();
+    } catch (_) {
+      // The native window may already be closing or unavailable in tests.
+    }
   }
 
   void _setState(RemoteSessionState next, String message) {

@@ -47,6 +47,9 @@ class MainFlutterWindow: NSWindow {
         self.handlePointer(arguments: call.arguments, result: result)
       case "keyboard":
         self.handleKeyboard(arguments: call.arguments, result: result)
+      case "releasePointerButtons":
+        self.releasePointerButtons()
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -212,6 +215,27 @@ class MainFlutterWindow: NSWindow {
     event?.flags = modifierFlags(values["modifiers"] as? [String] ?? [])
     event?.post(tap: .cghidEventTap)
     result(nil)
+  }
+
+  private func releasePointerButtons() {
+    let position = CGEvent(source: nil)?.location ?? .zero
+    if pressedMouseButtons.contains("left") {
+      CGEvent(
+        mouseEventSource: nil,
+        mouseType: .leftMouseUp,
+        mouseCursorPosition: position,
+        mouseButton: .left
+      )?.post(tap: .cghidEventTap)
+    }
+    if pressedMouseButtons.contains("right") {
+      CGEvent(
+        mouseEventSource: nil,
+        mouseType: .rightMouseUp,
+        mouseCursorPosition: position,
+        mouseButton: .right
+      )?.post(tap: .cghidEventTap)
+    }
+    pressedMouseButtons.removeAll()
   }
 
   private func postUnicodeText(_ text: String) {

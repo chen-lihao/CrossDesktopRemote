@@ -104,4 +104,8 @@ class MacInputBridge {
       'text': text,
     });
   }
+
+  Future<void> releasePointerButtons() {
+    return _channel.invokeMethod<void>('releasePointerButtons');
+  }
 }
