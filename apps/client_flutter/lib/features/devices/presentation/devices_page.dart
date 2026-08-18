@@ -6,6 +6,7 @@ import 'package:cross_desktop_remote/core/network/lan_address_service.dart';
 import 'package:cross_desktop_remote/core/platform/device_capabilities.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
+import 'package:cross_desktop_remote/features/remote/application/host_sharing_lifecycle.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_desktop_panel.dart';
@@ -53,6 +54,7 @@ class _DevicesPageState extends State<DevicesPage> {
   bool _isBrowsing = false;
   bool _isPublishing = false;
   bool _publicationBusy = false;
+  final HostSharingLifecycle _hostSharing = HostSharingLifecycle();
   late RemoteSessionState _lastSessionState = _session.state;
 
   @override
@@ -156,34 +158,63 @@ class _DevicesPageState extends State<DevicesPage> {
     AppMessenger.show(notice.message, level: level);
   }
 
-  Future<void> _connect() async {
+  Future<void> _connect({bool userInitiated = true}) async {
     FocusManager.instance.primaryFocus?.unfocus();
+    if (_role == RemoteRole.host && userInitiated) {
+      _hostSharing.start();
+      if (mounted) setState(() {});
+    }
     await _session.connect(
       serverUrl: _serverController.text,
       roomCode: _roomController.text,
     );
   }
 
+  Future<void> _disconnect() async {
+    if (_role == RemoteRole.host) {
+      _hostSharing.stop();
+      if (mounted) setState(() {});
+    }
+    await _session.disconnect();
+  }
+
   void _handleSessionChanged() {
     final previousState = _lastSessionState;
     _lastSessionState = _session.state;
-    if (_role == RemoteRole.host &&
-        previousState != RemoteSessionState.idle &&
+    if (_role != RemoteRole.host) return;
+
+    final shouldRestart = _hostSharing.observeTransition(
+      previous: previousState,
+      next: _session.state,
+    );
+    if (previousState != RemoteSessionState.idle &&
         {
           RemoteSessionState.disconnected,
           RemoteSessionState.failed,
         }.contains(_session.state)) {
       _roomController.text = generateRoomCode();
     }
-    if (_role != RemoteRole.host) {
-      return;
-    }
+    if (shouldRestart) unawaited(_restartHostSharing());
+    if (mounted) setState(() {});
+
+    _reconcileHostPublication();
+  }
+
+  void _reconcileHostPublication() {
+    if (!mounted || _role != RemoteRole.host || _publicationBusy) return;
     final shouldPublish = _session.state == RemoteSessionState.waitingForPeer;
-    if (shouldPublish && !_isPublishing && !_publicationBusy) {
+    if (shouldPublish && !_isPublishing) {
       unawaited(_publishHost());
-    } else if (!shouldPublish && _isPublishing && !_publicationBusy) {
+    } else if (!shouldPublish && _isPublishing) {
       unawaited(_stopPublishing());
     }
+  }
+
+  Future<void> _restartHostSharing() async {
+    AppMessenger.show('上一会话已结束，正在生成新连接码并恢复共享', level: AppMessageLevel.info);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    if (!mounted || !_hostSharing.sharingRequested) return;
+    await _connect(userInitiated: false);
   }
 
   Future<void> _publishHost() async {
@@ -232,6 +263,10 @@ class _DevicesPageState extends State<DevicesPage> {
         setState(() {});
       }
     }
+    // A fast automatic reconnect may reach waitingForPeer while the previous
+    // Bonjour publication is still being stopped. Reconcile once the native
+    // operation has completed so the host cannot remain undiscoverable.
+    _reconcileHostPublication();
   }
 
   @override
@@ -313,7 +348,10 @@ class _DevicesPageState extends State<DevicesPage> {
                           discoveryError: _discoveryError,
                           isBrowsing: _isBrowsing,
                           isPublishing: _isPublishing,
+                          hostSharingRequested: _hostSharing.sharingRequested,
+                          hostRestarting: _hostSharing.rearming,
                           onConnect: _connect,
+                          onDisconnect: _disconnect,
                           onRefreshAddresses: _findLocalAddresses,
                           onRefreshDiscovery: _refreshDiscovery,
                           onSelectDevice: _selectDevice,
@@ -335,11 +373,13 @@ class _DevicesPageState extends State<DevicesPage> {
     );
   }
 
-  bool get _sessionIsActive => !{
-    RemoteSessionState.idle,
-    RemoteSessionState.disconnected,
-    RemoteSessionState.failed,
-  }.contains(_session.state);
+  bool get _sessionIsActive =>
+      !{
+        RemoteSessionState.idle,
+        RemoteSessionState.disconnected,
+        RemoteSessionState.failed,
+      }.contains(_session.state) ||
+      (_role == RemoteRole.host && _hostSharing.sharingRequested);
 }
 
 class _ConnectionCard extends StatelessWidget {
@@ -354,7 +394,10 @@ class _ConnectionCard extends StatelessWidget {
     required this.discoveryError,
     required this.isBrowsing,
     required this.isPublishing,
+    required this.hostSharingRequested,
+    required this.hostRestarting,
     required this.onConnect,
+    required this.onDisconnect,
     required this.onRefreshAddresses,
     required this.onRefreshDiscovery,
     required this.onSelectDevice,
@@ -370,16 +413,21 @@ class _ConnectionCard extends StatelessWidget {
   final String? discoveryError;
   final bool isBrowsing;
   final bool isPublishing;
+  final bool hostSharingRequested;
+  final bool hostRestarting;
   final Future<void> Function() onConnect;
+  final Future<void> Function() onDisconnect;
   final Future<void> Function() onRefreshAddresses;
   final Future<void> Function() onRefreshDiscovery;
   final ValueChanged<DiscoveredDevice> onSelectDevice;
 
-  bool get _isActive => !{
-    RemoteSessionState.idle,
-    RemoteSessionState.disconnected,
-    RemoteSessionState.failed,
-  }.contains(session.state);
+  bool get _isActive => role == RemoteRole.host
+      ? hostSharingRequested
+      : !{
+          RemoteSessionState.idle,
+          RemoteSessionState.disconnected,
+          RemoteSessionState.failed,
+        }.contains(session.state);
 
   @override
   Widget build(BuildContext context) {
@@ -477,7 +525,13 @@ class _ConnectionCard extends StatelessWidget {
                       : Theme.of(context).colorScheme.primary,
                 ),
                 const SizedBox(width: 8),
-                Expanded(child: Text(session.statusMessage)),
+                Expanded(
+                  child: Text(
+                    role == RemoteRole.host && hostRestarting
+                        ? '上一会话已结束，正在恢复共享'
+                        : session.statusMessage,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 16),
@@ -512,9 +566,13 @@ class _ConnectionCard extends StatelessWidget {
               ),
             ] else if (_isActive) ...[
               OutlinedButton.icon(
-                onPressed: session.disconnect,
-                icon: const Icon(Icons.link_off),
-                label: const Text('断开'),
+                onPressed: onDisconnect,
+                icon: Icon(
+                  role == RemoteRole.host
+                      ? Icons.stop_circle_outlined
+                      : Icons.link_off,
+                ),
+                label: Text(role == RemoteRole.host ? '停止共享本机' : '断开'),
               ),
             ] else ...[
               FilledButton.icon(

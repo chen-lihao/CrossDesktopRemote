@@ -200,8 +200,9 @@ class RemoteSessionController extends ChangeNotifier {
 
   Future<void> disconnect() async {
     await _closeSession(notifyPeer: true);
-    _setState(RemoteSessionState.disconnected, '会话已断开');
-    _emitNotice('远程会话已断开');
+    final message = role == RemoteRole.host ? '已停止共享本机' : '远程会话已断开';
+    _setState(RemoteSessionState.disconnected, message);
+    _emitNotice(message);
   }
 
   void sendPointer({
@@ -420,21 +421,34 @@ class RemoteSessionController extends ChangeNotifier {
     });
     _peerConnection = peerConnection;
 
+    bool isCurrentPeerConnection() {
+      return !_closing && identical(_peerConnection, peerConnection);
+    }
+
     peerConnection.onIceCandidate = (candidate) {
-      if (candidate.candidate == null || !_signaling.isConnected) {
+      if (!isCurrentPeerConnection() ||
+          candidate.candidate == null ||
+          !_signaling.isConnected) {
         return;
       }
       _signaling.send({'type': 'candidate', ...candidate.toMap()});
     };
     peerConnection.onTrack = (event) {
-      if (event.track.kind != 'video' || event.streams.isEmpty) {
+      if (!isCurrentPeerConnection() ||
+          event.track.kind != 'video' ||
+          event.streams.isEmpty) {
         return;
       }
       remoteRenderer.srcObject = event.streams.first;
       _setState(RemoteSessionState.streaming, '正在显示远程屏幕');
     };
-    peerConnection.onDataChannel = _attachDataChannel;
+    peerConnection.onDataChannel = (channel) {
+      if (isCurrentPeerConnection()) {
+        _attachDataChannel(channel);
+      }
+    };
     peerConnection.onConnectionState = (connectionState) {
+      if (!isCurrentPeerConnection()) return;
       switch (connectionState) {
         case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
           _setState(RemoteSessionState.streaming, '远程会话已连接');
