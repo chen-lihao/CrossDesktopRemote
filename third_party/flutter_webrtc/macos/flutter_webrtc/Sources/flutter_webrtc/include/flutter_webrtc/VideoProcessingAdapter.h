@@ -15,4 +15,6 @@
 
 - (RTCVideoSource* _Nonnull) source;
 
+- (void)setPreferredFramesPerSecond:(NSInteger)fps;
+
 @end

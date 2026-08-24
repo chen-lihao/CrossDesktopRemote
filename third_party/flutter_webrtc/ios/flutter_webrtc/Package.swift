@@ -31,6 +31,8 @@ let package = Package(
                 .headerSearchPath("include/flutter_webrtc")
             ],
             linkerSettings: [
+                .linkedFramework("Accelerate"),
+                .linkedFramework("CoreImage"),
                 .linkedLibrary("c++")
             ]
         )

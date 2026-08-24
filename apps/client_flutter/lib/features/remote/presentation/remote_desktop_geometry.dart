@@ -11,6 +11,7 @@ class RemoteContentTransform {
     required Size sourceSize,
     required Size viewportSize,
     required BoxFit fit,
+    Offset viewportOffset = Offset.zero,
   }) {
     if (sourceSize.isEmpty || viewportSize.isEmpty) {
       return RemoteContentTransform(
@@ -28,7 +29,7 @@ class RemoteContentTransform {
       ),
       destinationRect: Alignment.center.inscribe(
         fitted.destination,
-        Offset.zero & viewportSize,
+        viewportOffset & viewportSize,
       ),
     );
   }

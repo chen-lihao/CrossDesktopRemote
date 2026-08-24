@@ -17,6 +17,7 @@ A new flutter plugin project.
 
   s.dependency 'FlutterMacOS'
   s.weak_frameworks = 'ScreenCaptureKit'
+  s.frameworks = 'CoreImage', 'Metal'
   s.dependency 'WebRTC-SDK', '144.7559.09'
   s.osx.deployment_target = '10.15'
   s.pod_target_xcconfig = {

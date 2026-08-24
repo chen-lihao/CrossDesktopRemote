@@ -7,7 +7,9 @@ import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/devices/presentation/devices_page.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/sessions/presentation/sessions_page.dart';
+import 'package:cross_desktop_remote/features/sessions/application/session_history_controller.dart';
 import 'package:cross_desktop_remote/features/settings/presentation/settings_page.dart';
+import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter/material.dart';
 
 enum HomeSection { devices, sessions, settings }
@@ -42,6 +44,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   int _selectedIndex = HomeSection.devices.index;
   late final DeviceCapabilities _capabilities;
+  late final AppSettingsController _settings;
+  late final SessionHistoryController _history;
   late RemoteRole _role;
   late RemoteSessionController _session;
   late LanDiscoveryService _discovery;
@@ -52,12 +56,25 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _capabilities = DeviceCapabilities.current();
+    _settings = AppSettingsController();
+    _history = SessionHistoryController(settings: _settings);
     _role = _capabilities.canHost ? RemoteRole.host : RemoteRole.controller;
     _createWorkspace();
+    _settings.addListener(_handleSettingsChanged);
+    unawaited(_loadPersistentState());
+  }
+
+  Future<void> _loadPersistentState() async {
+    await _settings.load();
+    await _history.load();
   }
 
   void _createWorkspace() {
-    _session = RemoteSessionController(role: _role);
+    _session = RemoteSessionController(
+      role: _role,
+      initialQuality: _settings.defaultQuality,
+    );
+    _history.attach(_session);
     _discovery = createLanDiscoveryService();
     _pages = <Widget>[
       DevicesPage(
@@ -65,9 +82,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         discoveryService: _discovery,
         capabilities: _capabilities,
         onRoleChanged: _changeRole,
+        settings: _settings,
       ),
-      SessionsPage(session: _session),
-      const SettingsPage(),
+      SessionsPage(
+        session: _session,
+        history: _history,
+        onOpenDevices: () => _select(HomeSection.devices.index),
+      ),
+      SettingsPage(settings: _settings, session: _session),
     ];
   }
 
@@ -90,6 +112,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       nextRole == RemoteRole.host ? '已切换为共享本机' : '已切换为控制其他设备',
       level: AppMessageLevel.success,
     );
+  }
+
+  void _handleSettingsChanged() {
+    _session.setIdleQuality(_settings.defaultQuality);
   }
 
   @override
@@ -173,7 +199,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_discovery.dispose());
+    _history.dispose();
     _session.dispose();
+    _settings.removeListener(_handleSettingsChanged);
+    _settings.dispose();
     super.dispose();
   }
 }

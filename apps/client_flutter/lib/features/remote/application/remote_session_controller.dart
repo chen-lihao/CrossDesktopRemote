@@ -19,8 +19,35 @@ enum RemoteSessionState {
   awaitingApproval,
   connecting,
   streaming,
+  reconnecting,
   disconnected,
   failed,
+}
+
+class _RtcVideoProgress {
+  const _RtcVideoProgress({required this.size, required this.frames});
+
+  final RemoteVideoFrameSize size;
+  final int? frames;
+}
+
+class _HostDisplaySwitchTransaction {
+  _HostDisplaySwitchTransaction({
+    required this.generation,
+    required this.previousDisplayId,
+    required this.targetDisplayId,
+    required this.previousStream,
+    required this.targetStream,
+    required this.switchedInPlace,
+  });
+
+  final int generation;
+  final String? previousDisplayId;
+  final String targetDisplayId;
+  final MediaStream previousStream;
+  final MediaStream targetStream;
+  final bool switchedInPlace;
+  Timer? timeout;
 }
 
 class RemoteSessionController extends ChangeNotifier {
@@ -28,8 +55,10 @@ class RemoteSessionController extends ChangeNotifier {
     required this.role,
     SignalingClient? signalingClient,
     MacInputBridge? inputBridge,
+    RemoteQualityProfile initialQuality = RemoteQualityProfile.automatic,
   }) : _signaling = signalingClient ?? SignalingClient(),
-       _inputBridge = inputBridge ?? const MacInputBridge();
+       _inputBridge = inputBridge ?? const MacInputBridge(),
+       _selectedQuality = initialQuality;
 
   final RemoteRole role;
   final SignalingClient _signaling;
@@ -45,6 +74,7 @@ class RemoteSessionController extends ChangeNotifier {
   RTCDataChannel? _motionChannel;
   MediaStream? _localStream;
   RTCRtpSender? _videoSender;
+  RTCRtpReceiver? _videoReceiver;
   List<DesktopCapturerSource> _displaySources = const [];
   List<RemoteDisplay> _displays = const [];
   StreamSubscription<DesktopCapturerSource>? _displayAddedSubscription;
@@ -52,32 +82,53 @@ class RemoteSessionController extends ChangeNotifier {
   Timer? _displayRefreshTimer;
   Timer? _inputPermissionPollTimer;
   Timer? _qualityRequestTimer;
+  Timer? _displaySwitchRequestTimer;
+  Timer? _connectionRecoveryTimer;
+  Timer? _mediaStatsTimer;
   final List<RTCIceCandidate> _pendingCandidates = [];
   bool _remoteDescriptionSet = false;
   bool _rendererReady = false;
   bool _closing = false;
+  bool _connectionEstablished = false;
   bool _authorizingPeer = false;
   bool _checkingInputPermission = false;
   bool _inputConfirmed = false;
   bool _qualityPending = false;
+  bool _displaySwitchPending = false;
+  bool _hostDisplaySwitchInProgress = false;
   bool _screenCaptureGranted = false;
   bool? _accessibilityGranted;
   int _inputSequence = 0;
   int _inputPermissionPollAttempts = 0;
   int _motionEventsSinceProbe = 0;
   int _droppedMotionEvents = 0;
+  int _displaySwitchGeneration = 0;
+  int _geometryObservationToken = 0;
+  int? _displaySwitchInboundFramesBaseline;
   double? _inputRoundTripMs;
   String? _selectedDisplayId;
+  String? _renderedDisplayId;
+  String? _pendingDisplayId;
   String? _remoteDeviceId;
   String? _controlError;
   String? _error;
   DateTime? _lastControlUnavailableNotice;
-  RemoteQualityProfile _selectedQuality = RemoteQualityProfile.automatic;
+  RemoteQualityProfile _selectedQuality;
   int? _actualVideoWidth;
   int? _actualVideoHeight;
+  RemoteVideoFrameSize? _expectedVideoFrameSize;
+  RemoteVideoFrameSize? _outboundVideoFrameSize;
+  RemoteVideoFrameSize? _inboundVideoFrameSize;
+  RemoteVideoGeometryState _videoGeometryState =
+      RemoteVideoGeometryState.stable;
   RemoteColorDiagnostics? _colorDiagnostics;
+  RemoteFrameColorDiagnostics? _decoderOutputColorDiagnostics;
+  RemoteFrameColorDiagnostics? _renderOutputColorDiagnostics;
+  String? _receiverColorConversion;
+  RemoteMediaDiagnostics? _mediaDiagnostics;
   String _statusMessage = '尚未连接';
   RemoteSessionState _state = RemoteSessionState.idle;
+  _HostDisplaySwitchTransaction? _hostDisplaySwitchTransaction;
 
   RemoteSessionState get state => _state;
   Stream<RemoteNotice> get notices => _notices.stream;
@@ -88,9 +139,31 @@ class RemoteSessionController extends ChangeNotifier {
   bool? get accessibilityGranted => _accessibilityGranted;
   RemoteQualityProfile get selectedQuality => _selectedQuality;
   bool get qualityPending => _qualityPending;
+  bool get displaySwitchPending => _displaySwitchPending;
+  String? get pendingDisplayId => _pendingDisplayId;
+  RemoteVideoFrameSize? get expectedVideoFrameSize => _expectedVideoFrameSize;
+  RemoteVideoFrameSize? get outboundVideoFrameSize => _outboundVideoFrameSize;
+  RemoteVideoFrameSize? get inboundVideoFrameSize => _inboundVideoFrameSize;
+  RemoteVideoGeometryState get videoGeometryState => _videoGeometryState;
   double? get inputRoundTripMs => _inputRoundTripMs;
   int get droppedMotionEvents => _droppedMotionEvents;
   String get qualityStatusLabel {
+    final expected = _expectedVideoFrameSize;
+    final actual = role == RemoteRole.host
+        ? _outboundVideoFrameSize
+        : _inboundVideoFrameSize ?? _outboundVideoFrameSize;
+    if (_videoGeometryState == RemoteVideoGeometryState.adapting) {
+      final actualLabel = actual?.isValid == true ? actual!.label : '检测中';
+      final targetLabel = expected?.isValid == true ? expected!.label : '自动';
+      return '${_selectedQuality.label} · $actualLabel → $targetLabel · 适配中';
+    }
+    if (_videoGeometryState == RemoteVideoGeometryState.constrained &&
+        actual?.isValid == true) {
+      return '${_selectedQuality.label} · ${actual!.label} · 自适应';
+    }
+    if (actual?.isValid == true) {
+      return '${_selectedQuality.label} · ${actual!.label}';
+    }
     final width = _actualVideoWidth;
     final height = _actualVideoHeight;
     if (width != null && height != null && width > 0 && height > 0) {
@@ -101,8 +174,15 @@ class RemoteSessionController extends ChangeNotifier {
 
   List<RemoteDisplay> get displays => _displays;
   String? get selectedDisplayId => _selectedDisplayId;
+  String? get renderedDisplayId => _renderedDisplayId;
   String? get remoteDeviceId => _remoteDeviceId;
   RemoteColorDiagnostics? get colorDiagnostics => _colorDiagnostics;
+  RemoteFrameColorDiagnostics? get decoderOutputColorDiagnostics =>
+      _decoderOutputColorDiagnostics;
+  RemoteFrameColorDiagnostics? get renderOutputColorDiagnostics =>
+      _renderOutputColorDiagnostics;
+  String? get receiverColorConversion => _receiverColorConversion;
+  RemoteMediaDiagnostics? get mediaDiagnostics => _mediaDiagnostics;
   RemoteDisplay? get selectedDisplay {
     for (final display in _displays) {
       if (display.id == _selectedDisplayId) {
@@ -115,6 +195,7 @@ class RemoteSessionController extends ChangeNotifier {
   bool get hasRemoteVideo => remoteRenderer.srcObject != null;
   bool get canSendControl =>
       role == RemoteRole.controller &&
+      !_displaySwitchPending &&
       _controlChannel?.state == RTCDataChannelState.RTCDataChannelOpen &&
       _accessibilityGranted == true;
 
@@ -124,6 +205,7 @@ class RemoteSessionController extends ChangeNotifier {
     }
     _setState(RemoteSessionState.initializing, '正在初始化视频渲染器');
     try {
+      remoteRenderer.onColorDiagnostics = _handleRendererColorDiagnostics;
       await remoteRenderer.initialize();
       _rendererReady = true;
       if (role == RemoteRole.host && Platform.isMacOS) {
@@ -140,6 +222,17 @@ class RemoteSessionController extends ChangeNotifier {
     } catch (error) {
       _fail('视频渲染器初始化失败：$error');
     }
+  }
+
+  void _handleRendererColorDiagnostics(Map<String, dynamic> diagnostics) {
+    _decoderOutputColorDiagnostics = _frameColorDiagnostics(
+      diagnostics['decoderOutput'],
+    );
+    _renderOutputColorDiagnostics = _frameColorDiagnostics(
+      diagnostics['renderOutput'],
+    );
+    _receiverColorConversion = diagnostics['conversion'] as String?;
+    notifyListeners();
   }
 
   Future<void> connect({
@@ -209,6 +302,15 @@ class RemoteSessionController extends ChangeNotifier {
     _emitNotice(message);
   }
 
+  void clearConnectionAttemptFeedback() {
+    if (role != RemoteRole.controller ||
+        state != RemoteSessionState.disconnected) {
+      return;
+    }
+    _error = null;
+    _setState(RemoteSessionState.idle, '请输入新的连接码');
+  }
+
   void sendPointer({
     required String phase,
     required double x,
@@ -221,7 +323,10 @@ class RemoteSessionController extends ChangeNotifier {
     double deltaX = 0,
     double deltaY = 0,
   }) {
-    final displayId = _selectedDisplayId;
+    // Input must follow the frame the controller has actually rendered. During
+    // a display-switch transaction `_selectedDisplayId` may describe the UI
+    // target before media for that display is ready.
+    final displayId = _renderedDisplayId ?? _selectedDisplayId;
     if (!canSendControl || displayId == null) {
       if (phase == 'down') {
         explainControlUnavailable();
@@ -301,10 +406,30 @@ class RemoteSessionController extends ChangeNotifier {
         !displays.any((display) => display.id == displayId)) {
       return;
     }
+    if (_displaySwitchPending) {
+      _emitNotice('正在切换显示器，请稍候', level: RemoteNoticeLevel.warning);
+      return;
+    }
+    if (displayId == _selectedDisplayId) return;
+    final generation = ++_displaySwitchGeneration;
+    _displaySwitchPending = true;
+    _pendingDisplayId = displayId;
+    _displaySwitchRequestTimer?.cancel();
+    _displaySwitchRequestTimer = Timer(const Duration(seconds: 15), () {
+      if (!_displaySwitchPending || generation != _displaySwitchGeneration) {
+        return;
+      }
+      _displaySwitchPending = false;
+      _pendingDisplayId = null;
+      notifyListeners();
+      _emitNotice('显示器切换超时，请重试', level: RemoteNoticeLevel.warning);
+    });
+    notifyListeners();
     _sendControl({
       'type': 'select-display',
       'version': 2,
       'displayId': displayId,
+      'generation': generation,
     });
     _emitNotice('正在切换远程显示器');
   }
@@ -372,13 +497,28 @@ class RemoteSessionController extends ChangeNotifier {
       return;
     }
     _lastControlUnavailableNotice = now;
-    final message =
-        _controlChannel?.state != RTCDataChannelState.RTCDataChannelOpen
+    final message = _displaySwitchPending
+        ? '正在切换显示器，远程输入已暂时暂停'
+        : _controlChannel?.state != RTCDataChannelState.RTCDataChannelOpen
         ? '远程控制通道尚未就绪'
         : _accessibilityGranted != true
         ? '被控设备尚未允许鼠标和键盘输入'
         : '当前会话暂时无法发送控制指令';
     _emitNotice(message, level: RemoteNoticeLevel.warning);
+  }
+
+  void setIdleQuality(RemoteQualityProfile profile) {
+    if (!{
+      RemoteSessionState.idle,
+      RemoteSessionState.initializing,
+      RemoteSessionState.disconnected,
+      RemoteSessionState.failed,
+    }.contains(_state)) {
+      return;
+    }
+    if (_selectedQuality == profile) return;
+    _selectedQuality = profile;
+    notifyListeners();
   }
 
   void selectQuality(RemoteQualityProfile profile) {
@@ -463,8 +603,11 @@ class RemoteSessionController extends ChangeNotifier {
           event.streams.isEmpty) {
         return;
       }
+      _videoReceiver = event.receiver;
       remoteRenderer.srcObject = event.streams.first;
-      _setState(RemoteSessionState.streaming, '正在显示远程屏幕');
+      if (_state != RemoteSessionState.reconnecting) {
+        _setState(RemoteSessionState.streaming, '正在显示远程屏幕');
+      }
     };
     peerConnection.onDataChannel = (channel) {
       if (isCurrentPeerConnection()) {
@@ -475,13 +618,12 @@ class RemoteSessionController extends ChangeNotifier {
       if (!isCurrentPeerConnection()) return;
       switch (connectionState) {
         case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
-          _setState(RemoteSessionState.streaming, '远程会话已连接');
-          _emitNotice('远程会话连接成功', level: RemoteNoticeLevel.success);
+          _markPeerConnectionConnected();
         case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
+          _cancelConnectionRecovery();
           _fail('WebRTC 连接失败');
         case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
-          _setState(RemoteSessionState.disconnected, 'WebRTC 连接已中断');
-          _emitNotice('远程会话连接已中断', level: RemoteNoticeLevel.warning);
+          _startConnectionRecovery(peerConnection);
         default:
           break;
       }
@@ -504,6 +646,127 @@ class RemoteSessionController extends ChangeNotifier {
       );
       _attachMotionChannel(motionChannel);
     }
+  }
+
+  void _markPeerConnectionConnected() {
+    final recovered =
+        _connectionEstablished &&
+        (_state == RemoteSessionState.reconnecting ||
+            _connectionRecoveryTimer?.isActive == true);
+    _cancelConnectionRecovery();
+    _connectionEstablished = true;
+    _startMediaStatsSampling();
+    _setState(RemoteSessionState.streaming, recovered ? '远程会话已恢复' : '远程会话已连接');
+    _emitNotice(
+      recovered ? '远程会话连接已恢复' : '远程会话连接成功',
+      level: RemoteNoticeLevel.success,
+    );
+  }
+
+  void _startConnectionRecovery(RTCPeerConnection peerConnection) {
+    if (_connectionRecoveryTimer?.isActive == true) return;
+    _setState(RemoteSessionState.reconnecting, '连接暂时中断，正在自动恢复');
+    _emitNotice('网络连接出现波动，正在自动恢复', level: RemoteNoticeLevel.warning);
+    _connectionRecoveryTimer = Timer(const Duration(seconds: 8), () {
+      if (_closing ||
+          !identical(_peerConnection, peerConnection) ||
+          _state != RemoteSessionState.reconnecting) {
+        return;
+      }
+      unawaited(_finishConnectionRecoveryTimeout());
+    });
+  }
+
+  void _cancelConnectionRecovery() {
+    _connectionRecoveryTimer?.cancel();
+    _connectionRecoveryTimer = null;
+  }
+
+  void _startMediaStatsSampling() {
+    _mediaStatsTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      unawaited(_sampleMediaDiagnostics());
+    });
+    unawaited(_sampleMediaDiagnostics());
+  }
+
+  Future<void> _sampleMediaDiagnostics() async {
+    final peerConnection = _peerConnection;
+    if (_closing || peerConnection == null) return;
+    try {
+      final reports = await peerConnection.getStats();
+      double? fps;
+      double? encodeMs;
+      double? decodeMs;
+      double? jitterBufferMs;
+      double? networkRoundTripMs;
+      int? packetsLost;
+      String? qualityLimitationReason;
+      for (final report in reports) {
+        final values = report.values;
+        final mediaType = values['kind'] ?? values['mediaType'];
+        if (report.type == 'outbound-rtp' &&
+            (mediaType == null || mediaType == 'video')) {
+          fps ??= (values['framesPerSecond'] as num?)?.toDouble();
+          final totalEncodeTime = (values['totalEncodeTime'] as num?)
+              ?.toDouble();
+          final framesEncoded = (values['framesEncoded'] as num?)?.toDouble();
+          if (totalEncodeTime != null &&
+              framesEncoded != null &&
+              framesEncoded > 0) {
+            encodeMs = totalEncodeTime * 1000 / framesEncoded;
+          }
+          qualityLimitationReason =
+              values['qualityLimitationReason'] as String?;
+        } else if (report.type == 'inbound-rtp' &&
+            (mediaType == null || mediaType == 'video')) {
+          fps ??= (values['framesPerSecond'] as num?)?.toDouble();
+          final totalDecodeTime = (values['totalDecodeTime'] as num?)
+              ?.toDouble();
+          final framesDecoded = (values['framesDecoded'] as num?)?.toDouble();
+          if (totalDecodeTime != null &&
+              framesDecoded != null &&
+              framesDecoded > 0) {
+            decodeMs = totalDecodeTime * 1000 / framesDecoded;
+          }
+          final jitterBufferDelay = (values['jitterBufferDelay'] as num?)
+              ?.toDouble();
+          final jitterBufferEmittedCount =
+              (values['jitterBufferEmittedCount'] as num?)?.toDouble();
+          if (jitterBufferDelay != null &&
+              jitterBufferEmittedCount != null &&
+              jitterBufferEmittedCount > 0) {
+            jitterBufferMs =
+                jitterBufferDelay * 1000 / jitterBufferEmittedCount;
+          }
+          packetsLost = (values['packetsLost'] as num?)?.toInt();
+        } else if (report.type == 'candidate-pair' &&
+            (values['nominated'] == true || values['selected'] == true) &&
+            values['state'] == 'succeeded') {
+          final seconds = (values['currentRoundTripTime'] as num?)?.toDouble();
+          if (seconds != null) networkRoundTripMs = seconds * 1000;
+        }
+      }
+      if (_closing || !identical(peerConnection, _peerConnection)) return;
+      _mediaDiagnostics = RemoteMediaDiagnostics(
+        framesPerSecond: fps,
+        encodeMsPerFrame: encodeMs,
+        decodeMsPerFrame: decodeMs,
+        jitterBufferMsPerFrame: jitterBufferMs,
+        networkRoundTripMs: networkRoundTripMs,
+        packetsLost: packetsLost,
+        qualityLimitationReason: qualityLimitationReason,
+      );
+      notifyListeners();
+    } catch (_) {
+      // WebRTC stats are best-effort diagnostics and never affect the session.
+    }
+  }
+
+  Future<void> _finishConnectionRecoveryTimeout() async {
+    if (_closing || _state != RemoteSessionState.reconnecting) return;
+    await _closeSession(notifyPeer: true);
+    _setState(RemoteSessionState.disconnected, 'WebRTC 连接恢复超时');
+    _emitNotice('远程会话连接恢复超时', level: RemoteNoticeLevel.warning);
   }
 
   void _attachDataChannel(RTCDataChannel channel) {
@@ -560,7 +823,7 @@ class RemoteSessionController extends ChangeNotifier {
       if (role == RemoteRole.host) {
         await _handleHostControlMessage(message);
       } else {
-        _handleControllerControlMessage(message);
+        await _handleControllerControlMessage(message);
       }
     } on FormatException {
       // Malformed JSON never reaches a native boundary.
@@ -623,7 +886,21 @@ class RemoteSessionController extends ChangeNotifier {
         }
         _acknowledgeInput(message);
       case 'select-display':
-        await _switchHostDisplay(message['displayId'] as String? ?? '');
+        await _switchHostDisplay(
+          message['displayId'] as String? ?? '',
+          generation: (message['generation'] as num?)?.toInt() ?? 0,
+        );
+      case 'display-switch-committed':
+        await _commitHostDisplaySwitch(
+          displayId: message['displayId'] as String? ?? '',
+          generation: (message['generation'] as num?)?.toInt() ?? 0,
+        );
+      case 'display-switch-rejected':
+        await _rollbackHostDisplaySwitch(
+          generation: (message['generation'] as num?)?.toInt() ?? 0,
+          message: message['message'] as String? ?? '控制端未能渲染目标显示器',
+          notifyController: true,
+        );
       case 'refresh-host-status':
         _accessibilityGranted = await _inputBridge.checkInputAccess();
         _publishHostState();
@@ -653,7 +930,9 @@ class RemoteSessionController extends ChangeNotifier {
     return _inputSequenceGuard.accept(sequence, motion: motion);
   }
 
-  void _handleControllerControlMessage(Map<String, dynamic> message) {
+  Future<void> _handleControllerControlMessage(
+    Map<String, dynamic> message,
+  ) async {
     switch (message['type']) {
       case 'host-status':
         final previousInputAccess = _accessibilityGranted;
@@ -675,16 +954,46 @@ class RemoteSessionController extends ChangeNotifier {
             .map(RemoteDisplay.fromMessage)
             .toList(growable: false);
         final selected = message['selectedDisplayId'] as String?;
-        _selectedDisplayId = _displays.any((display) => display.id == selected)
-            ? selected
-            : _displays.firstOrNull?.id;
+        if (!_displaySwitchPending || selected == _selectedDisplayId) {
+          _selectedDisplayId =
+              _displays.any((display) => display.id == selected)
+              ? selected
+              : _displays.firstOrNull?.id;
+          _renderedDisplayId ??= _selectedDisplayId;
+        }
         notifyListeners();
-      case 'display-selected':
-        final displayId = message['displayId'] as String?;
-        if (_displays.any((display) => display.id == displayId)) {
-          _selectedDisplayId = displayId;
+      case 'display-switching':
+        final generation = (message['generation'] as num?)?.toInt() ?? 0;
+        if (generation >= _displaySwitchGeneration) {
+          _displaySwitchGeneration = generation;
+          _displaySwitchPending = true;
+          _pendingDisplayId = message['displayId'] as String?;
+          _outboundVideoFrameSize = null;
+          _inboundVideoFrameSize = null;
+          _videoGeometryState = RemoteVideoGeometryState.adapting;
+          try {
+            _displaySwitchInboundFramesBaseline = (await _readRtcVideoProgress(
+              'inbound-rtp',
+            ))?.frames;
+          } catch (_) {
+            _displaySwitchInboundFramesBaseline = null;
+          }
           notifyListeners();
-          _emitNotice('已切换远程显示器', level: RemoteNoticeLevel.success);
+        }
+      case 'display-selected':
+        await _confirmRemoteDisplaySelection(message);
+      case 'display-switch-error':
+        final generation = (message['generation'] as num?)?.toInt() ?? 0;
+        if (generation == 0 || generation >= _displaySwitchGeneration) {
+          _displaySwitchRequestTimer?.cancel();
+          _displaySwitchPending = false;
+          _pendingDisplayId = null;
+          _videoGeometryState = RemoteVideoGeometryState.stable;
+          notifyListeners();
+          _emitNotice(
+            message['message'] as String? ?? '远程显示器切换失败',
+            level: RemoteNoticeLevel.error,
+          );
         }
       case 'quality-state':
         _selectedQuality = RemoteQualityProfile.fromWireValue(
@@ -692,6 +1001,22 @@ class RemoteSessionController extends ChangeNotifier {
         );
         _actualVideoWidth = (message['width'] as num?)?.toInt();
         _actualVideoHeight = (message['height'] as num?)?.toInt();
+        final expected = RemoteVideoFrameSize(
+          width: _actualVideoWidth ?? 0,
+          height: _actualVideoHeight ?? 0,
+        );
+        _expectedVideoFrameSize = expected.isValid ? expected : null;
+        final outbound = RemoteVideoFrameSize(
+          width: (message['outboundWidth'] as num?)?.toInt() ?? 0,
+          height: (message['outboundHeight'] as num?)?.toInt() ?? 0,
+        );
+        if (outbound.isValid) _outboundVideoFrameSize = outbound;
+        final reportedGeometryState = RemoteVideoGeometryState.fromWireValue(
+          message['geometryState'] as String?,
+        );
+        if (!_displaySwitchPending) {
+          _videoGeometryState = reportedGeometryState;
+        }
         final wasPending = _qualityPending;
         _qualityRequestTimer?.cancel();
         _qualityPending = false;
@@ -742,6 +1067,113 @@ class RemoteSessionController extends ChangeNotifier {
         notifyListeners();
         _emitNotice(_controlError!, level: RemoteNoticeLevel.error);
     }
+  }
+
+  Future<void> _confirmRemoteDisplaySelection(
+    Map<String, dynamic> message,
+  ) async {
+    final displayId = message['displayId'] as String?;
+    final generation = (message['generation'] as num?)?.toInt() ?? 0;
+    if (displayId == null ||
+        !_displays.any((display) => display.id == displayId) ||
+        (generation > 0 && generation < _displaySwitchGeneration)) {
+      return;
+    }
+    if (generation > 0) _displaySwitchGeneration = generation;
+
+    final expected = RemoteVideoFrameSize.fromMessage(message);
+    _expectedVideoFrameSize = expected.isValid ? expected : null;
+    final outbound = RemoteVideoFrameSize(
+      width: (message['outboundWidth'] as num?)?.toInt() ?? 0,
+      height: (message['outboundHeight'] as num?)?.toInt() ?? 0,
+    );
+    if (outbound.isValid) _outboundVideoFrameSize = outbound;
+    notifyListeners();
+
+    final inboundProgress = await _waitForInboundVideoProgress(
+      afterFrames: _displaySwitchInboundFramesBaseline,
+    );
+    if (generation > 0 && generation < _displaySwitchGeneration) return;
+
+    _displaySwitchRequestTimer?.cancel();
+    _displaySwitchPending = false;
+    _pendingDisplayId = null;
+    if (inboundProgress == null) {
+      _displaySwitchInboundFramesBaseline = null;
+      notifyListeners();
+      _sendControl({
+        'type': 'display-switch-rejected',
+        'version': 2,
+        'displayId': displayId,
+        'generation': generation,
+        'message': '未收到目标显示器的稳定视频帧',
+      });
+      _emitNotice(
+        '显示器切换失败：未收到新的解码视频帧，已请求恢复原画面',
+        level: RemoteNoticeLevel.error,
+      );
+      return;
+    }
+
+    _selectedDisplayId = displayId;
+    _renderedDisplayId = displayId;
+    _inboundVideoFrameSize = inboundProgress.size.isValid
+        ? inboundProgress.size
+        : _inboundVideoFrameSize;
+    final senderMismatch = message['geometryMismatch'] == true;
+    _videoGeometryState =
+        senderMismatch ||
+            !_videoGeometryApproximatelyMatches(_inboundVideoFrameSize)
+        ? RemoteVideoGeometryState.adapting
+        : RemoteVideoGeometryState.stable;
+    _displaySwitchInboundFramesBaseline = null;
+    notifyListeners();
+    _sendControl({
+      'type': 'display-switch-committed',
+      'version': 2,
+      'displayId': displayId,
+      'generation': generation,
+    });
+    if (_videoGeometryState == RemoteVideoGeometryState.adapting) {
+      _emitNotice('已切换远程显示器，画质正在后台适配', level: RemoteNoticeLevel.success);
+      _observeVideoGeometry(statType: 'inbound-rtp', generation: generation);
+    } else {
+      _emitNotice('已切换远程显示器', level: RemoteNoticeLevel.success);
+    }
+  }
+
+  Future<_RtcVideoProgress?> _waitForInboundVideoProgress({
+    int? afterFrames,
+  }) async {
+    _RtcVideoProgress? latest;
+    var stableSamples = 0;
+    for (var attempt = 0; attempt < 20; attempt += 1) {
+      _RtcVideoProgress? progress;
+      try {
+        progress = await _readRtcVideoProgress('inbound-rtp');
+        latest = progress ?? latest;
+      } catch (_) {
+        // Receiver stats are sampled again until the media-flow timeout.
+      }
+      if (latest?.size.isValid == true) {
+        _inboundVideoFrameSize = latest!.size;
+      }
+      if (_videoFramesAdvanced(progress, afterFrames: afterFrames)) {
+        stableSamples += 1;
+      } else {
+        stableSamples = 0;
+      }
+      // The host already proved the selected ScreenCaptureKit source. Here we
+      // only need to prove that new media reached the decoder; encoder and
+      // renderer geometry are quality diagnostics, not display identity.
+      if (stableSamples >= 2) {
+        notifyListeners();
+        return latest;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    notifyListeners();
+    return null;
   }
 
   void _sendControl(Map<String, dynamic> message) {
@@ -828,18 +1260,25 @@ class RemoteSessionController extends ChangeNotifier {
     });
   }
 
-  Future<void> _applyVideoQuality(RemoteQualityProfile profile) async {
+  Future<void> _applyVideoQuality(
+    RemoteQualityProfile profile, {
+    bool reportFailure = true,
+    bool publishState = true,
+    RemoteDisplay? display,
+  }) async {
     try {
       final sender = _videoSender;
       if (sender == null) {
         throw StateError('视频发送器尚未就绪');
       }
       final parameters = sender.parameters;
+      parameters.degradationPreference = RTCDegradationPreference.BALANCED;
       final encodings = parameters.encodings;
       if (encodings == null || encodings.isEmpty) {
         throw StateError('当前视频编码器不支持动态画质切换');
       }
-      final scale = profile.scaleFor(selectedDisplay);
+      final qualityDisplay = display ?? selectedDisplay;
+      final scale = profile.scaleFor(qualityDisplay);
       for (final encoding in encodings) {
         encoding
           ..maxBitrate = profile.maxBitrate
@@ -851,10 +1290,11 @@ class RemoteSessionController extends ChangeNotifier {
         throw StateError('视频编码器拒绝了新的画质参数');
       }
       _selectedQuality = profile;
-      _updateExpectedVideoSize(scale);
-      _publishQualityState();
+      _updateExpectedVideoSize(scale, display: qualityDisplay);
+      if (publishState) _publishQualityState();
       notifyListeners();
     } catch (error) {
+      if (!reportFailure) rethrow;
       _sendControl({
         'type': 'quality-error',
         'version': 2,
@@ -864,15 +1304,22 @@ class RemoteSessionController extends ChangeNotifier {
     }
   }
 
-  void _updateExpectedVideoSize(double scale) {
-    final display = selectedDisplay;
-    if (display == null || display.width <= 0 || display.height <= 0) {
+  void _updateExpectedVideoSize(double scale, {RemoteDisplay? display}) {
+    display ??= selectedDisplay;
+    if (display == null ||
+        display.captureWidth <= 0 ||
+        display.captureHeight <= 0) {
       _actualVideoWidth = null;
       _actualVideoHeight = null;
+      _expectedVideoFrameSize = null;
       return;
     }
-    _actualVideoWidth = math.max(1, (display.width / scale).round());
-    _actualVideoHeight = math.max(1, (display.height / scale).round());
+    _actualVideoWidth = math.max(1, (display.captureWidth / scale).round());
+    _actualVideoHeight = math.max(1, (display.captureHeight / scale).round());
+    _expectedVideoFrameSize = RemoteVideoFrameSize(
+      width: _actualVideoWidth!,
+      height: _actualVideoHeight!,
+    );
   }
 
   void _publishQualityState() {
@@ -882,9 +1329,71 @@ class RemoteSessionController extends ChangeNotifier {
       'profile': _selectedQuality.name,
       'width': _actualVideoWidth,
       'height': _actualVideoHeight,
+      'outboundWidth': _outboundVideoFrameSize?.width,
+      'outboundHeight': _outboundVideoFrameSize?.height,
+      'geometryState': _videoGeometryState.name,
       'maxBitrate': _selectedQuality.maxBitrate,
       'maxFramerate': _selectedQuality.maxFramerate,
     });
+  }
+
+  Future<RemoteVideoFrameSize?> _readRtcVideoFrameSize(String statType) async {
+    final progress = await _readRtcVideoProgress(statType);
+    return progress?.size.isValid == true ? progress!.size : null;
+  }
+
+  Future<_RtcVideoProgress?> _readRtcVideoProgress(String statType) async {
+    final reports = statType == 'outbound-rtp'
+        ? await _videoSender?.getStats()
+        : await _videoReceiver?.getStats();
+    if (reports == null) return null;
+    final size = RemoteVideoFrameSize.fromRtcStats(
+      reports.map(
+        (report) => <dynamic, dynamic>{...report.values, 'type': report.type},
+      ),
+      statType: statType,
+    );
+    int? frames;
+    final framesKey = statType == 'outbound-rtp'
+        ? 'framesEncoded'
+        : 'framesDecoded';
+    for (final report in reports) {
+      if (report.type != statType) continue;
+      final mediaType = report.values['kind'] ?? report.values['mediaType'];
+      if (mediaType != null && mediaType != 'video') continue;
+      final candidate = (report.values[framesKey] as num?)?.toInt();
+      if (candidate != null && (frames == null || candidate > frames)) {
+        frames = candidate;
+      }
+    }
+    if (size == null && frames == null) return null;
+    return _RtcVideoProgress(
+      size: size ?? const RemoteVideoFrameSize(width: 0, height: 0),
+      frames: frames,
+    );
+  }
+
+  Future<RemoteVideoFrameSize?> _waitForOutboundVideoFrameSize(
+    RemoteVideoFrameSize? expected,
+  ) async {
+    RemoteVideoFrameSize? latest;
+    for (var attempt = 0; attempt < 12; attempt += 1) {
+      try {
+        latest = await _readRtcVideoFrameSize('outbound-rtp') ?? latest;
+      } catch (_) {
+        // Stats are diagnostic. Failure must not tear down a working session.
+      }
+      if (latest != null &&
+          (expected == null || latest.approximatelyMatches(expected))) {
+        break;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    if (latest != null) {
+      _outboundVideoFrameSize = latest;
+      notifyListeners();
+    }
+    return latest;
   }
 
   Future<void> _reportInputFailure(Object error) async {
@@ -947,7 +1456,12 @@ class RemoteSessionController extends ChangeNotifier {
     await _flushPendingCandidates();
     final answer = await _peerConnection!.createAnswer({});
     await _peerConnection!.setLocalDescription(answer);
-    _signaling.send({'type': 'answer', 'sdp': answer.sdp});
+    _signaling.send({
+      'type': 'answer',
+      'sdp': answer.sdp,
+      if (message['negotiationId'] case final String negotiationId)
+        'negotiationId': negotiationId,
+    });
   }
 
   Future<void> _acceptAnswer(Map<String, dynamic> message) async {
@@ -1027,6 +1541,7 @@ class RemoteSessionController extends ChangeNotifier {
       _videoSender = await _peerConnection!.addTrack(track, stream);
     }
     await _applyVideoQuality(_selectedQuality);
+    unawaited(_refreshOutboundVideoDiagnostics());
     _subscribeToDisplayChanges();
     _publishHostState();
     _publishDisplayList();
@@ -1034,14 +1549,138 @@ class RemoteSessionController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> _refreshOutboundVideoDiagnostics() async {
+    await _waitForOutboundVideoFrameSize(_expectedVideoFrameSize);
+    _publishQualityState();
+  }
+
   Future<MediaStream> _captureDisplay(DesktopCapturerSource source) {
     return navigator.mediaDevices.getDisplayMedia({
       'audio': false,
       'video': {
         'deviceId': {'exact': source.id},
-        'mandatory': {'frameRate': 30.0},
+        'mandatory': {'frameRate': _selectedQuality.maxFramerate.toDouble()},
       },
     });
+  }
+
+  Future<bool> _waitForCaptureFirstFrame({
+    required String sourceId,
+    required int afterSequence,
+  }) async {
+    for (var attempt = 0; attempt < 30; attempt += 1) {
+      try {
+        final state = await _inputBridge.getCaptureFrameState();
+        if (state.sequence > afterSequence &&
+            state.sourceId == sourceId &&
+            state.width > 0 &&
+            state.height > 0) {
+          return true;
+        }
+      } catch (_) {
+        // A missing native readiness signal must not be mistaken for success.
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    return false;
+  }
+
+  Future<_RtcVideoProgress?> _waitForOutboundVideoProgress({
+    int? afterFrames,
+  }) async {
+    _RtcVideoProgress? latest;
+    var stableSamples = 0;
+    for (var attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        latest = await _readRtcVideoProgress('outbound-rtp') ?? latest;
+      } catch (_) {
+        // Sender statistics are sampled again until the media-flow timeout.
+      }
+      if (_videoFramesAdvanced(latest, afterFrames: afterFrames)) {
+        stableSamples += 1;
+      } else {
+        stableSamples = 0;
+      }
+      if (stableSamples >= 2) return latest;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    return null;
+  }
+
+  bool _videoFramesAdvanced(
+    _RtcVideoProgress? progress, {
+    required int? afterFrames,
+  }) {
+    final frames = progress?.frames;
+    if (frames != null) {
+      return afterFrames == null ? frames > 0 : frames > afterFrames;
+    }
+    // Some platform WebRTC builds omit frame counters. A valid RTP geometry is
+    // a best-effort fallback only when no baseline counter was available.
+    return afterFrames == null && progress?.size.isValid == true;
+  }
+
+  bool _videoGeometryApproximatelyMatches(RemoteVideoFrameSize? actual) {
+    final expected = _expectedVideoFrameSize;
+    return expected == null ||
+        (actual?.isValid == true && actual!.approximatelyMatches(expected));
+  }
+
+  void _observeVideoGeometry({
+    required String statType,
+    required int generation,
+  }) {
+    final token = ++_geometryObservationToken;
+    unawaited(
+      _runVideoGeometryObservation(
+        statType: statType,
+        generation: generation,
+        token: token,
+      ),
+    );
+  }
+
+  Future<void> _runVideoGeometryObservation({
+    required String statType,
+    required int generation,
+    required int token,
+  }) async {
+    var stableSamples = 0;
+    for (var attempt = 0; attempt < 24; attempt += 1) {
+      if (_closing ||
+          token != _geometryObservationToken ||
+          generation != _displaySwitchGeneration) {
+        return;
+      }
+      try {
+        final progress = await _readRtcVideoProgress(statType);
+        if (progress?.size.isValid == true) {
+          if (statType == 'outbound-rtp') {
+            _outboundVideoFrameSize = progress!.size;
+          } else {
+            _inboundVideoFrameSize = progress!.size;
+          }
+          if (_videoGeometryApproximatelyMatches(progress.size)) {
+            stableSamples += 1;
+          } else {
+            stableSamples = 0;
+          }
+        }
+      } catch (_) {
+        // Geometry is diagnostic and must never tear down working media.
+      }
+      if (stableSamples >= 2) {
+        _videoGeometryState = RemoteVideoGeometryState.stable;
+        if (role == RemoteRole.host) _publishQualityState();
+        notifyListeners();
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
+    if (_closing || token != _geometryObservationToken) return;
+    _videoGeometryState = RemoteVideoGeometryState.constrained;
+    if (role == RemoteRole.host) _publishQualityState();
+    notifyListeners();
   }
 
   Future<void> _loadDisplaySources() async {
@@ -1062,6 +1701,9 @@ class RemoteSessionController extends ChangeNotifier {
             name: native?.name ?? source.name,
             width: native?.width ?? 0,
             height: native?.height ?? 0,
+            pixelWidth: native?.pixelWidth ?? 0,
+            pixelHeight: native?.pixelHeight ?? 0,
+            pointPixelScale: native?.pointPixelScale ?? 1,
             isPrimary: native?.isPrimary ?? false,
           );
         })
@@ -1083,57 +1725,401 @@ class RemoteSessionController extends ChangeNotifier {
     return null;
   }
 
-  Future<void> _switchHostDisplay(String displayId) async {
-    if (role != RemoteRole.host || displayId == _selectedDisplayId) {
+  RemoteDisplay? _displayForId(String? displayId) {
+    for (final display in _displays) {
+      if (display.id == displayId) return display;
+    }
+    return null;
+  }
+
+  Future<void> _switchHostDisplay(
+    String displayId, {
+    int generation = 0,
+  }) async {
+    if (role != RemoteRole.host) return;
+    if (generation > 0 && generation < _displaySwitchGeneration) return;
+    if (generation > 0) _displaySwitchGeneration = generation;
+    if (_hostDisplaySwitchInProgress) {
+      _sendDisplaySwitchError(
+        generation: generation,
+        message: '被控设备正在切换显示器，请稍后重试',
+      );
+      return;
+    }
+    if (displayId == _selectedDisplayId) {
+      await _publishDisplaySelected(displayId, generation: generation);
       return;
     }
     final source = _sourceForId(displayId);
-    if (source == null) {
-      _sendControl({
-        'type': 'input-error',
-        'version': 2,
-        'code': 'DISPLAY_NOT_FOUND',
-        'message': '选择的显示器已不可用',
-      });
+    final targetDisplay = _displayForId(displayId);
+    if (source == null || targetDisplay == null) {
+      _sendDisplaySwitchError(generation: generation, message: '选择的显示器已不可用');
       return;
     }
 
-    final replacementStream = await _captureDisplay(source);
-    final replacementTracks = replacementStream.getVideoTracks();
-    if (replacementTracks.isEmpty) {
-      await replacementStream.dispose();
-      throw StateError('新显示器未返回视频轨道');
-    }
+    _hostDisplaySwitchInProgress = true;
+    _geometryObservationToken += 1;
+    _videoGeometryState = RemoteVideoGeometryState.adapting;
+    _sendControl({
+      'type': 'display-switching',
+      'version': 2,
+      'displayId': displayId,
+      'generation': generation,
+    });
+    notifyListeners();
+
     final previousStream = _localStream;
-    final replacementTrack = replacementTracks.first;
-    if (_videoSender != null) {
-      await _videoSender!.replaceTrack(replacementTrack);
-    } else {
-      _videoSender = await _peerConnection!.addTrack(
-        replacementTrack,
-        replacementStream,
+    final previousDisplayId = _selectedDisplayId;
+    final previousDisplay = _displayForId(previousDisplayId);
+    final previousTrack = previousStream?.getVideoTracks().firstOrNull;
+    MediaStream? replacementStream;
+    var replacementAttached = false;
+    var switchedInPlace = false;
+    try {
+      if (previousStream == null || previousTrack == null) {
+        throw StateError('当前显示器视频轨道不可用');
+      }
+      final previousTrackId = previousTrack.id;
+      if (previousTrackId == null || previousTrackId.isEmpty) {
+        throw StateError('当前显示器视频轨道缺少标识');
+      }
+      final captureBaseline = await _inputBridge.getCaptureFrameState();
+      _RtcVideoProgress? outboundBaseline;
+      final sender = _videoSender;
+      if (sender == null || _peerConnection == null) {
+        throw StateError('WebRTC 视频发送器尚未建立');
+      }
+
+      try {
+        switchedInPlace = await desktopCapturer.switchSource(
+          trackId: previousTrackId,
+          sourceId: displayId,
+          frameRate: _selectedQuality.maxFramerate,
+        );
+      } catch (error) {
+        _emitNotice(
+          '原地切屏暂不可用，正在使用兼容切换：$error',
+          level: RemoteNoticeLevel.warning,
+        );
+      }
+
+      if (!switchedInPlace) {
+        replacementStream = await _captureDisplay(source);
+        final replacementTrack = replacementStream.getVideoTracks().firstOrNull;
+        if (replacementTrack == null) {
+          throw StateError('新显示器未返回视频轨道');
+        }
+        final captureReady = await _waitForCaptureFirstFrame(
+          sourceId: displayId,
+          afterSequence: captureBaseline.sequence,
+        );
+        if (!captureReady) {
+          throw TimeoutException('目标显示器未产生有效采集帧');
+        }
+        outboundBaseline = await _readRtcVideoProgress('outbound-rtp');
+        // Keep the negotiated transceiver, MID, SSRC and data channels stable.
+        // This compatibility path replaces only the track and never rebuilds
+        // the PeerConnection or renegotiates SDP.
+        await sender.replaceTrack(replacementTrack);
+        replacementAttached = true;
+      } else {
+        // The native operation completes after the running SCStream has
+        // accepted its new filter/configuration and before the first target
+        // frame readiness event is published.
+        outboundBaseline = await _readRtcVideoProgress('outbound-rtp');
+        final captureReady = await _waitForCaptureFirstFrame(
+          sourceId: displayId,
+          afterSequence: captureBaseline.sequence,
+        );
+        if (!captureReady) {
+          throw TimeoutException('目标显示器未产生有效采集帧');
+        }
+      }
+      _outboundVideoFrameSize = null;
+
+      try {
+        await _applyVideoQuality(
+          _selectedQuality,
+          reportFailure: false,
+          publishState: false,
+          display: targetDisplay,
+        );
+      } catch (error) {
+        _updateExpectedVideoSize(
+          _selectedQuality.scaleFor(targetDisplay),
+          display: targetDisplay,
+        );
+        _emitNotice(
+          '目标显示器画质参数将在编码器稳定后恢复：$error',
+          level: RemoteNoticeLevel.warning,
+        );
+      }
+
+      final outboundReady = await _waitForOutboundVideoProgress(
+        afterFrames: outboundBaseline?.frames,
       );
+      if (outboundReady == null) {
+        throw TimeoutException('编码器未输出新的目标显示器视频帧');
+      }
+      _outboundVideoFrameSize = outboundReady.size;
+      _videoGeometryState =
+          _videoGeometryApproximatelyMatches(_outboundVideoFrameSize)
+          ? RemoteVideoGeometryState.stable
+          : RemoteVideoGeometryState.adapting;
+      _selectedDisplayId = displayId;
+      _localStream = switchedInPlace ? previousStream : replacementStream;
+      final transaction = _HostDisplaySwitchTransaction(
+        generation: generation,
+        previousDisplayId: previousDisplayId,
+        targetDisplayId: displayId,
+        previousStream: previousStream,
+        targetStream: _localStream!,
+        switchedInPlace: switchedInPlace,
+      );
+      _hostDisplaySwitchTransaction = transaction;
+      if (!switchedInPlace) replacementStream = null;
+      _publishQualityState();
+      await _publishDisplaySelected(displayId, generation: generation);
+      _publishDisplayList();
+      transaction.timeout = Timer(const Duration(seconds: 3), () {
+        unawaited(
+          _rollbackHostDisplaySwitch(
+            generation: generation,
+            message: '控制端未确认目标显示器画面',
+            notifyController: true,
+          ),
+        );
+      });
+      unawaited(
+        Future<void>.delayed(
+          const Duration(milliseconds: 300),
+          _publishColorDiagnostics,
+        ),
+      );
+      if (_videoGeometryState == RemoteVideoGeometryState.adapting) {
+        _observeVideoGeometry(statType: 'outbound-rtp', generation: generation);
+      }
+    } catch (error) {
+      _selectedDisplayId = previousDisplayId;
+      _localStream = previousStream;
+      _videoGeometryState = RemoteVideoGeometryState.stable;
+      Object? rollbackError;
+      if (switchedInPlace &&
+          previousTrack != null &&
+          previousDisplayId != null) {
+        try {
+          final rollbackBaseline = await _inputBridge.getCaptureFrameState();
+          final restored = await desktopCapturer.switchSource(
+            trackId: previousTrack.id!,
+            sourceId: previousDisplayId,
+            frameRate: _selectedQuality.maxFramerate,
+          );
+          if (!restored ||
+              !await _waitForCaptureFirstFrame(
+                sourceId: previousDisplayId,
+                afterSequence: rollbackBaseline.sequence,
+              )) {
+            throw StateError('原显示器未恢复有效采集帧');
+          }
+          if (previousDisplay != null) {
+            await _applyVideoQuality(
+              _selectedQuality,
+              reportFailure: false,
+              publishState: false,
+              display: previousDisplay,
+            );
+          }
+        } catch (restoreError) {
+          rollbackError = restoreError;
+        }
+      } else if (replacementAttached && previousTrack != null) {
+        try {
+          await _videoSender?.replaceTrack(previousTrack);
+          if (previousDisplay != null) {
+            await _applyVideoQuality(
+              _selectedQuality,
+              reportFailure: false,
+              publishState: false,
+              display: previousDisplay,
+            );
+          }
+        } catch (restoreError) {
+          rollbackError = restoreError;
+        }
+      }
+      _sendDisplaySwitchError(
+        generation: generation,
+        message: rollbackError == null
+            ? '切换显示器失败：$error'
+            : '切换显示器失败：$error；恢复原显示器失败：$rollbackError',
+      );
+    } finally {
+      try {
+        for (final track
+            in replacementStream?.getTracks() ?? <MediaStreamTrack>[]) {
+          track.stop();
+        }
+        await replacementStream?.dispose();
+      } catch (_) {
+        // A failed replacement capture is detached from the sender already.
+      }
+      if (_hostDisplaySwitchTransaction == null) {
+        _hostDisplaySwitchInProgress = false;
+      }
+      notifyListeners();
     }
-    _localStream = replacementStream;
-    _selectedDisplayId = displayId;
-    for (final track in previousStream?.getTracks() ?? <MediaStreamTrack>[]) {
-      track.stop();
+  }
+
+  Future<void> _commitHostDisplaySwitch({
+    required String displayId,
+    required int generation,
+  }) async {
+    final transaction = _hostDisplaySwitchTransaction;
+    if (transaction == null ||
+        transaction.generation != generation ||
+        transaction.targetDisplayId != displayId) {
+      return;
     }
-    await previousStream?.dispose();
+    transaction.timeout?.cancel();
+    _hostDisplaySwitchTransaction = null;
+    _hostDisplaySwitchInProgress = false;
+    if (!transaction.switchedInPlace) {
+      await _disposeMediaStream(transaction.previousStream);
+    }
+    notifyListeners();
+  }
+
+  Future<void> _rollbackHostDisplaySwitch({
+    required int generation,
+    required String message,
+    required bool notifyController,
+  }) async {
+    final transaction = _hostDisplaySwitchTransaction;
+    if (transaction == null || transaction.generation != generation) return;
+    transaction.timeout?.cancel();
+    _hostDisplaySwitchTransaction = null;
+    try {
+      final activeTrack = transaction.targetStream.getVideoTracks().firstOrNull;
+      if (activeTrack == null) {
+        throw StateError('当前显示器视频轨道已经不可用');
+      }
+      if (transaction.switchedInPlace) {
+        final previousDisplayId = transaction.previousDisplayId;
+        if (previousDisplayId == null) {
+          throw StateError('原显示器标识已经不可用');
+        }
+        final captureBaseline = await _inputBridge.getCaptureFrameState();
+        final activeTrackId = activeTrack.id;
+        if (activeTrackId == null || activeTrackId.isEmpty) {
+          throw StateError('当前显示器视频轨道缺少标识');
+        }
+        final restored = await desktopCapturer.switchSource(
+          trackId: activeTrackId,
+          sourceId: previousDisplayId,
+          frameRate: _selectedQuality.maxFramerate,
+        );
+        if (!restored ||
+            !await _waitForCaptureFirstFrame(
+              sourceId: previousDisplayId,
+              afterSequence: captureBaseline.sequence,
+            )) {
+          throw StateError('原显示器未恢复有效采集帧');
+        }
+      } else {
+        final previousTrack = transaction.previousStream
+            .getVideoTracks()
+            .firstOrNull;
+        if (previousTrack == null) {
+          throw StateError('原显示器视频轨道已经不可用');
+        }
+        await _videoSender?.replaceTrack(previousTrack);
+      }
+      _selectedDisplayId = transaction.previousDisplayId;
+      _localStream = transaction.switchedInPlace
+          ? transaction.targetStream
+          : transaction.previousStream;
+      final previousDisplay = _displayForId(transaction.previousDisplayId);
+      if (previousDisplay != null) {
+        await _applyVideoQuality(
+          _selectedQuality,
+          reportFailure: false,
+          publishState: false,
+          display: previousDisplay,
+        );
+      }
+      _outboundVideoFrameSize = await _waitForOutboundVideoFrameSize(
+        _expectedVideoFrameSize,
+      );
+      _videoGeometryState =
+          _videoGeometryApproximatelyMatches(_outboundVideoFrameSize)
+          ? RemoteVideoGeometryState.stable
+          : RemoteVideoGeometryState.constrained;
+      _publishQualityState();
+      _publishDisplayList();
+    } catch (error) {
+      message = '$message；恢复原显示器失败：$error';
+    } finally {
+      if (!transaction.switchedInPlace) {
+        await _disposeMediaStream(transaction.targetStream);
+      }
+      _hostDisplaySwitchInProgress = false;
+      notifyListeners();
+    }
+    if (notifyController) {
+      _sendDisplaySwitchError(generation: generation, message: message);
+    }
+  }
+
+  Future<void> _disposeMediaStream(MediaStream stream) async {
+    try {
+      for (final track in stream.getTracks()) {
+        track.stop();
+      }
+      await stream.dispose();
+    } catch (_) {
+      // Media cleanup is best-effort and must not change transaction state.
+    }
+  }
+
+  Future<void> _publishDisplaySelected(
+    String displayId, {
+    required int generation,
+  }) async {
+    final expected = _expectedVideoFrameSize;
+    RemoteVideoFrameSize? outbound = _outboundVideoFrameSize;
+    try {
+      outbound ??= await _readRtcVideoFrameSize('outbound-rtp');
+    } catch (_) {
+      // Sender stats are diagnostic and must not fail a working switch.
+    }
+    if (outbound != null) _outboundVideoFrameSize = outbound;
     _sendControl({
       'type': 'display-selected',
       'version': 2,
       'displayId': displayId,
+      'generation': generation,
+      if (expected != null) ...expected.toMessage(),
+      if (outbound != null) ...{
+        'outboundWidth': outbound.width,
+        'outboundHeight': outbound.height,
+      },
+      'geometryMismatch': expected != null && outbound != null
+          ? !outbound.approximatelyMatches(expected)
+          : false,
+      'geometryState': _videoGeometryState.name,
     });
-    await _applyVideoQuality(_selectedQuality);
-    _publishDisplayList();
-    unawaited(
-      Future<void>.delayed(
-        const Duration(milliseconds: 300),
-        _publishColorDiagnostics,
-      ),
-    );
-    notifyListeners();
+  }
+
+  void _sendDisplaySwitchError({
+    required int generation,
+    required String message,
+  }) {
+    _sendControl({
+      'type': 'display-switch-error',
+      'version': 2,
+      'generation': generation,
+      'message': message,
+    });
   }
 
   Future<void> _refreshHostDisplays() async {
@@ -1188,9 +2174,19 @@ class RemoteSessionController extends ChangeNotifier {
 
   void _handleSignalingClosed(int? code, String? reason) {
     if (!_closing) {
-      final message = switch (reason) {
+      final reasonParts = reason?.split(':') ?? const <String>[];
+      final reasonCode = reasonParts.firstOrNull;
+      final retryAfterSeconds = reasonParts.length > 1
+          ? int.tryParse(reasonParts[1])
+          : null;
+      final retryLabel = retryAfterSeconds == null
+          ? '稍后再试'
+          : '$retryAfterSeconds 秒后重试';
+      final message = switch (reasonCode) {
         'INVALID_ROOM' => '连接码不存在、尚未启用或已经过期',
         'CODE_CONSUMED' => '连接码已经使用，请让被控设备重新生成',
+        'RATE_LIMITED_INVITATION' => '当前连接码尝试过多，请更换连接码或$retryLabel',
+        'RATE_LIMITED_SOURCE' => '当前设备尝试连接过于频繁，请$retryLabel',
         'RATE_LIMITED' => '连接码尝试过多，请稍后再试',
         'ROLE_OCCUPIED' => '该设备角色已经连接',
         _ => '信令连接已断开',
@@ -1202,6 +2198,7 @@ class RemoteSessionController extends ChangeNotifier {
 
   Future<void> _closeSession({required bool notifyPeer}) async {
     _closing = true;
+    _cancelConnectionRecovery();
     if (notifyPeer && _signaling.isConnected) {
       try {
         _signaling.send({'type': 'hangup'});
@@ -1221,16 +2218,28 @@ class RemoteSessionController extends ChangeNotifier {
     _inputPermissionPollTimer = null;
     _qualityRequestTimer?.cancel();
     _qualityRequestTimer = null;
+    _displaySwitchRequestTimer?.cancel();
+    _displaySwitchRequestTimer = null;
+    _mediaStatsTimer?.cancel();
+    _mediaStatsTimer = null;
     await _displayAddedSubscription?.cancel();
     _displayAddedSubscription = null;
     await _displayRemovedSubscription?.cancel();
     _displayRemovedSubscription = null;
+    final displayTransaction = _hostDisplaySwitchTransaction;
+    displayTransaction?.timeout?.cancel();
+    _hostDisplaySwitchTransaction = null;
+    if (displayTransaction != null &&
+        !identical(displayTransaction.previousStream, _localStream)) {
+      await _disposeMediaStream(displayTransaction.previousStream);
+    }
     for (final track in _localStream?.getTracks() ?? <MediaStreamTrack>[]) {
       track.stop();
     }
     await _localStream?.dispose();
     _localStream = null;
     _videoSender = null;
+    _videoReceiver = null;
     await _peerConnection?.close();
     await _peerConnection?.dispose();
     _peerConnection = null;
@@ -1242,7 +2251,13 @@ class RemoteSessionController extends ChangeNotifier {
     _displaySources = const [];
     _displays = const [];
     _selectedDisplayId = null;
+    _renderedDisplayId = null;
+    _pendingDisplayId = null;
     _remoteDeviceId = null;
+    _decoderOutputColorDiagnostics = null;
+    _renderOutputColorDiagnostics = null;
+    _receiverColorConversion = null;
+    _mediaDiagnostics = null;
     _colorDiagnostics = null;
     _screenCaptureGranted = false;
     if (role == RemoteRole.controller) {
@@ -1252,6 +2267,12 @@ class RemoteSessionController extends ChangeNotifier {
     _checkingInputPermission = false;
     _inputConfirmed = false;
     _qualityPending = false;
+    _displaySwitchPending = false;
+    _hostDisplaySwitchInProgress = false;
+    _connectionEstablished = false;
+    _displaySwitchGeneration = 0;
+    _geometryObservationToken += 1;
+    _displaySwitchInboundFramesBaseline = null;
     _inputSequence = 0;
     _inputSequenceGuard.reset();
     _inputPermissionPollAttempts = 0;
@@ -1260,6 +2281,10 @@ class RemoteSessionController extends ChangeNotifier {
     _inputRoundTripMs = null;
     _actualVideoWidth = null;
     _actualVideoHeight = null;
+    _expectedVideoFrameSize = null;
+    _outboundVideoFrameSize = null;
+    _inboundVideoFrameSize = null;
+    _videoGeometryState = RemoteVideoGeometryState.stable;
     _closing = false;
   }
 
@@ -1307,4 +2332,11 @@ class RemoteSessionController extends ChangeNotifier {
       _rendererReady = false;
     }
   }
+}
+
+RemoteFrameColorDiagnostics? _frameColorDiagnostics(Object? value) {
+  if (value is! Map) return null;
+  return RemoteFrameColorDiagnostics.fromMessage(
+    value.map((key, item) => MapEntry(key.toString(), item)),
+  );
 }

@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 iPad→Mac 局域网原型进行中。** 基本连接、画面和远程输入已经用户验证；客户端现已增加稳定的本地编辑兼容输入、顶部全局消息、色彩/HDR 诊断、按显示器保存的显示调整，以及明确的 macOS SDR/Rec.709/Video-Range 采集管线。macOS、iOS Simulator、无签名 iOS 真机目标构建和 44 个 Flutter 测试通过；色彩、HDR A/B、输入法手感和断开后重新发现仍需物理双设备复验。
+> 当前状态：**M0 工程基线已完成，M1 iPad→Mac 局域网原型进行中。** 基本连接、画面和远程输入已经用户验证；Apple 媒体链已具备三阶段色彩诊断、Mac GPU HDR→SDR 和 iPad BT.709 渲染。主屏与 Sidecar 在同一个 `SCStream`、RTC Track 和 Sender 上原地切换，编码尺寸暂未收敛只进入后台画质适配，不再错误回滚主屏；Sidecar/Retina 采集已分离逻辑坐标与实际像素尺寸，并按 `pointPixelScale` 请求最佳分辨率。会话页提供实际 FPS、编解码、抖动缓冲、网络 RTT 和本地元数据历史。Flutter `analyze`、57 个测试及 macOS/iOS Debug 构建通过；实际清晰度、色彩、连续切屏和延迟仍需物理双设备复验。
 
 ## 项目定位
 
@@ -231,11 +231,24 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 
 - 全局 Message 使用安全区下方、屏幕高度约 17% 的 Overlay，不再占据底部操作区域。
 - 远程工具栏“显示调整与色彩诊断”提供自动、标准 SDR、柔和高光和自定义亮度/对比度/饱和度；设置按远程设备和显示器独立保存。
-- 色彩诊断显示实际捕获像素格式、Full/Video Range、原色、传递函数、YCbCr Matrix、采集动态范围和 Mac 显示器 EDR headroom。
-- macOS 采集使用仓库内 `third_party/flutter_webrtc` fork：macOS 15+ 显式请求 SDR，使用 `420v` Video-Range NV12、ITU-R BT.709 色彩空间/矩阵并传播 PixelBuffer 色彩附件。
+- 色彩诊断分别显示 ScreenCaptureKit 原始帧、WebRTC 编码器输入、iPad 解码输出和 Texture 输入的像素格式、Range、色彩附件、Y 值范围与 16 桶灰阶直方图；只传输统计，不传输屏幕像素。
+- 多显示器切换使用带序号的双端提交事务：macOS 13+ 在同一个 `SCStream` 上调用 `updateConfiguration()` 和 `updateContentFilter()`，并保持 RTC Track、Sender、MID、SSRC 和 DataChannel 不变；Mac 先确认目标 ScreenCaptureKit 首帧和新的 `framesEncoded`，iPad 再确认新的 `framesDecoded`，之后才更新名称和输入目标。编码/Renderer 尺寸差异只显示为“画质适配中”，不会把已经工作的副屏误判为失败；旧系统才使用 `replaceTrack()` 兼容路径。
+- 显示器协议分别携带逻辑尺寸、采集像素尺寸和点像素比例：远程输入继续使用逻辑坐标，视频画质与 WebRTC 适配使用实际像素。macOS 14+ 通过 `SCContentFilter.contentRect × pointPixelScale` 采集，旧系统回退到 `CGDisplayPixelsWide/High`，避免把 Sidecar 的逻辑尺寸放大成模糊视频。
+- iPad 全屏采用“工具栏 + 可用视频区域”的结构；远程键盘打开时继续从视频区域扣除键盘栏和安全区。视频显示与指针归一化复用同一个变换，输入只绑定已经真实渲染的显示器；Mac 绝对坐标限制在最后一个有效逻辑像素，避免视觉偏移、串屏和边缘越界。
+- Java 信令对失败连接采用两级限流：同一来源与连接码 5 次/分钟，来源跨连接码 20 次/分钟。旧码达到邀请级限流后可改用新的正确连接码，轮换随机码仍会触发来源级保护；关闭原因携带作用域和剩余等待秒数。
+- WebRTC 的瞬时 `Disconnected` 先进入 8 秒恢复窗口，不关闭 DataChannel、WebSocket 或更换连接码；只有恢复超时、`Failed`、`hangup` 或 `peer-left` 才按终止会话处理。
+- macOS 采集使用仓库内 `third_party/flutter_webrtc` fork：macOS 15+ 显式请求 SDR；每帧经 Core Image/Metal 执行自动 HDR→SDR 色调映射和 Rec.709 `420v` 归一化，不再用覆盖附件代替像素转换。
+- iPad 优先用 Core Image 按解码 PixelBuffer 的真实格式、Range 和附件转换为 sRGB BGRA；解码器只返回 I420 时，使用 Accelerate/vImage 的 BT.709 Video-Range 矩阵，不再使用缺少色彩参数的默认 I420→ARGB 路径。
 - 工具栏可要求 Mac 显示 SDR 灰阶测试图和打开显示器设置，用于 HDR 开关 A/B；关闭 HDR 不是正式解决方案。
 
 物理色彩验收步骤见 [iPad 控制 Mac 色彩验收](./docs/iPad控制Mac色彩验收.md)。
+
+### 会话与设置
+
+- “会话”展示当前角色、设备、显示器、画质、发送/接收分辨率、输入 RTT 和持续时间，并支持复制隐私安全的诊断摘要和主动断开。
+- 正常结束或失败的流式会话会在本机记录开始/结束时间、角色、设备、显示器、画质和结果；不记录屏幕、剪贴板或键盘内容，默认最多保留 50 条，可在确认后清空。
+- “设置”可持久化默认画质、触控模式、指针/滚动灵敏度、局域网发现、历史记录策略和高级网络信息显示；简单选项使用 `SharedPreferencesAsync`，平台插件不可用的测试/预览环境会安全退化。
+- 设备页默认只展示连接码、推荐地址、状态、权限和主操作；回环信令地址、全部网卡和 Java 控制平面提示移入“显示高级网络信息”。
 
 执行完整 M0 基线验收：
 
@@ -270,9 +283,9 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter | 响应式壳层、持久会话、Apple Bonjour、共享自动恢复、顶部 Overlay、本地编辑兼容输入、色彩/HDR 诊断、按屏显示调整、动态画面/全屏、手势状态机、iOS 原生 IME、清晰度和单路多屏；`analyze`、44 个常规测试、4 个 Swift 测试和 macOS/iOS Simulator/无签名真机目标 build | SDR 灰阶、HDR A/B、断开后重新发现、IME 候选/退格、触控手感、延迟和多屏需物理双设备复验；Windows、Linux 尚未构建 |
+| Flutter | 响应式壳层、真实会话/设置页面、会话元数据历史、Apple Bonjour、共享恢复、瞬时断线宽限、单 `SCStream` 双端提交切屏、非阻塞画质收敛、色彩/HDR 诊断、Sidecar/Retina 实际像素采集、60 FPS 交互档、媒体延迟诊断、手势和 iOS 原生 IME；`analyze`、57 个测试、6 个 Swift 测试及 macOS/iOS Debug build | SDR 灰阶、HDR A/B、Sidecar 实际清晰度/居中、30 次连续切屏、IME 候选/退格、触控手感和 P95 延迟需物理双设备复验；Windows、Linux 尚未构建 |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
-| Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、每来源限流和 8 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
+| Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |
 | Infrastructure | PostgreSQL、Redis、coturn Compose 均健康 | 当前仅本地开发配置；生产密钥、TLS、高可用尚未配置 |
 

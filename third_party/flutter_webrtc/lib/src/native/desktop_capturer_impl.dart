@@ -176,6 +176,26 @@ class DesktopCapturerNative extends DesktopCapturer {
     return response['result'] as bool;
   }
 
+  @override
+  Future<bool> switchSource({
+    required String trackId,
+    required String sourceId,
+    required int frameRate,
+  }) async {
+    final response = await WebRTC.invokeMethod(
+      'switchDesktopCaptureSource',
+      <String, dynamic>{
+        'trackId': trackId,
+        'sourceId': sourceId,
+        'frameRate': frameRate,
+      },
+    );
+    if (response == null) {
+      throw Exception('switchDesktopCaptureSource returned null');
+    }
+    return response['result'] as bool? ?? false;
+  }
+
   Future<Uint8List?> getThumbnail(DesktopCapturerSourceNative source) async {
     final response = await WebRTC.invokeMethod(
       'getDesktopSourceThumbnail',

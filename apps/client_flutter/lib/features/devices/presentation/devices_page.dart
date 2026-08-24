@@ -10,6 +10,7 @@ import 'package:cross_desktop_remote/features/remote/application/host_sharing_li
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_desktop_panel.dart';
+import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -20,6 +21,7 @@ class DevicesPage extends StatefulWidget {
     required this.discoveryService,
     required this.capabilities,
     required this.onRoleChanged,
+    required this.settings,
     this.addressService = const LanAddressService(),
   });
 
@@ -27,6 +29,7 @@ class DevicesPage extends StatefulWidget {
   final LanDiscoveryService discoveryService;
   final DeviceCapabilities capabilities;
   final ValueChanged<RemoteRole> onRoleChanged;
+  final AppSettingsController settings;
   final LanAddressService addressService;
 
   @override
@@ -52,6 +55,7 @@ class _DevicesPageState extends State<DevicesPage> {
   String? _addressError;
   String? _discoveryError;
   bool _isBrowsing = false;
+  bool _discoveryActive = false;
   bool _isPublishing = false;
   bool _publicationBusy = false;
   final HostSharingLifecycle _hostSharing = HostSharingLifecycle();
@@ -61,6 +65,7 @@ class _DevicesPageState extends State<DevicesPage> {
   void initState() {
     super.initState();
     _session.addListener(_handleSessionChanged);
+    widget.settings.addListener(_handleSettingsChanged);
     _noticeSubscription = _session.notices.listen(_showRemoteNotice);
     unawaited(_session.initialize());
     if (_role == RemoteRole.host) {
@@ -81,7 +86,39 @@ class _DevicesPageState extends State<DevicesPage> {
           }
         },
       );
+      if (widget.settings.lanDiscoveryEnabled) {
+        unawaited(_startBrowsing());
+      }
+    }
+  }
+
+  void _handleSettingsChanged() {
+    if (_role != RemoteRole.controller) {
+      if (mounted) setState(() {});
+      return;
+    }
+    if (widget.settings.lanDiscoveryEnabled) {
       unawaited(_startBrowsing());
+    } else {
+      unawaited(_disableBrowsing());
+    }
+  }
+
+  Future<void> _disableBrowsing() async {
+    try {
+      await widget.discoveryService.stopBrowsing();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _discoveryError = '停止附近设备发现失败：$error');
+      }
+    } finally {
+      _discoveryActive = false;
+      if (mounted) {
+        setState(() {
+          _discoveredDevices = const [];
+          _isBrowsing = false;
+        });
+      }
     }
   }
 
@@ -105,7 +142,7 @@ class _DevicesPageState extends State<DevicesPage> {
   }
 
   Future<void> _startBrowsing() async {
-    if (_isBrowsing) {
+    if (_isBrowsing || _discoveryActive) {
       return;
     }
     if (mounted) {
@@ -116,6 +153,7 @@ class _DevicesPageState extends State<DevicesPage> {
     }
     try {
       await widget.discoveryService.startBrowsing();
+      _discoveryActive = true;
     } catch (error) {
       if (mounted) {
         setState(() => _discoveryError = '无法搜索附近设备：$error');
@@ -132,6 +170,8 @@ class _DevicesPageState extends State<DevicesPage> {
       await widget.discoveryService.stopBrowsing();
     } catch (_) {
       // Restarting discovery is best effort; the following start reports errors.
+    } finally {
+      _discoveryActive = false;
     }
     if (mounted) {
       setState(() => _discoveredDevices = const []);
@@ -272,6 +312,7 @@ class _DevicesPageState extends State<DevicesPage> {
   @override
   void dispose() {
     _session.removeListener(_handleSessionChanged);
+    widget.settings.removeListener(_handleSettingsChanged);
     unawaited(_discoverySubscription?.cancel());
     unawaited(_noticeSubscription?.cancel());
     _serverController.dispose();
@@ -289,43 +330,48 @@ class _DevicesPageState extends State<DevicesPage> {
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(24, 24, 24, 12),
               sliver: SliverToBoxAdapter(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (widget.capabilities.supportsRoleSwitching) ...[
-                      SegmentedButton<RemoteRole>(
-                        segments: const [
-                          ButtonSegment(
-                            value: RemoteRole.controller,
-                            icon: Icon(Icons.desktop_windows_outlined),
-                            label: Text('控制其他设备'),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 1160),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (widget.capabilities.supportsRoleSwitching) ...[
+                          SegmentedButton<RemoteRole>(
+                            segments: const [
+                              ButtonSegment(
+                                value: RemoteRole.controller,
+                                icon: Icon(Icons.desktop_windows_outlined),
+                                label: Text('控制其他设备'),
+                              ),
+                              ButtonSegment(
+                                value: RemoteRole.host,
+                                icon: Icon(Icons.screen_share_outlined),
+                                label: Text('共享本机'),
+                              ),
+                            ],
+                            selected: {_role},
+                            onSelectionChanged: _sessionIsActive
+                                ? null
+                                : (selection) =>
+                                      widget.onRoleChanged(selection.single),
                           ),
-                          ButtonSegment(
-                            value: RemoteRole.host,
-                            icon: Icon(Icons.screen_share_outlined),
-                            label: Text('共享本机'),
-                          ),
+                          const SizedBox(height: 20),
                         ],
-                        selected: {_role},
-                        onSelectionChanged: _sessionIsActive
-                            ? null
-                            : (selection) =>
-                                  widget.onRoleChanged(selection.single),
-                      ),
-                      const SizedBox(height: 20),
-                    ],
-                    Text(
-                      _role == RemoteRole.host ? '共享本机' : '控制其他设备',
-                      style: Theme.of(context).textTheme.headlineMedium,
+                        Text(
+                          _role == RemoteRole.host ? '共享本机' : '控制其他设备',
+                          style: Theme.of(context).textTheme.headlineMedium,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          _role == RemoteRole.host
+                              ? '创建五分钟有效的一次性连接码，控制端验证成功后自动共享。'
+                              : '选择附近设备，或输入远程设备地址和六位连接码。',
+                          style: Theme.of(context).textTheme.bodyLarge,
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 8),
-                    Text(
-                      _role == RemoteRole.host
-                          ? '创建五分钟有效的一次性连接码，控制端验证成功后自动共享。'
-                          : '选择附近设备，或输入远程设备地址和六位连接码。',
-                      style: Theme.of(context).textTheme.bodyLarge,
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -334,7 +380,7 @@ class _DevicesPageState extends State<DevicesPage> {
               sliver: SliverToBoxAdapter(
                 child: Center(
                   child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 960),
+                    constraints: const BoxConstraints(maxWidth: 1160),
                     child: Column(
                       children: [
                         _ConnectionCard(
@@ -350,6 +396,7 @@ class _DevicesPageState extends State<DevicesPage> {
                           isPublishing: _isPublishing,
                           hostSharingRequested: _hostSharing.sharingRequested,
                           hostRestarting: _hostSharing.rearming,
+                          settings: widget.settings,
                           onConnect: _connect,
                           onDisconnect: _disconnect,
                           onRefreshAddresses: _findLocalAddresses,
@@ -359,7 +406,10 @@ class _DevicesPageState extends State<DevicesPage> {
                         if (_role == RemoteRole.controller &&
                             _session.hasRemoteVideo) ...[
                           const SizedBox(height: 16),
-                          RemoteDesktopPanel(session: _session),
+                          RemoteDesktopPanel(
+                            session: _session,
+                            initialInputSettings: widget.settings.inputSettings,
+                          ),
                         ],
                       ],
                     ),
@@ -396,6 +446,7 @@ class _ConnectionCard extends StatelessWidget {
     required this.isPublishing,
     required this.hostSharingRequested,
     required this.hostRestarting,
+    required this.settings,
     required this.onConnect,
     required this.onDisconnect,
     required this.onRefreshAddresses,
@@ -415,6 +466,7 @@ class _ConnectionCard extends StatelessWidget {
   final bool isPublishing;
   final bool hostSharingRequested;
   final bool hostRestarting;
+  final AppSettingsController settings;
   final Future<void> Function() onConnect;
   final Future<void> Function() onDisconnect;
   final Future<void> Function() onRefreshAddresses;
@@ -434,158 +486,274 @@ class _ConnectionCard extends StatelessWidget {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              role == RemoteRole.host ? '本机共享' : '远程控制',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-            const SizedBox(height: 16),
-            if (role == RemoteRole.controller) ...[
-              _NearbyDevices(
-                devices: discoveredDevices,
-                error: discoveryError,
-                isBrowsing: isBrowsing,
-                enabled: !_isActive,
-                onRefresh: onRefreshDiscovery,
-                onSelect: onSelectDevice,
-              ),
+        child: LayoutBuilder(
+          builder: (context, constraints) => Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (role == RemoteRole.host)
+                _buildHostContent(
+                  context,
+                  twoColumns: constraints.maxWidth >= 820,
+                )
+              else
+                _buildControllerContent(context),
+              const SizedBox(height: 20),
+              const Divider(height: 1),
               const SizedBox(height: 16),
+              _buildStatus(context),
+              const SizedBox(height: 16),
+              _buildActions(),
             ],
-            TextField(
-              key: const ValueKey('signalingServerField'),
-              controller: serverController,
-              enabled: !_isActive,
-              autocorrect: false,
-              keyboardType: TextInputType.url,
-              decoration: InputDecoration(
-                labelText: role == RemoteRole.host ? '本机信令地址' : '手动信令地址',
-                prefixIcon: const Icon(Icons.dns_outlined),
-              ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHostContent(BuildContext context, {required bool twoColumns}) {
+    final credentials = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('连接凭证', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 6),
+        const Text('正确连接码验证后会自动建立远程会话。'),
+        const SizedBox(height: 18),
+        _HostRoomCodeDisplay(code: roomController.text),
+        if (settings.showAdvancedNetwork) ...[
+          const SizedBox(height: 16),
+          TextField(
+            key: const ValueKey('signalingServerField'),
+            controller: serverController,
+            enabled: !_isActive,
+            autocorrect: false,
+            keyboardType: TextInputType.url,
+            decoration: const InputDecoration(
+              labelText: '本机信令地址',
+              prefixIcon: Icon(Icons.dns_outlined),
             ),
-            if (role == RemoteRole.host) ...[
-              const SizedBox(height: 6),
-              const Text('127.0.0.1 仅供本机服务使用；其他设备请使用下方局域网地址。'),
-            ],
-            const SizedBox(height: 12),
-            TextField(
-              key: const ValueKey('roomCodeField'),
-              controller: roomController,
-              enabled: role == RemoteRole.controller && !_isActive,
-              maxLength: 6,
-              keyboardType: TextInputType.number,
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              decoration: InputDecoration(
-                labelText: '六位连接码',
-                prefixIcon: const Icon(Icons.pin_outlined),
-                suffixIcon: role == RemoteRole.host
-                    ? IconButton(
-                        tooltip: '复制连接码',
-                        onPressed: () {
-                          Clipboard.setData(
-                            ClipboardData(text: roomController.text),
-                          );
-                          AppMessenger.show(
-                            '连接码已复制',
-                            level: AppMessageLevel.success,
-                          );
-                        },
-                        icon: const Icon(Icons.copy_outlined),
-                      )
-                    : null,
-              ),
+          ),
+          const SizedBox(height: 6),
+          const Text('127.0.0.1 仅供本机服务使用。'),
+        ],
+      ],
+    );
+    final network = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('网络与发现', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 6),
+        Text(isPublishing ? '本机已发布，控制端可以自动发现。' : '开始共享后自动发布到局域网。'),
+        const SizedBox(height: 18),
+        _LanAddressList(
+          addresses: localAddresses,
+          error: addressError,
+          onRefresh: onRefreshAddresses,
+          showAll: settings.showAdvancedNetwork,
+        ),
+        if (discoveryError != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            discoveryError!,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+        ],
+        if (settings.showAdvancedNetwork) ...[
+          const SizedBox(height: 8),
+          const Text('需要先在本机启动 Java 控制平面。'),
+        ],
+      ],
+    );
+    if (!twoColumns) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [credentials, const SizedBox(height: 24), network],
+      );
+    }
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(flex: 5, child: credentials),
+        const SizedBox(width: 28),
+        Expanded(flex: 4, child: network),
+      ],
+    );
+  }
+
+  Widget _buildControllerContent(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('连接设备', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 6),
+        const Text('优先选择附近设备，也可以手动输入局域网地址。'),
+        const SizedBox(height: 18),
+        if (settings.lanDiscoveryEnabled) ...[
+          _NearbyDevices(
+            devices: discoveredDevices,
+            error: discoveryError,
+            isBrowsing: isBrowsing,
+            enabled: !_isActive,
+            onRefresh: onRefreshDiscovery,
+            onSelect: onSelectDevice,
+          ),
+          const SizedBox(height: 16),
+        ],
+        TextField(
+          key: const ValueKey('signalingServerField'),
+          controller: serverController,
+          enabled: !_isActive,
+          autocorrect: false,
+          keyboardType: TextInputType.url,
+          decoration: const InputDecoration(
+            labelText: '手动信令地址',
+            prefixIcon: Icon(Icons.dns_outlined),
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          key: const ValueKey('roomCodeField'),
+          controller: roomController,
+          enabled: !_isActive,
+          onChanged: (_) => session.clearConnectionAttemptFeedback(),
+          maxLength: 6,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          decoration: const InputDecoration(
+            labelText: '六位连接码',
+            prefixIcon: Icon(Icons.pin_outlined),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatus(BuildContext context) {
+    return Row(
+      children: [
+        Icon(
+          switch (session.state) {
+            RemoteSessionState.failed => Icons.error_outline,
+            RemoteSessionState.reconnecting => Icons.sync,
+            _ => Icons.circle,
+          },
+          size: 14,
+          color: switch (session.state) {
+            RemoteSessionState.failed => Theme.of(context).colorScheme.error,
+            RemoteSessionState.reconnecting => Theme.of(
+              context,
+            ).colorScheme.tertiary,
+            _ => Theme.of(context).colorScheme.primary,
+          },
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            role == RemoteRole.host && hostRestarting
+                ? '上一会话已结束，正在恢复共享'
+                : session.statusMessage,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildActions() {
+    if (session.state == RemoteSessionState.awaitingApproval) {
+      return Wrap(
+        alignment: WrapAlignment.end,
+        spacing: 10,
+        runSpacing: 10,
+        children: [
+          OutlinedButton(onPressed: session.reject, child: const Text('拒绝')),
+          FilledButton.icon(
+            onPressed: session.approve,
+            icon: const Icon(Icons.screen_share_outlined),
+            label: const Text('允许查看和控制'),
+          ),
+        ],
+      );
+    }
+    return Wrap(
+      alignment: WrapAlignment.end,
+      spacing: 10,
+      runSpacing: 10,
+      children: [
+        if (role == RemoteRole.host)
+          OutlinedButton.icon(
+            onPressed: session.accessibilityGranted == true
+                ? () => session.refreshHostPermissions(announce: true)
+                : session.requestHostInputPermission,
+            icon: Icon(
+              session.accessibilityGranted == true
+                  ? Icons.check_circle_outline
+                  : Icons.admin_panel_settings_outlined,
             ),
-            if (role == RemoteRole.host) ...[
-              _LanAddressList(
-                addresses: localAddresses,
-                error: addressError,
-                onRefresh: onRefreshAddresses,
-              ),
-              const SizedBox(height: 8),
-              Text(isPublishing ? '已在局域网发布本机，其他控制端可自动发现。' : '开始共享后会发布本机。'),
-              if (discoveryError != null)
-                Text(
-                  discoveryError!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              const SizedBox(height: 8),
-              const Text('需要先在本机启动 Java 控制平面。'),
-            ],
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Icon(
-                  session.state == RemoteSessionState.failed
-                      ? Icons.error_outline
-                      : Icons.circle,
-                  size: 14,
-                  color: session.state == RemoteSessionState.failed
-                      ? Theme.of(context).colorScheme.error
-                      : Theme.of(context).colorScheme.primary,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    role == RemoteRole.host && hostRestarting
-                        ? '上一会话已结束，正在恢复共享'
-                        : session.statusMessage,
-                  ),
-                ),
-              ],
+            label: Text(
+              session.accessibilityGranted == true ? '输入权限已就绪' : '设置输入权限',
             ),
-            const SizedBox(height: 16),
-            if (role == RemoteRole.host) ...[
-              OutlinedButton.icon(
-                onPressed: session.accessibilityGranted == true
-                    ? () => session.refreshHostPermissions(announce: true)
-                    : session.requestHostInputPermission,
-                icon: Icon(
-                  session.accessibilityGranted == true
-                      ? Icons.check_circle_outline
-                      : Icons.admin_panel_settings_outlined,
-                ),
-                label: Text(
-                  session.accessibilityGranted == true
-                      ? '远程输入权限已就绪'
-                      : '设置远程输入权限',
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
-            if (session.state == RemoteSessionState.awaitingApproval) ...[
-              FilledButton.icon(
-                onPressed: session.approve,
-                icon: const Icon(Icons.screen_share_outlined),
-                label: const Text('允许查看和控制'),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton(
-                onPressed: session.reject,
-                child: const Text('拒绝'),
-              ),
-            ] else if (_isActive) ...[
-              OutlinedButton.icon(
-                onPressed: onDisconnect,
-                icon: Icon(
-                  role == RemoteRole.host
-                      ? Icons.stop_circle_outlined
-                      : Icons.link_off,
-                ),
-                label: Text(role == RemoteRole.host ? '停止共享本机' : '断开'),
-              ),
-            ] else ...[
-              FilledButton.icon(
-                onPressed: onConnect,
-                icon: Icon(
-                  role == RemoteRole.host
-                      ? Icons.sensors
-                      : Icons.desktop_windows_outlined,
-                ),
-                label: Text(role == RemoteRole.host ? '开始共享本机' : '连接远程设备'),
-              ),
-            ],
-          ],
+          ),
+        if (_isActive)
+          FilledButton.tonalIcon(
+            onPressed: onDisconnect,
+            icon: Icon(
+              role == RemoteRole.host
+                  ? Icons.stop_circle_outlined
+                  : Icons.link_off,
+            ),
+            label: Text(role == RemoteRole.host ? '停止共享' : '断开'),
+          )
+        else
+          FilledButton.icon(
+            onPressed: onConnect,
+            icon: Icon(
+              role == RemoteRole.host
+                  ? Icons.sensors
+                  : Icons.desktop_windows_outlined,
+            ),
+            label: Text(role == RemoteRole.host ? '开始共享' : '连接远程设备'),
+          ),
+      ],
+    );
+  }
+}
+
+class _HostRoomCodeDisplay extends StatelessWidget {
+  const _HostRoomCodeDisplay({required this.code});
+
+  final String code;
+
+  Future<void> _copy() async {
+    if (code.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: code));
+    AppMessenger.show('连接码已复制', level: AppMessageLevel.success);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: '六位连接码 $code',
+      value: code,
+      child: InputDecorator(
+        key: const ValueKey('hostRoomCodeField'),
+        decoration: InputDecoration(
+          labelText: '六位连接码',
+          prefixIcon: const Icon(Icons.pin_outlined),
+          suffixIcon: IconButton(
+            key: const ValueKey('copyRoomCodeButton'),
+            tooltip: '复制连接码',
+            onPressed: code.isEmpty ? null : _copy,
+            icon: const Icon(Icons.copy_outlined),
+          ),
+        ),
+        child: SelectableText(
+          code,
+          key: const ValueKey('hostRoomCodeText'),
+          maxLines: 1,
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+            fontWeight: FontWeight.w700,
+            letterSpacing: 5,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
         ),
       ),
     );
@@ -597,18 +765,26 @@ class _LanAddressList extends StatelessWidget {
     required this.addresses,
     required this.error,
     required this.onRefresh,
+    required this.showAll,
   });
 
   final List<LanAddress>? addresses;
   final String? error;
   final Future<void> Function() onRefresh;
+  final bool showAll;
 
   @override
   Widget build(BuildContext context) {
     final values = addresses;
+    final visibleValues = values == null || showAll || values.isEmpty
+        ? values
+        : [
+            values.where((value) => value.recommended).firstOrNull ??
+                values.first,
+          ];
     return DecoratedBox(
       decoration: BoxDecoration(
-        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+        color: Theme.of(context).colorScheme.surfaceContainerLowest,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Padding(
@@ -618,10 +794,10 @@ class _LanAddressList extends StatelessWidget {
           children: [
             Row(
               children: [
-                const Expanded(
+                Expanded(
                   child: Text(
-                    '控制端可用连接地址',
-                    style: TextStyle(fontWeight: FontWeight.w600),
+                    showAll ? '控制端可用连接地址' : '推荐连接地址',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                 ),
                 IconButton(
@@ -641,7 +817,7 @@ class _LanAddressList extends StatelessWidget {
             else if (values.isEmpty)
               const Text('未找到可用 IPv4 地址，请检查本机网络连接。')
             else
-              for (final address in values)
+              for (final address in visibleValues!)
                 ListTile(
                   dense: true,
                   contentPadding: EdgeInsets.zero,

@@ -32,4 +32,32 @@ void main() {
     );
     expect(transform.normalize(const Offset(1000, 500)), isNull);
   });
+
+  test('Sidecar contain geometry remains centered on both axes', () {
+    final transform = RemoteContentTransform.forViewport(
+      sourceSize: const Size(1311, 892),
+      viewportSize: const Size(1366, 1024),
+      fit: BoxFit.contain,
+    );
+
+    final rect = transform.destinationRect;
+    expect(rect.center, const Offset(683, 512));
+    expect(rect.left, closeTo(0, 0.001));
+    expect(rect.top, greaterThan(0));
+    expect(rect.top, closeTo(1024 - rect.bottom, 0.001));
+    expect(transform.normalize(rect.center), const Offset(0.5, 0.5));
+  });
+
+  test('centers content inside an offset usable viewport', () {
+    final transform = RemoteContentTransform.forViewport(
+      sourceSize: const Size(16, 10),
+      viewportSize: const Size(800, 500),
+      viewportOffset: const Offset(0, 80),
+      fit: BoxFit.contain,
+    );
+
+    expect(transform.destinationRect, const Rect.fromLTWH(0, 80, 800, 500));
+    expect(transform.normalize(const Offset(400, 330)), const Offset(.5, .5));
+    expect(transform.normalize(const Offset(400, 40)), isNull);
+  });
 }

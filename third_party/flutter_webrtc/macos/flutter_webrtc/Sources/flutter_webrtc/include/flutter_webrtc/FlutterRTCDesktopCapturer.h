@@ -12,6 +12,9 @@
 
 - (void)getDisplayMedia:(nonnull NSDictionary*)constraints result:(nonnull FlutterResult)result;
 
+- (void)switchDesktopCaptureSource:(nonnull NSDictionary*)argsMap
+                            result:(nonnull FlutterResult)result;
+
 - (void)getDesktopSources:(nonnull NSDictionary*)argsMap result:(nonnull FlutterResult)result;
 
 - (void)updateDesktopSources:(nonnull NSDictionary*)argsMap result:(nonnull FlutterResult)result;

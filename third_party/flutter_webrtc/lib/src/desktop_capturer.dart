@@ -67,4 +67,13 @@ abstract class DesktopCapturer {
 
   /// Updates the list of screen sources of the specified types
   Future<bool> updateSources({required List<SourceType> types});
+
+  /// Switches an active desktop video track to another screen without
+  /// replacing the WebRTC track. Platforms that cannot update the running
+  /// capturer return false so callers can use their compatibility fallback.
+  Future<bool> switchSource({
+    required String trackId,
+    required String sourceId,
+    required int frameRate,
+  });
 }

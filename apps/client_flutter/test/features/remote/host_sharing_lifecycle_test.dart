@@ -16,6 +16,47 @@ void main() {
     expect(lifecycle.rearming, isTrue);
   });
 
+  test('does not re-arm sharing during a transient connection recovery', () {
+    final lifecycle = HostSharingLifecycle()..start();
+
+    expect(
+      lifecycle.observeTransition(
+        previous: RemoteSessionState.streaming,
+        next: RemoteSessionState.reconnecting,
+      ),
+      isFalse,
+    );
+    expect(lifecycle.sharingRequested, isTrue);
+    expect(lifecycle.rearming, isFalse);
+
+    expect(
+      lifecycle.observeTransition(
+        previous: RemoteSessionState.reconnecting,
+        next: RemoteSessionState.streaming,
+      ),
+      isFalse,
+    );
+    expect(lifecycle.sharingRequested, isTrue);
+    expect(lifecycle.rearming, isFalse);
+  });
+
+  test('re-arms after a recovery window ends in a terminal disconnect', () {
+    final lifecycle = HostSharingLifecycle()..start();
+    lifecycle.observeTransition(
+      previous: RemoteSessionState.streaming,
+      next: RemoteSessionState.reconnecting,
+    );
+
+    final shouldRestart = lifecycle.observeTransition(
+      previous: RemoteSessionState.reconnecting,
+      next: RemoteSessionState.disconnected,
+    );
+
+    expect(shouldRestart, isTrue);
+    expect(lifecycle.sharingRequested, isTrue);
+    expect(lifecycle.rearming, isTrue);
+  });
+
   test('explicit stop never re-arms sharing', () {
     final lifecycle = HostSharingLifecycle()
       ..start()

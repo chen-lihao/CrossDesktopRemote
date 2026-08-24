@@ -8,6 +8,7 @@ import 'package:cross_desktop_remote/features/remote/application/remote_session_
 class HostSharingLifecycle {
   bool _sharingRequested = false;
   bool _rearming = false;
+  bool _hadStreamingSession = false;
 
   bool get sharingRequested => _sharingRequested;
   bool get rearming => _rearming;
@@ -15,11 +16,13 @@ class HostSharingLifecycle {
   void start() {
     _sharingRequested = true;
     _rearming = false;
+    _hadStreamingSession = false;
   }
 
   void stop() {
     _sharingRequested = false;
     _rearming = false;
+    _hadStreamingSession = false;
   }
 
   bool observeTransition({
@@ -28,8 +31,14 @@ class HostSharingLifecycle {
   }) {
     if (!_sharingRequested) return false;
 
+    if (previous == RemoteSessionState.streaming ||
+        next == RemoteSessionState.streaming) {
+      _hadStreamingSession = true;
+    }
+
     if (next == RemoteSessionState.waitingForPeer) {
       _rearming = false;
+      _hadStreamingSession = false;
       return false;
     }
 
@@ -40,7 +49,7 @@ class HostSharingLifecycle {
 
     if (next != RemoteSessionState.disconnected) return false;
 
-    if (!_rearming && previous == RemoteSessionState.streaming) {
+    if (!_rearming && _hadStreamingSession) {
       _rearming = true;
       return true;
     }

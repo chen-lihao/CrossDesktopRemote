@@ -6,6 +6,9 @@ class MacDisplayInfo {
     required this.name,
     required this.width,
     required this.height,
+    required this.pixelWidth,
+    required this.pixelHeight,
+    required this.pointPixelScale,
     required this.isPrimary,
   });
 
@@ -15,6 +18,9 @@ class MacDisplayInfo {
       name: map['name'] as String? ?? 'Display',
       width: (map['width'] as num?)?.toInt() ?? 0,
       height: (map['height'] as num?)?.toInt() ?? 0,
+      pixelWidth: (map['pixelWidth'] as num?)?.toInt() ?? 0,
+      pixelHeight: (map['pixelHeight'] as num?)?.toInt() ?? 0,
+      pointPixelScale: (map['pointPixelScale'] as num?)?.toDouble() ?? 1,
       isPrimary: map['isPrimary'] as bool? ?? false,
     );
   }
@@ -23,7 +29,33 @@ class MacDisplayInfo {
   final String name;
   final int width;
   final int height;
+  final int pixelWidth;
+  final int pixelHeight;
+  final double pointPixelScale;
   final bool isPrimary;
+}
+
+class MacCaptureFrameState {
+  const MacCaptureFrameState({
+    required this.sequence,
+    required this.sourceId,
+    required this.width,
+    required this.height,
+  });
+
+  factory MacCaptureFrameState.fromMap(Map<Object?, Object?> map) {
+    return MacCaptureFrameState(
+      sequence: (map['sequence'] as num?)?.toInt() ?? 0,
+      sourceId: map['sourceId'] as String? ?? '',
+      width: (map['width'] as num?)?.toInt() ?? 0,
+      height: (map['height'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  final int sequence;
+  final String sourceId;
+  final int width;
+  final int height;
 }
 
 class MacInputBridge {
@@ -57,6 +89,15 @@ class MacInputBridge {
   Future<Map<String, dynamic>> getColorDiagnostics() async {
     final value = await _channel.invokeMethod<Object?>('getColorDiagnostics');
     return _normalizeStringMap(value);
+  }
+
+  Future<MacCaptureFrameState> getCaptureFrameState() async {
+    final value =
+        await _channel.invokeMapMethod<Object?, Object?>(
+          'getCaptureFrameState',
+        ) ??
+        const <Object?, Object?>{};
+    return MacCaptureFrameState.fromMap(value);
   }
 
   Future<void> showGrayscaleTestPattern() {

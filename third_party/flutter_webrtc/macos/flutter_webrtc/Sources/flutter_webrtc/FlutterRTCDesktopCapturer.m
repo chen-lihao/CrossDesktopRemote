@@ -126,6 +126,7 @@ NSArray<RTCDesktopSource*>* _captureSources;
       }
     }
   }
+  [videoProcessingAdapter setPreferredFramesPerSecond:fps];
   RTCDesktopCapturer* desktopCapturer;
   FlutterScreenCaptureKitCapturer* screenCaptureKitCapturer = nil;
   RTCDesktopSource* source = nil;
@@ -182,8 +183,11 @@ NSArray<RTCDesktopSource*>* _captureSources;
       handler();
     };
   } else {
+    self.screenCaptureKitCapturers[trackUUID] = screenCaptureKitCapturer;
+    __weak FlutterWebRTCPlugin *weakSelf = self;
     self.videoCapturerStopHandlers[trackUUID] = ^(CompletionHandler handler) {
       NSLog(@"stop screencapturekit capture: trackID %@", trackUUID);
+      [weakSelf.screenCaptureKitCapturers removeObjectForKey:trackUUID];
       [screenCaptureKitCapturer stopCaptureWithCompletion:handler];
     };
   }
@@ -214,6 +218,41 @@ NSArray<RTCDesktopSource*>* _captureSources;
   self.localStreams[mediaStreamId] = mediaStream;
   result(
       @{@"streamId" : mediaStreamId, @"audioTracks" : audioTracks, @"videoTracks" : videoTracks});
+}
+
+- (void)switchDesktopCaptureSource:(NSDictionary*)argsMap result:(FlutterResult)result {
+#if TARGET_OS_OSX
+  NSString *trackId = argsMap[@"trackId"];
+  NSString *sourceId = argsMap[@"sourceId"];
+  NSNumber *frameRate = argsMap[@"frameRate"];
+  if (trackId.length == 0 || sourceId.length == 0) {
+    result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                               message:@"trackId and sourceId are required"
+                               details:nil]);
+    return;
+  }
+  FlutterScreenCaptureKitCapturer *capturer = self.screenCaptureKitCapturers[trackId];
+  if (capturer == nil) {
+    result(@{@"result" : @NO, @"reason" : @"running capturer cannot switch in place"});
+    return;
+  }
+  NSInteger fps = MAX((NSInteger)1, frameRate.integerValue ?: 30);
+  [capturer switchCaptureToSourceId:sourceId
+                                fps:fps
+                       onCompletion:^(NSError * _Nullable error) {
+                         dispatch_async(dispatch_get_main_queue(), ^{
+                           if (error != nil) {
+                             result([FlutterError errorWithCode:@"CAPTURE_SWITCH_FAILED"
+                                                        message:error.localizedDescription
+                                                        details:nil]);
+                           } else {
+                             result(@{@"result" : @YES});
+                           }
+                         });
+                       }];
+#else
+  result(@{@"result" : @NO, @"reason" : @"unsupported platform"});
+#endif
 }
 
 - (void)getDesktopSources:(NSDictionary*)argsMap result:(FlutterResult)result {

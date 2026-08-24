@@ -31,6 +31,8 @@ let package = Package(
                 .headerSearchPath("include/flutter_webrtc")
             ],
             linkerSettings: [
+                .linkedFramework("CoreImage"),
+                .linkedFramework("Metal"),
                 // Ends up weak-linked (LC_LOAD_WEAK_DYLIB) like the podspec's weak_frameworks:
                 // all ScreenCaptureKit usage is @available-guarded and the 10.15 platform
                 // minimum above predates the framework, so clang weak-imports its symbols

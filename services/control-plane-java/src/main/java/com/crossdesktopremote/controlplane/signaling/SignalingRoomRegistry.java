@@ -20,34 +20,44 @@ final class SignalingRoomRegistry {
 	private static final Pattern ROOM_CODE = Pattern.compile("[0-9]{6}");
 	private static final Duration DEFAULT_ROOM_TTL = Duration.ofMinutes(5);
 	private static final Duration DEFAULT_ATTEMPT_WINDOW = Duration.ofMinutes(1);
-	private static final int DEFAULT_MAX_FAILED_ATTEMPTS = 5;
+	private static final int DEFAULT_MAX_INVITATION_FAILED_ATTEMPTS = 5;
+	private static final int DEFAULT_MAX_SOURCE_FAILED_ATTEMPTS = 20;
 
 	private final ConcurrentMap<String, Room> rooms = new ConcurrentHashMap<>();
-	private final ConcurrentMap<String, AttemptWindow> failedAttempts = new ConcurrentHashMap<>();
+	private final ConcurrentMap<String, AttemptWindow> invitationFailedAttempts = new ConcurrentHashMap<>();
+	private final ConcurrentMap<String, AttemptWindow> sourceFailedAttempts = new ConcurrentHashMap<>();
 	private final LongSupplier currentTimeMillis;
 	private final long roomTtlMillis;
 	private final long attemptWindowMillis;
-	private final int maxFailedAttempts;
+	private final int maxInvitationFailedAttempts;
+	private final int maxSourceFailedAttempts;
 
 	SignalingRoomRegistry() {
-		this(System::currentTimeMillis, DEFAULT_ROOM_TTL, DEFAULT_ATTEMPT_WINDOW, DEFAULT_MAX_FAILED_ATTEMPTS);
+		this(
+				System::currentTimeMillis,
+				DEFAULT_ROOM_TTL,
+				DEFAULT_ATTEMPT_WINDOW,
+				DEFAULT_MAX_INVITATION_FAILED_ATTEMPTS,
+				DEFAULT_MAX_SOURCE_FAILED_ATTEMPTS);
 	}
 
 	SignalingRoomRegistry(
 			LongSupplier currentTimeMillis,
 			Duration roomTtl,
 			Duration attemptWindow,
-			int maxFailedAttempts) {
+			int maxInvitationFailedAttempts,
+			int maxSourceFailedAttempts) {
 		this.currentTimeMillis = currentTimeMillis;
 		this.roomTtlMillis = roomTtl.toMillis();
 		this.attemptWindowMillis = attemptWindow.toMillis();
-		this.maxFailedAttempts = maxFailedAttempts;
+		this.maxInvitationFailedAttempts = maxInvitationFailedAttempts;
+		this.maxSourceFailedAttempts = maxSourceFailedAttempts;
 	}
 
 	JoinResult join(String roomCode, SignalingRole role, WebSocketSession session) {
 		if (!ROOM_CODE.matcher(roomCode).matches()) {
 			if (role == SignalingRole.CONTROLLER) {
-				recordFailedAttempt(clientKey(session));
+				recordSourceFailure(clientKey(session));
 			}
 			return JoinResult.INVALID_ROOM;
 		}
@@ -67,6 +77,21 @@ final class SignalingRoomRegistry {
 			return Optional.empty();
 		}
 		return room.session(role.peerRole());
+	}
+
+	String rejectionReason(JoinResult result, String roomCode, WebSocketSession session) {
+		var now = currentTimeMillis.getAsLong();
+		long retryAfterSeconds = switch (result) {
+			case RATE_LIMITED_INVITATION -> retryAfterSeconds(
+					invitationFailedAttempts.get(invitationKey(clientKey(session), roomCode)), now);
+			case RATE_LIMITED_SOURCE -> retryAfterSeconds(sourceFailedAttempts.get(clientKey(session)), now);
+			default -> 0;
+		};
+		return retryAfterSeconds > 0 ? result.name() + ':' + retryAfterSeconds : result.name();
+	}
+
+	private long retryAfterSeconds(AttemptWindow attempts, long now) {
+		return attempts == null ? 0 : attempts.retryAfterSeconds(now, attemptWindowMillis);
 	}
 
 	void leave(String roomCode, SignalingRole role, WebSocketSession session) {
@@ -95,12 +120,14 @@ final class SignalingRoomRegistry {
 	}
 
 	private JoinResult joinController(String roomCode, WebSocketSession session) {
-		var key = clientKey(session);
+		var sourceKey = clientKey(session);
+		var invitationKey = invitationKey(sourceKey, roomCode);
 		var now = currentTimeMillis.getAsLong();
-		if (failedAttempts.computeIfAbsent(
-				key,
-				ignored -> new AttemptWindow(now)).isBlocked(now, attemptWindowMillis, maxFailedAttempts)) {
-			return JoinResult.RATE_LIMITED;
+		if (isBlocked(sourceFailedAttempts, sourceKey, now, maxSourceFailedAttempts)) {
+			return JoinResult.RATE_LIMITED_SOURCE;
+		}
+		if (isBlocked(invitationFailedAttempts, invitationKey, now, maxInvitationFailedAttempts)) {
+			return JoinResult.RATE_LIMITED_INVITATION;
 		}
 
 		var room = rooms.get(roomCode);
@@ -108,21 +135,45 @@ final class SignalingRoomRegistry {
 			if (room != null) {
 				rooms.remove(roomCode, room);
 			}
-			recordFailedAttempt(key);
+			recordFailedAttempt(sourceKey, invitationKey, now);
 			return JoinResult.INVALID_ROOM;
 		}
 
 		var result = room.joinController(session);
 		if (result == JoinResult.JOINED) {
-			failedAttempts.remove(key);
+			invitationFailedAttempts.remove(invitationKey);
 		}
 		return result;
 	}
 
-	private void recordFailedAttempt(String key) {
-		var now = currentTimeMillis.getAsLong();
-		failedAttempts.computeIfAbsent(key, ignored -> new AttemptWindow(now))
+	private boolean isBlocked(
+			ConcurrentMap<String, AttemptWindow> attempts,
+			String key,
+			long now,
+			int maximumFailures) {
+		return attempts.computeIfAbsent(key, ignored -> new AttemptWindow(now))
+				.isBlocked(now, attemptWindowMillis, maximumFailures);
+	}
+
+	private void recordFailedAttempt(String sourceKey, String invitationKey, long now) {
+		recordFailure(sourceFailedAttempts, sourceKey, now);
+		recordFailure(invitationFailedAttempts, invitationKey, now);
+	}
+
+	private void recordSourceFailure(String sourceKey) {
+		recordFailure(sourceFailedAttempts, sourceKey, currentTimeMillis.getAsLong());
+	}
+
+	private void recordFailure(
+			ConcurrentMap<String, AttemptWindow> attempts,
+			String key,
+			long now) {
+		attempts.computeIfAbsent(key, ignored -> new AttemptWindow(now))
 				.recordFailure(now, attemptWindowMillis);
+	}
+
+	private String invitationKey(String sourceKey, String roomCode) {
+		return sourceKey + ':' + roomCode;
 	}
 
 	private String clientKey(WebSocketSession session) {
@@ -141,7 +192,8 @@ final class SignalingRoomRegistry {
 		INVALID_ROOM,
 		ROLE_OCCUPIED,
 		CODE_CONSUMED,
-		RATE_LIMITED
+		RATE_LIMITED_INVITATION,
+		RATE_LIMITED_SOURCE
 	}
 
 	private static final class Room {
@@ -218,6 +270,15 @@ final class SignalingRoomRegistry {
 				startedAtMillis = nowMillis;
 				failures = 0;
 			}
+		}
+
+		synchronized long retryAfterSeconds(long nowMillis, long windowMillis) {
+			resetIfExpired(nowMillis, windowMillis);
+			if (failures == 0) {
+				return 0;
+			}
+			long remainingMillis = Math.max(0, windowMillis - (nowMillis - startedAtMillis));
+			return (remainingMillis + 999) / 1_000;
 		}
 	}
 }

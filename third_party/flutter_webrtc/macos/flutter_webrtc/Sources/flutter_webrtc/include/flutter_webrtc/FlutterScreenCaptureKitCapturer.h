@@ -13,6 +13,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)stopCaptureWithCompletion:(void (^ _Nonnull)(void))completion;
 
+- (void)switchCaptureToSourceId:(NSString* _Nonnull)sourceId
+                            fps:(NSInteger)fps
+                   onCompletion:(void (^ _Nonnull)(NSError * _Nullable error))onCompletion;
+
 @end
 
 NS_ASSUME_NONNULL_END

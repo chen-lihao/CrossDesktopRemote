@@ -183,6 +183,7 @@ Future<void> _showRemoteDisplayAdjustment(
         builder: (context, value, _) {
           final diagnostics = session.colorDiagnostics;
           final display = diagnostics?.forDisplay(session.selectedDisplayId);
+          final selectedDisplay = session.selectedDisplay;
           return SingleChildScrollView(
             padding: EdgeInsets.fromLTRB(
               20,
@@ -289,6 +290,67 @@ Future<void> _showRemoteDisplayAdjustment(
                         '${diagnostics.colorSpace} · ${diagnostics.captureDynamicRange}',
                   ),
                   _ColorDiagnosticRow(
+                    label: 'Mac 色彩归一化',
+                    value: diagnostics.normalizationDurationMs == null
+                        ? diagnostics.normalization
+                        : '${diagnostics.normalization} · '
+                              '${diagnostics.normalizationDurationMs!.toStringAsFixed(2)} ms',
+                  ),
+                  if (diagnostics.rawFrame case final raw?) ...[
+                    _ColorDiagnosticRow(
+                      label: '① SCK 原始帧',
+                      value: _formatFrameColorCheckpoint(raw),
+                    ),
+                    _ColorDiagnosticRow(
+                      label: '① 16 桶灰阶',
+                      value: raw.histogramLabel,
+                    ),
+                  ],
+                  if (diagnostics.encoderInput case final encoder?) ...[
+                    _ColorDiagnosticRow(
+                      label: '② 编码器输入',
+                      value: _formatFrameColorCheckpoint(encoder),
+                    ),
+                    _ColorDiagnosticRow(
+                      label: '② 16 桶灰阶',
+                      value: encoder.histogramLabel,
+                    ),
+                  ],
+                  _ColorDiagnosticRow(
+                    label: 'WebRTC 目标 / 发送 / 接收',
+                    value:
+                        '${session.expectedVideoFrameSize?.label ?? 'Unknown'} / '
+                        '${session.outboundVideoFrameSize?.label ?? 'Unknown'} / '
+                        '${session.inboundVideoFrameSize?.label ?? 'Unknown'}',
+                  ),
+                  _ColorDiagnosticRow(
+                    label: '逻辑坐标 / 采集像素',
+                    value:
+                        selectedDisplay?.geometryDiagnosticsLabel ?? 'Unknown',
+                  ),
+                  if (session.decoderOutputColorDiagnostics
+                      case final decoder?) ...[
+                    _ColorDiagnosticRow(
+                      label: '③ iPad 解码帧',
+                      value: _formatFrameColorCheckpoint(decoder),
+                    ),
+                    _ColorDiagnosticRow(
+                      label: '③ 16 桶灰阶',
+                      value: decoder.histogramLabel,
+                    ),
+                  ],
+                  if (session.renderOutputColorDiagnostics
+                      case final rendered?) ...[
+                    _ColorDiagnosticRow(
+                      label: 'iPad Texture 输入',
+                      value: _formatFrameColorCheckpoint(rendered),
+                    ),
+                    _ColorDiagnosticRow(
+                      label: '接收端转换',
+                      value: session.receiverColorConversion ?? 'Unknown',
+                    ),
+                  ],
+                  _ColorDiagnosticRow(
                     label: '当前 Mac 显示器',
                     value: display == null
                         ? 'Unknown'
@@ -322,7 +384,7 @@ Future<void> _showRemoteDisplayAdjustment(
                 ),
                 const SizedBox(height: 10),
                 const Text(
-                  'A/B 验证：临时切换 Mac HDR 后刷新诊断并观察同一画面；关闭 HDR 只用于定位，不是正式修复。',
+                  '诊断只上传抽样灰阶统计和色彩附件，不上传屏幕像素。A/B 验证时临时切换 Mac HDR 后刷新；关闭 HDR 只用于定位。',
                 ),
               ],
             ),
@@ -331,6 +393,16 @@ Future<void> _showRemoteDisplayAdjustment(
       ),
     ),
   );
+}
+
+String _formatFrameColorCheckpoint(RemoteFrameColorDiagnostics value) {
+  return '${value.dimensions} · ${value.pixelFormat} · ${value.range}\n'
+      'Y ${value.lumaMin}～${value.lumaMax}（标称 '
+      '${value.nominalBlack}～${value.nominalWhite}） · '
+      '低于黑位 ${value.belowNominalBlackPercent.toStringAsFixed(2)}% · '
+      '高于白位 ${value.aboveNominalWhitePercent.toStringAsFixed(2)}%\n'
+      '${value.colorPrimaries} · ${value.transferFunction} · '
+      '${value.yCbCrMatrix}';
 }
 
 class _ColorDiagnosticRow extends StatelessWidget {
@@ -355,9 +427,14 @@ class _ColorDiagnosticRow extends StatelessWidget {
 }
 
 class RemoteDesktopPanel extends StatefulWidget {
-  const RemoteDesktopPanel({super.key, required this.session});
+  const RemoteDesktopPanel({
+    super.key,
+    required this.session,
+    this.initialInputSettings = const RemoteInputSettings(),
+  });
 
   final RemoteSessionController session;
+  final RemoteInputSettings initialInputSettings;
 
   @override
   State<RemoteDesktopPanel> createState() => _RemoteDesktopPanelState();
@@ -365,7 +442,7 @@ class RemoteDesktopPanel extends StatefulWidget {
 
 class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
   final _surfaceKey = GlobalKey<_RemoteDesktopSurfaceState>();
-  final _inputSettings = ValueNotifier(const RemoteInputSettings());
+  late final ValueNotifier<RemoteInputSettings> _inputSettings;
   final _displayAdjustment = RemoteDisplayAdjustmentController();
   RemoteViewFit _viewFit = RemoteViewFit.contain;
   bool _rendererAttached = true;
@@ -374,6 +451,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
   @override
   void initState() {
     super.initState();
+    _inputSettings = ValueNotifier(widget.initialInputSettings);
     widget.session.addListener(_handleSessionStateChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -618,70 +696,65 @@ class _FullScreenRemoteDesktopPageState
       valueListenable: widget.inputSettings,
       builder: (context, inputSettings, _) => Scaffold(
         backgroundColor: Colors.black,
-        body: Stack(
-          children: [
-            Positioned.fill(
-              child: _RemoteDesktopSurface(
-                key: _surfaceKey,
-                session: widget.session,
-                inputSettings: inputSettings,
-                displayAdjustment: widget.displayAdjustment,
-                viewFit: _viewFit,
-                onDragLockChanged: (value) {
-                  widget.inputSettings.value = inputSettings.copyWith(
-                    dragLock: value,
-                  );
-                },
-              ),
-            ),
-            Positioned(
-              left: 0,
-              top: 0,
-              right: 0,
-              child: SafeArea(
-                bottom: false,
-                child: ColoredBox(
-                  color: Colors.black.withValues(alpha: 0.72),
-                  child: _RemoteToolbar(
-                    session: widget.session,
-                    pointerMode: inputSettings.pointerMode,
-                    viewFit: _viewFit,
-                    leading: IconButton(
-                      tooltip: '退出全屏',
-                      onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(Icons.arrow_back, color: Colors.white),
-                    ),
-                    foregroundColor: Colors.white,
-                    onPointerModeChanged: _setPointerMode,
-                    onViewFitChanged: (value) {
-                      setState(() => _viewFit = value);
-                      AppMessenger.show(
-                        value == RemoteViewFit.contain
-                            ? '画面模式：完整适应'
-                            : '画面模式：填满并裁剪',
-                        level: AppMessageLevel.success,
-                      );
-                    },
-                    onKeyboard: () => _surfaceKey.currentState?.showKeyboard(),
-                    onHelp: () =>
-                        _showGestureHelp(context, inputSettings.pointerMode),
-                    onInputSettings: () => _showRemoteInputSettings(
-                      context,
-                      settings: widget.inputSettings,
-                      session: widget.session,
-                    ),
-                    onDisplayAdjustment: () => _showRemoteDisplayAdjustment(
-                      context,
-                      adjustment: widget.displayAdjustment,
-                      session: widget.session,
-                    ),
-                    onFullScreen: () => Navigator.of(context).pop(),
-                    isFullScreen: true,
+        body: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              ColoredBox(
+                color: Colors.black.withValues(alpha: 0.88),
+                child: _RemoteToolbar(
+                  session: widget.session,
+                  pointerMode: inputSettings.pointerMode,
+                  viewFit: _viewFit,
+                  leading: IconButton(
+                    tooltip: '退出全屏',
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.arrow_back, color: Colors.white),
                   ),
+                  foregroundColor: Colors.white,
+                  onPointerModeChanged: _setPointerMode,
+                  onViewFitChanged: (value) {
+                    setState(() => _viewFit = value);
+                    AppMessenger.show(
+                      value == RemoteViewFit.contain
+                          ? '画面模式：完整适应'
+                          : '画面模式：填满并裁剪',
+                      level: AppMessageLevel.success,
+                    );
+                  },
+                  onKeyboard: () => _surfaceKey.currentState?.showKeyboard(),
+                  onHelp: () =>
+                      _showGestureHelp(context, inputSettings.pointerMode),
+                  onInputSettings: () => _showRemoteInputSettings(
+                    context,
+                    settings: widget.inputSettings,
+                    session: widget.session,
+                  ),
+                  onDisplayAdjustment: () => _showRemoteDisplayAdjustment(
+                    context,
+                    adjustment: widget.displayAdjustment,
+                    session: widget.session,
+                  ),
+                  onFullScreen: () => Navigator.of(context).pop(),
+                  isFullScreen: true,
                 ),
               ),
-            ),
-          ],
+              Expanded(
+                child: _RemoteDesktopSurface(
+                  key: _surfaceKey,
+                  session: widget.session,
+                  inputSettings: inputSettings,
+                  displayAdjustment: widget.displayAdjustment,
+                  viewFit: _viewFit,
+                  onDragLockChanged: (value) {
+                    widget.inputSettings.value = inputSettings.copyWith(
+                      dragLock: value,
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -721,199 +794,255 @@ class _RemoteToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final selected = session.selectedDisplay;
-    final color = foregroundColor ?? Theme.of(context).colorScheme.onSurface;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final compact = constraints.maxWidth < 720;
-        return IconTheme(
-          data: IconThemeData(color: color),
-          child: DefaultTextStyle.merge(
-            style: TextStyle(color: color),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              child: Row(
-                children: [
-                  ?leading,
-                  PopupMenuButton<String>(
-                    enabled: session.displays.isNotEmpty,
-                    tooltip: '切换显示器',
-                    onSelected: session.selectDisplay,
-                    itemBuilder: (context) => [
-                      for (final display in session.displays)
-                        PopupMenuItem(
-                          value: display.id,
-                          child: ListTile(
-                            dense: true,
-                            contentPadding: EdgeInsets.zero,
-                            leading: Icon(
-                              display.id == session.selectedDisplayId
-                                  ? Icons.check_circle
-                                  : Icons.monitor_outlined,
+    return ListenableBuilder(
+      listenable: session,
+      builder: (context, _) {
+        final selected = session.selectedDisplay;
+        final color =
+            foregroundColor ?? Theme.of(context).colorScheme.onSurface;
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < 720;
+            return IconTheme(
+              data: IconThemeData(color: color),
+              child: DefaultTextStyle.merge(
+                style: TextStyle(color: color),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  child: Row(
+                    children: [
+                      ?leading,
+                      PopupMenuButton<String>(
+                        enabled:
+                            session.displays.isNotEmpty &&
+                            !session.displaySwitchPending,
+                        tooltip: '切换显示器',
+                        onSelected: session.selectDisplay,
+                        itemBuilder: (context) => [
+                          for (final display in session.displays)
+                            PopupMenuItem(
+                              value: display.id,
+                              child: ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(
+                                  display.id == session.selectedDisplayId
+                                      ? Icons.check_circle
+                                      : Icons.monitor_outlined,
+                                ),
+                                title: Text(display.name),
+                                subtitle: Text(display.resolutionLabel),
+                              ),
                             ),
-                            title: Text(display.name),
-                            subtitle: Text(display.resolutionLabel),
-                          ),
-                        ),
-                    ],
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: compact
-                          ? const Icon(Icons.monitor_outlined, size: 20)
-                          : Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.monitor_outlined, size: 20),
-                                const SizedBox(width: 6),
-                                ConstrainedBox(
-                                  constraints: const BoxConstraints(
-                                    maxWidth: 150,
+                        ],
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: compact
+                              ? SizedBox.square(
+                                  dimension: 32,
+                                  child: Stack(
+                                    alignment: Alignment.center,
+                                    children: [
+                                      const Icon(
+                                        Icons.monitor_outlined,
+                                        size: 20,
+                                      ),
+                                      if (session.displaySwitchPending)
+                                        const Positioned(
+                                          right: 1,
+                                          bottom: 1,
+                                          child: SizedBox.square(
+                                            dimension: 10,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 1.5,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
                                   ),
-                                  child: Text(
-                                    selected?.name ?? '等待显示器',
-                                    overflow: TextOverflow.ellipsis,
+                                )
+                              : SizedBox(
+                                  width: 210,
+                                  child: Row(
+                                    children: [
+                                      const Icon(
+                                        Icons.monitor_outlined,
+                                        size: 20,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        child: Text(
+                                          selected?.name ?? '等待显示器',
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      SizedBox.square(
+                                        dimension: 18,
+                                        child: session.displaySwitchPending
+                                            ? const Padding(
+                                                padding: EdgeInsets.all(2),
+                                                child:
+                                                    CircularProgressIndicator(
+                                                      strokeWidth: 1.8,
+                                                    ),
+                                              )
+                                            : const Icon(
+                                                Icons.arrow_drop_down,
+                                                size: 18,
+                                              ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                                const Icon(Icons.arrow_drop_down),
-                              ],
-                            ),
-                    ),
-                  ),
-                  const Spacer(),
-                  if (!compact)
-                    Icon(
-                      session.canSendControl
-                          ? Icons.mouse_outlined
-                          : Icons.visibility_outlined,
-                      size: 18,
-                      color: session.canSendControl ? Colors.green : color,
-                    ),
-                  PopupMenuButton<RemotePointerMode>(
-                    tooltip: '控制模式',
-                    initialValue: pointerMode,
-                    onSelected: (value) {
-                      onPointerModeChanged(value);
-                    },
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(
-                        value: RemotePointerMode.touchpad,
-                        child: Text('触控板模式'),
-                      ),
-                      PopupMenuItem(
-                        value: RemotePointerMode.direct,
-                        child: Text('直接触控模式'),
-                      ),
-                    ],
-                    icon: Icon(
-                      pointerMode == RemotePointerMode.touchpad
-                          ? Icons.touch_app_outlined
-                          : Icons.ads_click_outlined,
-                    ),
-                  ),
-                  PopupMenuButton<_RemoteToolbarAction>(
-                    tooltip: '远程输入帮助与设置',
-                    onSelected: (action) {
-                      switch (action) {
-                        case _RemoteToolbarAction.help:
-                          onHelp();
-                        case _RemoteToolbarAction.settings:
-                          onInputSettings();
-                      }
-                    },
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(
-                        value: _RemoteToolbarAction.help,
-                        child: ListTile(
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
-                          leading: Icon(Icons.help_outline),
-                          title: Text('操作说明'),
                         ),
                       ),
-                      PopupMenuItem(
-                        value: _RemoteToolbarAction.settings,
-                        child: ListTile(
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
-                          leading: Icon(Icons.tune),
-                          title: Text('输入设置与诊断'),
+                      const Spacer(),
+                      if (!compact)
+                        Icon(
+                          session.canSendControl
+                              ? Icons.mouse_outlined
+                              : Icons.visibility_outlined,
+                          size: 18,
+                          color: session.canSendControl ? Colors.green : color,
                         ),
-                      ),
-                    ],
-                    icon: const Icon(Icons.more_horiz),
-                  ),
-                  IconButton(
-                    tooltip: viewFit == RemoteViewFit.contain
-                        ? '填满并裁剪'
-                        : '完整适应',
-                    onPressed: () => onViewFitChanged(
-                      viewFit == RemoteViewFit.contain
-                          ? RemoteViewFit.cover
-                          : RemoteViewFit.contain,
-                    ),
-                    icon: Icon(
-                      viewFit == RemoteViewFit.contain
-                          ? Icons.fit_screen_outlined
-                          : Icons.crop_free,
-                    ),
-                  ),
-                  PopupMenuButton<RemoteQualityProfile>(
-                    enabled: !session.qualityPending,
-                    tooltip: '传输清晰度：${session.qualityStatusLabel}',
-                    initialValue: session.selectedQuality,
-                    onSelected: session.selectQuality,
-                    itemBuilder: (context) => [
-                      for (final profile in RemoteQualityProfile.values)
-                        PopupMenuItem(
-                          value: profile,
-                          child: ListTile(
-                            dense: true,
-                            contentPadding: EdgeInsets.zero,
-                            leading: Icon(
-                              profile == session.selectedQuality
-                                  ? Icons.check_circle
-                                  : Icons.high_quality_outlined,
-                            ),
-                            title: Text(profile.label),
+                      PopupMenuButton<RemotePointerMode>(
+                        tooltip: '控制模式',
+                        initialValue: pointerMode,
+                        onSelected: (value) {
+                          onPointerModeChanged(value);
+                        },
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                            value: RemotePointerMode.touchpad,
+                            child: Text('触控板模式'),
                           ),
+                          PopupMenuItem(
+                            value: RemotePointerMode.direct,
+                            child: Text('直接触控模式'),
+                          ),
+                        ],
+                        icon: Icon(
+                          pointerMode == RemotePointerMode.touchpad
+                              ? Icons.touch_app_outlined
+                              : Icons.ads_click_outlined,
                         ),
+                      ),
+                      PopupMenuButton<_RemoteToolbarAction>(
+                        tooltip: '远程输入帮助与设置',
+                        onSelected: (action) {
+                          switch (action) {
+                            case _RemoteToolbarAction.help:
+                              onHelp();
+                            case _RemoteToolbarAction.settings:
+                              onInputSettings();
+                          }
+                        },
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                            value: _RemoteToolbarAction.help,
+                            child: ListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.help_outline),
+                              title: Text('操作说明'),
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: _RemoteToolbarAction.settings,
+                            child: ListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.tune),
+                              title: Text('输入设置与诊断'),
+                            ),
+                          ),
+                        ],
+                        icon: const Icon(Icons.more_horiz),
+                      ),
+                      IconButton(
+                        tooltip: viewFit == RemoteViewFit.contain
+                            ? '填满并裁剪'
+                            : '完整适应',
+                        onPressed: () => onViewFitChanged(
+                          viewFit == RemoteViewFit.contain
+                              ? RemoteViewFit.cover
+                              : RemoteViewFit.contain,
+                        ),
+                        icon: Icon(
+                          viewFit == RemoteViewFit.contain
+                              ? Icons.fit_screen_outlined
+                              : Icons.crop_free,
+                        ),
+                      ),
+                      PopupMenuButton<RemoteQualityProfile>(
+                        enabled: !session.qualityPending,
+                        tooltip: '传输清晰度：${session.qualityStatusLabel}',
+                        initialValue: session.selectedQuality,
+                        onSelected: session.selectQuality,
+                        itemBuilder: (context) => [
+                          for (final profile in RemoteQualityProfile.values)
+                            PopupMenuItem(
+                              value: profile,
+                              child: ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(
+                                  profile == session.selectedQuality
+                                      ? Icons.check_circle
+                                      : Icons.high_quality_outlined,
+                                ),
+                                title: Text(profile.label),
+                              ),
+                            ),
+                        ],
+                        icon: session.qualityPending
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.high_quality_outlined),
+                      ),
+                      IconButton(
+                        tooltip: '显示调整与色彩诊断',
+                        onPressed: onDisplayAdjustment,
+                        icon: const Icon(Icons.tonality_outlined),
+                      ),
+                      IconButton(
+                        tooltip: session.canSendControl
+                            ? '远程键盘'
+                            : '远程键盘（等待输入权限）',
+                        onPressed: onKeyboard,
+                        icon: const Icon(Icons.keyboard_outlined),
+                      ),
+                      IconButton(
+                        tooltip: '刷新显示器',
+                        onPressed: () {
+                          session.refreshRemoteDisplays();
+                          AppMessenger.show('正在刷新远程显示器');
+                        },
+                        icon: const Icon(Icons.refresh),
+                      ),
+                      IconButton(
+                        tooltip: isFullScreen ? '退出全屏' : '进入全屏',
+                        onPressed: onFullScreen,
+                        icon: Icon(
+                          isFullScreen
+                              ? Icons.fullscreen_exit
+                              : Icons.fullscreen,
+                        ),
+                      ),
                     ],
-                    icon: session.qualityPending
-                        ? const SizedBox.square(
-                            dimension: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.high_quality_outlined),
                   ),
-                  IconButton(
-                    tooltip: '显示调整与色彩诊断',
-                    onPressed: onDisplayAdjustment,
-                    icon: const Icon(Icons.tonality_outlined),
-                  ),
-                  IconButton(
-                    tooltip: session.canSendControl ? '远程键盘' : '远程键盘（等待输入权限）',
-                    onPressed: onKeyboard,
-                    icon: const Icon(Icons.keyboard_outlined),
-                  ),
-                  IconButton(
-                    tooltip: '刷新显示器',
-                    onPressed: () {
-                      session.refreshRemoteDisplays();
-                      AppMessenger.show('正在刷新远程显示器');
-                    },
-                    icon: const Icon(Icons.refresh),
-                  ),
-                  IconButton(
-                    tooltip: isFullScreen ? '退出全屏' : '进入全屏',
-                    onPressed: onFullScreen,
-                    icon: Icon(
-                      isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                    ),
-                  ),
-                ],
+                ),
               ),
-            ),
-          ),
+            );
+          },
         );
       },
     );
@@ -942,6 +1071,7 @@ class _RemoteDesktopSurface extends StatefulWidget {
 
 class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     with WidgetsBindingObserver {
+  static const _keyboardDockHeight = 72.0;
   final _hardwareFocus = FocusNode(debugLabel: 'remote-hardware-keyboard');
   final _textFocus = FocusNode(debugLabel: 'remote-soft-keyboard');
   final _textController = TextEditingController();
@@ -1150,15 +1280,22 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
           final sourceSize = renderer.width > 0 && renderer.height > 0
               ? Size(renderer.width, renderer.height)
               : Size(
-                  (display?.width ?? 16).toDouble(),
-                  (display?.height ?? 10).toDouble(),
+                  (display?.captureWidth ?? 16).toDouble(),
+                  (display?.captureHeight ?? 10).toDouble(),
                 );
           final boxFit = widget.viewFit == RemoteViewFit.contain
               ? BoxFit.contain
               : BoxFit.cover;
+          final safeBottom = MediaQuery.paddingOf(context).bottom;
+          final keyboardExtent = _keyboardVisible
+              ? _keyboardDockHeight + safeBottom + 16
+              : 0.0;
+          final viewportHeight = (constraints.maxHeight - keyboardExtent)
+              .clamp(0.0, constraints.maxHeight)
+              .toDouble();
           final transform = RemoteContentTransform.forViewport(
             sourceSize: sourceSize,
-            viewportSize: constraints.biggest,
+            viewportSize: Size(constraints.maxWidth, viewportHeight),
             fit: boxFit,
           );
           _latestTransform = transform;
@@ -1168,23 +1305,27 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
             onKeyEvent: _handleKeyEvent,
             child: Stack(
               fit: StackFit.expand,
+              clipBehavior: Clip.hardEdge,
               children: [
                 const ColoredBox(color: Colors.black),
-                ValueListenableBuilder<RemoteDisplayAdjustment>(
-                  valueListenable: widget.displayAdjustment,
-                  builder: (context, adjustment, child) {
-                    if (adjustment.isIdentity) return child!;
-                    return ColorFiltered(
-                      colorFilter: ColorFilter.matrix(adjustment.colorMatrix),
-                      child: child!,
-                    );
-                  },
-                  child: RTCVideoView(
-                    session.remoteRenderer,
-                    key: ValueKey(widget.viewFit),
-                    objectFit: widget.viewFit == RemoteViewFit.contain
-                        ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
-                        : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                Positioned.fromRect(
+                  rect: transform.destinationRect,
+                  child: ValueListenableBuilder<RemoteDisplayAdjustment>(
+                    valueListenable: widget.displayAdjustment,
+                    builder: (context, adjustment, child) {
+                      if (adjustment.isIdentity) return child!;
+                      return ColorFiltered(
+                        colorFilter: ColorFilter.matrix(adjustment.colorMatrix),
+                        child: child!,
+                      );
+                    },
+                    child: RTCVideoView(
+                      session.remoteRenderer,
+                      key: const ValueKey('remoteVideoView'),
+                      objectFit: widget.viewFit == RemoteViewFit.contain
+                          ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
+                          : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    ),
                   ),
                 ),
                 Positioned.fill(

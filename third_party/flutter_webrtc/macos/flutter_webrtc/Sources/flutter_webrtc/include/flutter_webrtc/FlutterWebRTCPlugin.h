@@ -12,6 +12,7 @@
 @class FlutterRTCFrameCapturer;
 @class FlutterRTCMediaRecorder;
 @class AudioManager;
+@class FlutterScreenCaptureKitCapturer;
 
 void postEvent(FlutterEventSink _Nullable sink, id _Nullable event);
 
@@ -41,6 +42,11 @@ typedef void (^CapturerStopHandler)(CompletionHandler _Nonnull handler);
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, FlutterRTCMediaRecorder*>* _Nonnull recorders;
 @property(nonatomic, strong)
     NSMutableDictionary<NSString*, CapturerStopHandler>* _Nullable videoCapturerStopHandlers;
+#if TARGET_OS_OSX
+@property(nonatomic, strong)
+    NSMutableDictionary<NSString*, FlutterScreenCaptureKitCapturer*>* _Nullable
+        screenCaptureKitCapturers;
+#endif
 
 @property(nonatomic, strong)
     NSMutableDictionary<NSString*, RTCFrameCryptor*>* _Nullable frameCryptors;

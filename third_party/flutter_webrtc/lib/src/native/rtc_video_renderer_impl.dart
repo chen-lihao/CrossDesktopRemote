@@ -51,6 +51,10 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
   @override
   Function? onFirstFrameRendered;
 
+  /// Privacy-safe native color diagnostics for the decoded frame and the
+  /// PixelBuffer handed to Flutter. Pixel samples never enter the Dart heap.
+  ValueChanged<Map<String, dynamic>>? onColorDiagnostics;
+
   @override
   set srcObject(MediaStream? stream) {
     if (_disposed) {
@@ -59,16 +63,20 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
     if (textureId == null) throw 'Call initialize before setting the stream';
     _srcObject = stream;
     WebRTC.invokeMethod('videoRendererSetSrcObject', <String, dynamic>{
-      'textureId': textureId,
-      'streamId': stream?.id ?? '',
-      'ownerTag': stream?.ownerTag ?? ''
-    }).then((_) {
-      value = (stream == null)
-          ? RTCVideoValue.empty
-          : value.copyWith(renderVideo: renderVideo);
-    }).catchError((e) {
-      print('Got exception for RTCVideoRenderer::setSrcObject: ${e.message}');
-    }, test: (e) => e is PlatformException);
+          'textureId': textureId,
+          'streamId': stream?.id ?? '',
+          'ownerTag': stream?.ownerTag ?? '',
+        })
+        .then((_) {
+          value = (stream == null)
+              ? RTCVideoValue.empty
+              : value.copyWith(renderVideo: renderVideo);
+        })
+        .catchError((e) {
+          print(
+            'Got exception for RTCVideoRenderer::setSrcObject: ${e.message}',
+          );
+        }, test: (e) => e is PlatformException);
   }
 
   Future<void> setSrcObject({MediaStream? stream, String? trackId}) async {
@@ -83,7 +91,7 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
         'textureId': _textureId,
         'streamId': stream?.id ?? '',
         'ownerTag': stream?.ownerTag ?? '',
-        'trackId': trackId ?? '0'
+        'trackId': trackId ?? '0',
       });
       value = (stream == null)
           ? RTCVideoValue.empty
@@ -118,20 +126,29 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
     final Map<dynamic, dynamic> map = event;
     switch (map['event']) {
       case 'didTextureChangeRotation':
-        value =
-            value.copyWith(rotation: map['rotation'], renderVideo: renderVideo);
+        value = value.copyWith(
+          rotation: map['rotation'],
+          renderVideo: renderVideo,
+        );
         onResize?.call();
         break;
       case 'didTextureChangeVideoSize':
         value = value.copyWith(
-            width: 0.0 + map['width'],
-            height: 0.0 + map['height'],
-            renderVideo: renderVideo);
+          width: 0.0 + map['width'],
+          height: 0.0 + map['height'],
+          renderVideo: renderVideo,
+        );
         onResize?.call();
         break;
       case 'didFirstFrameRendered':
         value = value.copyWith(renderVideo: renderVideo);
         onFirstFrameRendered?.call();
+        break;
+      case 'didReceiveColorDiagnostics':
+        final diagnostics = map['diagnostics'];
+        if (diagnostics is Map) {
+          onColorDiagnostics?.call(_normalizeStringMap(diagnostics));
+        }
         break;
     }
   }
@@ -158,7 +175,8 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
     }
     if (_srcObject!.ownerTag != 'local') {
       throw Exception(
-          'You\'re trying to mute a remote track, this is not supported');
+        'You\'re trying to mute a remote track, this is not supported',
+      );
     }
     if (_srcObject!.getAudioTracks().isEmpty) {
       throw Exception('Can\'t be muted: The MediaStreamTrack(audio) is empty');
@@ -191,4 +209,16 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
       print('Helper.setVolume ${e.toString()}');
     }
   }
+}
+
+Map<String, dynamic> _normalizeStringMap(Map<dynamic, dynamic> value) {
+  return value.map(
+    (key, item) => MapEntry(key.toString(), _normalizePlatformValue(item)),
+  );
+}
+
+Object? _normalizePlatformValue(Object? value) {
+  if (value is Map) return _normalizeStringMap(value);
+  if (value is List) return value.map(_normalizePlatformValue).toList();
+  return value;
 }

@@ -53,7 +53,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 		var result = rooms.join(roomCode, role.get(), session);
 		if (result != SignalingRoomRegistry.JoinResult.JOINED) {
-			session.close(CloseStatus.POLICY_VIOLATION.withReason(result.name()));
+			session.close(CloseStatus.POLICY_VIOLATION.withReason(
+					rooms.rejectionReason(result, roomCode, session)));
 			return;
 		}
 

@@ -3,12 +3,30 @@ import ApplicationServices
 import FlutterMacOS
 import dnssd
 
+func crossDesktopRemoteAbsolutePointerPosition(
+  normalizedX: Double,
+  normalizedY: Double,
+  displayBounds: CGRect
+) -> CGPoint {
+  let clampedX = min(max(normalizedX, 0), 1)
+  let clampedY = min(max(normalizedY, 0), 1)
+  let maximumX = max(displayBounds.minX, displayBounds.maxX - 1)
+  let maximumY = max(displayBounds.minY, displayBounds.maxY - 1)
+  return CGPoint(
+    x: min(displayBounds.origin.x + max(0, displayBounds.width - 1) * clampedX, maximumX),
+    y: min(displayBounds.origin.y + max(0, displayBounds.height - 1) * clampedY, maximumY)
+  )
+}
+
 class MainFlutterWindow: NSWindow {
   private var inputChannel: FlutterMethodChannel?
   private var lanDiscoveryBridge: AppleLanDiscoveryBridge?
   private var pressedMouseButtons: Set<String> = []
   private var captureColorDiagnostics: [String: Any] = [:]
   private var colorDiagnosticsObserver: NSObjectProtocol?
+  private var captureFirstFrameObserver: NSObjectProtocol?
+  private var captureFrameSequence = 0
+  private var captureFrameState: [String: Any] = [:]
   private var grayscaleTestPanel: NSPanel?
 
   override func awakeFromNib() {
@@ -25,6 +43,17 @@ class MainFlutterWindow: NSWindow {
       queue: .main
     ) { [weak self] notification in
       self?.captureColorDiagnostics = notification.userInfo as? [String: Any] ?? [:]
+    }
+    captureFirstFrameObserver = NotificationCenter.default.addObserver(
+      forName: Notification.Name("CrossDesktopRemoteCaptureFirstFrame"),
+      object: nil,
+      queue: .main
+    ) { [weak self] notification in
+      guard let self else { return }
+      self.captureFrameSequence += 1
+      var state = notification.userInfo as? [String: Any] ?? [:]
+      state["sequence"] = self.captureFrameSequence
+      self.captureFrameState = state
     }
     registerInputChannel(binaryMessenger: flutterViewController.engine.binaryMessenger)
     lanDiscoveryBridge = AppleLanDiscoveryBridge(
@@ -56,6 +85,8 @@ class MainFlutterWindow: NSWindow {
         result(self.listDisplays())
       case "getColorDiagnostics":
         result(self.getColorDiagnostics())
+      case "getCaptureFrameState":
+        result(self.captureFrameState.merging(["sequence": self.captureFrameSequence]) { current, _ in current })
       case "showGrayscaleTestPattern":
         self.showGrayscaleTestPattern()
         result(nil)
@@ -78,6 +109,9 @@ class MainFlutterWindow: NSWindow {
   deinit {
     if let colorDiagnosticsObserver {
       NotificationCenter.default.removeObserver(colorDiagnosticsObserver)
+    }
+    if let captureFirstFrameObserver {
+      NotificationCenter.default.removeObserver(captureFirstFrameObserver)
     }
   }
 
@@ -153,9 +187,10 @@ class MainFlutterWindow: NSWindow {
         y: min(max(current.y + movementY, displayBounds.minY), displayBounds.maxY - 1)
       )
     } else {
-      position = CGPoint(
-        x: displayBounds.origin.x + displayBounds.width * min(max(normalizedX, 0), 1),
-        y: displayBounds.origin.y + displayBounds.height * min(max(normalizedY, 0), 1)
+      position = crossDesktopRemoteAbsolutePointerPosition(
+        normalizedX: normalizedX,
+        normalizedY: normalizedY,
+        displayBounds: displayBounds
       )
     }
 
@@ -343,11 +378,19 @@ class MainFlutterWindow: NSWindow {
     }
     return activeDisplayIds().map { displayId in
       let bounds = CGDisplayBounds(displayId)
+      let pixelWidth = Int(CGDisplayPixelsWide(displayId))
+      let pixelHeight = Int(CGDisplayPixelsHigh(displayId))
+      let pointPixelScale = bounds.width > 0
+        ? Double(pixelWidth) / Double(bounds.width)
+        : 1
       return [
         "id": String(displayId),
         "name": names[displayId] ?? "Display \(displayId)",
         "width": Int(bounds.width),
         "height": Int(bounds.height),
+        "pixelWidth": pixelWidth,
+        "pixelHeight": pixelHeight,
+        "pointPixelScale": pointPixelScale,
         "isPrimary": displayId == CGMainDisplayID()
       ]
     }
