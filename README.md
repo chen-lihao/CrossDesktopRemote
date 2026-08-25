@@ -293,7 +293,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter | 响应式壳层、真实会话/设置页面、会话元数据历史、Apple Bonjour、共享恢复、Active/Pending/Retired采集热切换、四层显示几何、Sender-only自动画质、双键盘、iOS原生IME；Windows控制端增加物理键状态机、IME分流和保留同一WebRTC Texture的原生无边框全屏；`analyze`和81项测试通过，macOS/iOS Debug构建通过 | Windows重新构建并验证物理键盘/微软拼音/30次全屏；iPad回归；再推进Windows被控端采集和输入注入 |
+| Flutter | 响应式壳层、真实会话/设置页面、会话元数据历史、Apple Bonjour、共享恢复、Active/Pending/Retired采集热切换、四层显示几何、Sender-only自动画质、双键盘、iOS原生IME；会话层已通过`HostPlatformAdapter`隔离Mac/Windows被控能力；Windows控制端增加物理键状态机、微软拼音TextInputClient分流和保留同一WebRTC Texture的原生无边框全屏；`analyze`和87项测试通过，macOS/iOS Debug构建通过 | Windows验证微软拼音和30次全屏；iPad回归；再启用Windows被控端采集和输入注入 |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |

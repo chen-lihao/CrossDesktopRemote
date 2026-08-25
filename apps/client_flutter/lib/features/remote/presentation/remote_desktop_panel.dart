@@ -1588,7 +1588,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         _handleNativeImeError(error);
       }
     }
-    _activateFlutterKeyboard();
+    await _activateFlutterKeyboard();
     if (announce) {
       AppMessenger.show(
         Platform.isIOS ? '原生键盘不可用，已切换兼容输入模式' : '远程键盘已打开',
@@ -1597,10 +1597,21 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     }
   }
 
-  void _activateFlutterKeyboard() {
+  Future<void> _activateFlutterKeyboard() async {
     _resetTextInput();
     _textFocus.requestFocus();
-    SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+    // Windows must attach EditableText as the active TextInputClient before
+    // Microsoft Pinyin starts emitting composition updates. Opening the input
+    // connection in the same microtask as requestFocus can lose the first IME
+    // composition completely.
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted ||
+        !_keyboardVisible ||
+        _activeKeyboardMode != RemoteKeyboardMode.system) {
+      return;
+    }
+    _textFocus.requestFocus();
+    await SystemChannels.textInput.invokeMethod<void>('TextInput.show');
   }
 
   Future<void> _hideNativeIme() async {
@@ -1658,7 +1669,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     setState(() => _nativeImeFailed = true);
     if (_keyboardVisible && _activeKeyboardMode == RemoteKeyboardMode.system) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _activateFlutterKeyboard();
+        if (mounted) unawaited(_activateFlutterKeyboard());
       });
     }
   }
@@ -1972,15 +1983,35 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                     child: TextField(
                       focusNode: _textFocus,
                       controller: _textController,
+                      autofocus: Platform.isWindows,
                       autocorrect: true,
                       enableSuggestions: true,
                       maxLines: 1,
                       textInputAction: TextInputAction.done,
-                      decoration: const InputDecoration(
-                        labelText: '兼容输入',
-                        prefixIcon: Icon(Icons.keyboard_outlined),
+                      decoration: InputDecoration(
+                        labelText: Platform.isWindows
+                            ? (_compositionLength > 0
+                                  ? '微软拼音组合中（$_compositionLength）'
+                                  : 'Windows 文字输入')
+                            : '兼容输入',
+                        helperText: Platform.isWindows
+                            ? '选词提交后发送；快捷键请切换快捷小键盘'
+                            : null,
+                        prefixIcon: const Icon(Icons.keyboard_outlined),
                       ),
                       onTap: _keepTextSelectionAtEnd,
+                      onTapOutside: Platform.isWindows
+                          ? (_) {
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (mounted &&
+                                    _keyboardVisible &&
+                                    _activeKeyboardMode ==
+                                        RemoteKeyboardMode.system) {
+                                  _textFocus.requestFocus();
+                                }
+                              });
+                            }
+                          : null,
                       onChanged: (_) => _textChanged(),
                       onSubmitted: (_) {
                         _sendSpecialKey('Enter');
@@ -2028,7 +2059,15 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       session.explainControlUnavailable();
       return;
     }
-    _hardwareFocus.requestFocus();
+    if (_usesDesktopKeyboard &&
+        _keyboardVisible &&
+        _activeKeyboardMode == RemoteKeyboardMode.system) {
+      // Clicking the remote desktop must not detach the Windows TextInputClient
+      // while the user is composing with Microsoft Pinyin.
+      _textFocus.requestFocus();
+    } else {
+      _hardwareFocus.requestFocus();
+    }
     if (event.kind == PointerDeviceKind.mouse ||
         event.kind == PointerDeviceKind.trackpad) {
       final normalized = transform.normalize(event.localPosition);
@@ -2393,6 +2432,13 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
 
   void _textChanged() {
     final value = _textController.value;
+    final composing = value.composing;
+    final compositionLength = composing.isValid && !composing.isCollapsed
+        ? composing.end - composing.start
+        : 0;
+    if (_compositionLength != compositionLength && mounted) {
+      setState(() => _compositionLength = compositionLength);
+    }
     final edit = _textSynchronizer.update(value);
     for (var index = 0; index < edit.backspaceCount; index += 1) {
       _sendSpecialKey('Backspace');

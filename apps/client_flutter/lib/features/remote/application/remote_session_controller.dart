@@ -3,7 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:cross_desktop_remote/core/input/mac_input_bridge.dart';
+import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
+import 'package:cross_desktop_remote/core/input/host_platform_adapter_factory.dart';
 import 'package:cross_desktop_remote/core/protocol/wire_value_parsers.dart';
 import 'package:cross_desktop_remote/core/input/remote_text_chunks.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_client.dart';
@@ -81,7 +82,7 @@ class _CaptureFrameWaitResult {
   const _CaptureFrameWaitResult({required this.ready, this.lastState});
 
   final bool ready;
-  final MacCaptureFrameState? lastState;
+  final HostCaptureFrameState? lastState;
 
   String get diagnosticSuffix {
     final state = lastState;
@@ -97,15 +98,15 @@ class RemoteSessionController extends ChangeNotifier {
   RemoteSessionController({
     required this.role,
     SignalingClient? signalingClient,
-    MacInputBridge? inputBridge,
+    HostPlatformAdapter? hostPlatformAdapter,
     RemoteQualityProfile initialQuality = RemoteQualityProfile.automatic,
   }) : _signaling = signalingClient ?? SignalingClient(),
-       _inputBridge = inputBridge ?? const MacInputBridge(),
+       _hostPlatform = hostPlatformAdapter ?? createHostPlatformAdapter(),
        _selectedQuality = initialQuality;
 
   final RemoteRole role;
   final SignalingClient _signaling;
-  final MacInputBridge _inputBridge;
+  final HostPlatformAdapter _hostPlatform;
   final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
   final StreamController<RemoteNotice> _notices =
       StreamController<RemoteNotice>.broadcast(sync: true);
@@ -269,12 +270,14 @@ class RemoteSessionController extends ChangeNotifier {
       remoteRenderer.onColorDiagnostics = _handleRendererColorDiagnostics;
       await remoteRenderer.initialize();
       _rendererReady = true;
-      if (role == RemoteRole.host && Platform.isMacOS) {
+      if (role == RemoteRole.host &&
+          _hostPlatform.capabilities.canHostDesktop) {
         try {
-          _accessibilityGranted = await _inputBridge.checkInputAccess();
+          final permission = await _hostPlatform.checkPermissions();
+          _accessibilityGranted = permission.inputGranted;
           _controlError = _accessibilityGranted == true
               ? null
-              : '本机尚未允许远程鼠标和键盘输入';
+              : permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
         } catch (_) {
           // Native channels are unavailable in widget tests and early startup.
         }
@@ -502,17 +505,20 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<void> requestHostInputPermission() async {
-    if (role != RemoteRole.host || !Platform.isMacOS) {
+    if (role != RemoteRole.host || !_hostPlatform.capabilities.canHostDesktop) {
       return;
     }
     try {
-      _accessibilityGranted = await _inputBridge.requestInputAccess();
+      final permission = await _hostPlatform.requestPermissions();
+      _accessibilityGranted = permission.inputGranted;
       if (_accessibilityGranted == true) {
         _controlError = null;
         _emitNotice('远程输入权限已就绪', level: RemoteNoticeLevel.success);
       } else {
-        _controlError = '本机尚未允许远程鼠标和键盘输入';
-        await _inputBridge.openInputSettings();
+        _controlError = permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
+        if (_hostPlatform.capabilities.permissionSettings) {
+          await _hostPlatform.openPermissionSettings();
+        }
         _emitNotice(
           '请在系统设置中允许 CrossDesktopRemote 控制本机，然后返回应用',
           level: RemoteNoticeLevel.warning,
@@ -530,15 +536,18 @@ class RemoteSessionController extends ChangeNotifier {
 
   Future<void> refreshHostPermissions({bool announce = false}) async {
     if (role != RemoteRole.host ||
-        !Platform.isMacOS ||
+        !_hostPlatform.capabilities.canHostDesktop ||
         _checkingInputPermission) {
       return;
     }
     _checkingInputPermission = true;
     try {
       final previous = _accessibilityGranted;
-      _accessibilityGranted = await _inputBridge.checkInputAccess();
-      _controlError = _accessibilityGranted == true ? null : '本机尚未允许远程鼠标和键盘输入';
+      final permission = await _hostPlatform.checkPermissions();
+      _accessibilityGranted = permission.inputGranted;
+      _controlError = _accessibilityGranted == true
+          ? null
+          : permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
       _publishHostState();
       notifyListeners();
       if (_accessibilityGranted == true && previous != true) {
@@ -937,7 +946,7 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<void> _handleHostControlMessage(Map<String, dynamic> message) async {
-    if (!Platform.isMacOS) {
+    if (!_hostPlatform.capabilities.canHostDesktop) {
       return;
     }
     switch (message['type']) {
@@ -947,19 +956,21 @@ class RemoteSessionController extends ChangeNotifier {
         if (!_acceptInputSequence(message, motion: isMotion)) {
           return;
         }
-        await _inputBridge.sendPointer(
-          phase: phase,
-          x: (message['x'] as num?)?.toDouble() ?? 0,
-          y: (message['y'] as num?)?.toDouble() ?? 0,
-          displayId:
-              message['displayId'] as String? ?? _selectedDisplayId ?? '',
-          mode: message['mode'] as String? ?? 'absolute',
-          button: message['button'] as String? ?? 'left',
-          clickCount: (message['clickCount'] as num?)?.toInt() ?? 1,
-          movementX: (message['movementX'] as num?)?.toDouble() ?? 0,
-          movementY: (message['movementY'] as num?)?.toDouble() ?? 0,
-          deltaX: (message['deltaX'] as num?)?.toDouble() ?? 0,
-          deltaY: (message['deltaY'] as num?)?.toDouble() ?? 0,
+        await _hostPlatform.sendPointer(
+          HostPointerEvent(
+            phase: phase,
+            x: (message['x'] as num?)?.toDouble() ?? 0,
+            y: (message['y'] as num?)?.toDouble() ?? 0,
+            displayId:
+                message['displayId'] as String? ?? _selectedDisplayId ?? '',
+            mode: message['mode'] as String? ?? 'absolute',
+            button: message['button'] as String? ?? 'left',
+            clickCount: (message['clickCount'] as num?)?.toInt() ?? 1,
+            movementX: (message['movementX'] as num?)?.toDouble() ?? 0,
+            movementY: (message['movementY'] as num?)?.toDouble() ?? 0,
+            deltaX: (message['deltaX'] as num?)?.toDouble() ?? 0,
+            deltaY: (message['deltaY'] as num?)?.toDouble() ?? 0,
+          ),
         );
         if ((message['phase'] != 'move' && message['phase'] != 'scroll') ||
             message['latencyProbe'] == true) {
@@ -972,15 +983,19 @@ class RemoteSessionController extends ChangeNotifier {
         if (message['inputType'] == 'text') {
           final text = message['text'] as String? ?? '';
           if (text.isNotEmpty && text.length <= 256) {
-            await _inputBridge.sendText(text);
+            await _hostPlatform.sendText(text);
           }
         } else {
-          await _inputBridge.sendKey(
-            phase: message['phase'] as String? ?? 'down',
-            key: message['key'] as String? ?? '',
-            modifiers: (message['modifiers'] as List<dynamic>? ?? const [])
-                .whereType<String>()
-                .toList(growable: false),
+          await _hostPlatform.sendKey(
+            HostKeyEvent(
+              phase: message['phase'] as String? ?? 'down',
+              key: message['key'] as String? ?? '',
+              modifiers: (message['modifiers'] as List<dynamic>? ?? const [])
+                  .whereType<String>()
+                  .toList(growable: false),
+              physicalHidUsage: (message['physicalHidUsage'] as num?)?.toInt(),
+              repeat: wireBool(message['repeat']),
+            ),
           );
         }
         _acknowledgeInput(message);
@@ -1001,7 +1016,9 @@ class RemoteSessionController extends ChangeNotifier {
           notifyController: true,
         );
       case 'refresh-host-status':
-        _accessibilityGranted = await _inputBridge.checkInputAccess();
+        final permission = await _hostPlatform.checkPermissions();
+        _accessibilityGranted = permission.inputGranted;
+        _controlError = permission.inputGranted ? null : permission.limitation;
         _publishHostState();
         notifyListeners();
       case 'refresh-displays':
@@ -1023,9 +1040,13 @@ class RemoteSessionController extends ChangeNotifier {
       case 'refresh-color-diagnostics':
         await _publishColorDiagnostics();
       case 'show-grayscale-test':
-        await _inputBridge.showGrayscaleTestPattern();
+        if (_hostPlatform.capabilities.colorDiagnostics) {
+          await _hostPlatform.showGrayscaleTestPattern();
+        }
       case 'open-display-settings':
-        await _inputBridge.openDisplaySettings();
+        if (_hostPlatform.capabilities.colorDiagnostics) {
+          await _hostPlatform.openDisplaySettings();
+        }
     }
   }
 
@@ -1381,9 +1402,12 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<void> _publishColorDiagnostics() async {
-    if (role != RemoteRole.host || !Platform.isMacOS) return;
+    if (role != RemoteRole.host ||
+        !_hostPlatform.capabilities.colorDiagnostics) {
+      return;
+    }
     try {
-      final diagnostics = await _inputBridge.getColorDiagnostics();
+      final diagnostics = await _hostPlatform.getColorDiagnostics();
       _sendControl({
         'type': 'color-diagnostics',
         'version': 2,
@@ -1706,10 +1730,11 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<void> _reportInputFailure(Object error) async {
-    _accessibilityGranted = await _inputBridge.checkInputAccess();
+    final permission = await _hostPlatform.checkPermissions();
+    _accessibilityGranted = permission.inputGranted;
     _controlError = _accessibilityGranted == true
         ? '本机输入注入失败'
-        : '本机尚未允许远程鼠标和键盘输入';
+        : permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
     _sendControl({
       'type': 'input-error',
       'version': 2,
@@ -1830,11 +1855,14 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<void> _startHostCapture() async {
-    if (!Platform.isMacOS) {
+    if (!_hostPlatform.capabilities.canHostDesktop) {
       throw UnsupportedError('当前版本尚未实现此平台的被控能力');
     }
-    _accessibilityGranted = await _inputBridge.requestInputAccess();
-    _controlError = _accessibilityGranted == true ? null : '本机尚未允许远程鼠标和键盘输入';
+    final permission = await _hostPlatform.requestPermissions();
+    _accessibilityGranted = permission.inputGranted;
+    _controlError = _accessibilityGranted == true
+        ? null
+        : permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
     await _loadDisplaySources();
     if (_displaySources.isEmpty) {
       throw StateError('没有可共享的显示器，请检查屏幕录制权限');
@@ -1884,10 +1912,14 @@ class RemoteSessionController extends ChangeNotifier {
     required int afterSequence,
     int attempts = 30,
   }) async {
-    MacCaptureFrameState? lastState;
+    if (!_hostPlatform.capabilities.captureFrameReadiness) {
+      return const _CaptureFrameWaitResult(ready: true);
+    }
+    HostCaptureFrameState? lastState;
     for (var attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        final state = await _inputBridge.getCaptureFrameState();
+        final state = await _hostPlatform.getCaptureFrameState();
+        if (state == null) continue;
         lastState = state;
         if (state.isReadyAfter(
           sequence: afterSequence,
@@ -2016,7 +2048,7 @@ class RemoteSessionController extends ChangeNotifier {
       types: [SourceType.Screen],
       thumbnailSize: ThumbnailSize(160, 100),
     );
-    final nativeDisplays = await _inputBridge.listDisplays();
+    final nativeDisplays = await _hostPlatform.listDisplays();
     final nativeById = {
       for (final display in nativeDisplays) display.id: display,
     };
@@ -2122,7 +2154,7 @@ class RemoteSessionController extends ChangeNotifier {
       if (previousTrackId == null || previousTrackId.isEmpty) {
         throw StateError('当前显示器视频轨道缺少标识');
       }
-      final captureBaseline = await _inputBridge.getCaptureFrameState();
+      final captureBaseline = await _hostPlatform.getCaptureFrameState();
       _RtcVideoProgress? outboundBaseline;
       final sender = _videoSender;
       if (sender == null || _peerConnection == null) {
@@ -2142,7 +2174,7 @@ class RemoteSessionController extends ChangeNotifier {
           _captureTargetSourceId = displayId;
         }
       } catch (error) {
-        if (Platform.isMacOS) {
+        if (_hostPlatform.type == HostPlatformType.macOS) {
           throw _DisplaySwitchFailure(
             code: 'CAPTURE_PREPARE_FAILED',
             stage: 'targetStreamWarmup',
@@ -2163,7 +2195,7 @@ class RemoteSessionController extends ChangeNotifier {
         }
         final captureWait = await _waitForCaptureFirstFrame(
           sourceId: displayId,
-          afterSequence: captureBaseline.sequence,
+          afterSequence: captureBaseline?.sequence ?? 0,
         );
         if (!captureWait.ready) {
           throw _DisplaySwitchFailure(
@@ -2185,7 +2217,7 @@ class RemoteSessionController extends ChangeNotifier {
         outboundBaseline = await _waitForRtcVideoProgressStats('outbound-rtp');
         final captureWait = await _waitForCaptureFirstFrame(
           sourceId: displayId,
-          afterSequence: captureBaseline.sequence,
+          afterSequence: captureBaseline?.sequence ?? 0,
           attempts: 12,
         );
         if (!captureWait.ready) {
@@ -2298,7 +2330,7 @@ class RemoteSessionController extends ChangeNotifier {
           previousDisplayId != null &&
           captureConfiguration != null) {
         try {
-          final rollbackBaseline = await _inputBridge.getCaptureFrameState();
+          final rollbackBaseline = await _hostPlatform.getCaptureFrameState();
           try {
             // Arm VideoToolbox before the cached old frame is re-injected so
             // a completely static desktop can still recover with a key frame.
@@ -2318,7 +2350,7 @@ class RemoteSessionController extends ChangeNotifier {
           _captureTargetLongEdge = _sessionCaptureLongEdge;
           final rollbackWait = await _waitForCaptureFirstFrame(
             sourceId: previousDisplayId,
-            afterSequence: rollbackBaseline.sequence,
+            afterSequence: rollbackBaseline?.sequence ?? 0,
           );
           if (!rollbackWait.ready) {
             throw StateError('原显示器未恢复有效采集帧');
@@ -2440,7 +2472,7 @@ class RemoteSessionController extends ChangeNotifier {
         if (previousDisplayId == null) {
           throw StateError('原显示器标识已经不可用');
         }
-        final captureBaseline = await _inputBridge.getCaptureFrameState();
+        final captureBaseline = await _hostPlatform.getCaptureFrameState();
         try {
           await desktopCapturer.requestKeyFrame();
         } catch (_) {
@@ -2463,7 +2495,7 @@ class RemoteSessionController extends ChangeNotifier {
         _captureTargetLongEdge = _sessionCaptureLongEdge;
         final rollbackWait = await _waitForCaptureFirstFrame(
           sourceId: previousDisplayId,
-          afterSequence: captureBaseline.sequence,
+          afterSequence: captureBaseline?.sequence ?? 0,
         );
         if (!rollbackWait.ready) {
           throw StateError('原显示器未恢复有效采集帧');
@@ -2779,9 +2811,11 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<void> _releaseHostPointerButtons() async {
-    if (role != RemoteRole.host || !Platform.isMacOS) return;
+    if (role != RemoteRole.host || !_hostPlatform.capabilities.canHostDesktop) {
+      return;
+    }
     try {
-      await _inputBridge.releasePointerButtons();
+      await _hostPlatform.releasePointerButtons();
     } catch (_) {
       // The native window may already be closing or unavailable in tests.
     }

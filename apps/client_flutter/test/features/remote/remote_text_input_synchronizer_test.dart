@@ -48,6 +48,47 @@ void main() {
     expect(unchanged.isEmpty, isTrue);
   });
 
+  test('keeps consecutive Microsoft Pinyin compositions local', () {
+    final synchronizer = RemoteTextInputSynchronizer();
+
+    synchronizer.update(
+      const TextEditingValue(
+        text: 'ni',
+        composing: TextRange(start: 0, end: 2),
+      ),
+    );
+    final firstCommit = synchronizer.update(const TextEditingValue(text: '你'));
+    final secondComposition = synchronizer.update(
+      const TextEditingValue(
+        text: '你hao',
+        composing: TextRange(start: 1, end: 4),
+      ),
+    );
+    final secondCommit = synchronizer.update(
+      const TextEditingValue(text: '你好'),
+    );
+
+    expect(firstCommit.insertedText, '你');
+    expect(secondComposition.isEmpty, isTrue);
+    expect(secondCommit.backspaceCount, 0);
+    expect(secondCommit.insertedText, '好');
+  });
+
+  test('cancelling a Microsoft Pinyin composition sends nothing', () {
+    final synchronizer = RemoteTextInputSynchronizer();
+    synchronizer.update(const TextEditingValue(text: 'A'));
+
+    synchronizer.update(
+      const TextEditingValue(
+        text: 'Ani',
+        composing: TextRange(start: 1, end: 3),
+      ),
+    );
+    final cancelled = synchronizer.update(const TextEditingValue(text: 'A'));
+
+    expect(cancelled.isEmpty, isTrue);
+  });
+
   test('deletion counts grapheme clusters instead of UTF-16 code units', () {
     final synchronizer = RemoteTextInputSynchronizer();
     synchronizer.update(const TextEditingValue(text: 'A👨‍👩‍👧‍👦'));
