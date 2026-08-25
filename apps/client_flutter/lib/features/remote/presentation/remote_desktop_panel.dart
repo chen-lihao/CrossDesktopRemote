@@ -1257,8 +1257,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   final _textFocus = FocusNode(debugLabel: 'remote-soft-keyboard');
   final _textController = TextEditingController();
   final _textSynchronizer = RemoteTextInputSynchronizer();
-  late final WindowsRemoteImeCoordinator _windowsIme =
-      WindowsRemoteImeCoordinator(synchronizer: _textSynchronizer);
+  late final DesktopRemoteImeCoordinator _desktopIme =
+      DesktopRemoteImeCoordinator(synchronizer: _textSynchronizer);
   final _desktopKeyboard = RemoteKeyboardTranslator();
   final RemoteImeInputAdapter _nativeIme = MethodChannelRemoteImeInputAdapter();
   final _pointerCoalescer = RemotePointerEventCoalescer();
@@ -1293,20 +1293,22 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   final Set<String> _compactModifiers = {};
   RemoteContentTransform? _latestTransform;
   Offset? _lastNormalizedPointer;
-  Offset _windowsImeAnchor = const Offset(24, 24);
+  Offset _desktopImeAnchor = const Offset(24, 24);
 
   RemoteSessionController get session => widget.session;
 
   bool get _usesDesktopKeyboard =>
       Platform.isWindows || Platform.isMacOS || Platform.isLinux;
 
-  bool get _windowsDirectImeAvailable =>
-      Platform.isWindows && !_keyboardVisible && session.canSendControl;
+  bool get _usesDesktopIme => Platform.isWindows || Platform.isMacOS;
+
+  bool get _desktopDirectImeAvailable =>
+      _usesDesktopIme && !_keyboardVisible && session.canSendControl;
 
   void requestHardwareKeyboardFocus() {
     if (!mounted) return;
-    if (_windowsDirectImeAvailable) {
-      unawaited(_activateWindowsDirectIme());
+    if (_desktopDirectImeAvailable) {
+      unawaited(_activateDesktopDirectIme());
     } else {
       _hardwareFocus.requestFocus();
     }
@@ -1333,8 +1335,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _updateGestureConfiguration();
-      if (_windowsDirectImeAvailable) {
-        unawaited(_activateWindowsDirectIme());
+      if (_desktopDirectImeAvailable) {
+        unawaited(_activateDesktopDirectIme());
       }
     });
     if (_lastDisplaySwitchPending) {
@@ -1378,7 +1380,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     if (nextMode == RemoteKeyboardMode.compact) {
       if ((_keyboardVisible &&
               _activeKeyboardMode == RemoteKeyboardMode.system) ||
-          Platform.isWindows) {
+          _usesDesktopIme) {
         if (Platform.isIOS) {
           unawaited(_hideNativeIme());
         } else {
@@ -1423,9 +1425,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         _systemKeyboardDocked = false;
         _compactModifiers.clear();
       });
-      if (Platform.isWindows) {
+      if (_usesDesktopIme) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) unawaited(_activateWindowsDirectIme());
+          if (mounted) unawaited(_activateDesktopDirectIme());
         });
       }
     }
@@ -1627,10 +1629,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   Future<void> _activateFlutterKeyboard() async {
     _resetTextInput();
     _textFocus.requestFocus();
-    // Windows must attach EditableText as the active TextInputClient before
-    // Microsoft Pinyin starts emitting composition updates. Opening the input
-    // connection in the same microtask as requestFocus can lose the first IME
-    // composition completely.
+    // Desktop platforms must attach EditableText as the active TextInputClient
+    // before their input method starts emitting composition updates. Opening
+    // the connection in the same microtask can lose the first composition.
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted ||
         !_keyboardVisible ||
@@ -1641,20 +1642,20 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     await SystemChannels.textInput.invokeMethod<void>('TextInput.show');
   }
 
-  Future<void> _activateWindowsDirectIme() async {
-    if (!_windowsDirectImeAvailable) return;
+  Future<void> _activateDesktopDirectIme() async {
+    if (!_desktopDirectImeAvailable) return;
     _textFocus.requestFocus();
-    // The transparent EditableText must finish attaching before Windows sends
-    // the first WM_IME_COMPOSITION update. Keeping this client mounted also
-    // preserves IME focus across video geometry and full-screen changes.
+    // The transparent EditableText must finish attaching before the desktop
+    // input method sends its first composition update. Keeping this client
+    // mounted also preserves IME focus across geometry/full-screen changes.
     await WidgetsBinding.instance.endOfFrame;
-    if (!mounted || !_windowsDirectImeAvailable) return;
+    if (!mounted || !_desktopDirectImeAvailable) return;
     _textFocus.requestFocus();
     await SystemChannels.textInput.invokeMethod<void>('TextInput.show');
   }
 
-  void _suspendWindowsDirectIme() {
-    if (!Platform.isWindows || _keyboardVisible) return;
+  void _suspendDesktopDirectIme() {
+    if (!_usesDesktopIme || _keyboardVisible) return;
     _textFocus.unfocus();
     SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
     _resetTextInput(rebuildComposition: false);
@@ -1725,8 +1726,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     if (_usesDesktopKeyboard && state != AppLifecycleState.resumed) {
       _releaseDesktopKeys();
     }
-    if (Platform.isWindows && state != AppLifecycleState.resumed) {
-      _suspendWindowsDirectIme();
+    if (_usesDesktopIme && state != AppLifecycleState.resumed) {
+      _suspendDesktopDirectIme();
     }
     if (_keyboardVisible &&
         const {
@@ -1739,7 +1740,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     }
     if (_usesDesktopKeyboard &&
         state == AppLifecycleState.resumed &&
-        (Platform.isWindows || widget.desktopFullScreen)) {
+        (_usesDesktopIme || widget.desktopFullScreen)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         requestHardwareKeyboardFocus();
       });
@@ -1772,7 +1773,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     _releaseDesktopKeys();
     if ((_keyboardVisible &&
             _activeKeyboardMode == RemoteKeyboardMode.system) ||
-        (Platform.isWindows && _textFocus.hasFocus)) {
+        (_usesDesktopIme && _textFocus.hasFocus)) {
       if (Platform.isIOS) {
         unawaited(_hideNativeIme());
       } else {
@@ -1841,8 +1842,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
             onKeyEvent: _handleKeyEvent,
             child: MouseRegion(
               onEnter: (_) {
-                if (_windowsDirectImeAvailable) {
-                  unawaited(_activateWindowsDirectIme());
+                if (_desktopDirectImeAvailable) {
+                  unawaited(_activateDesktopDirectIme());
                 } else if (_usesDesktopKeyboard && !_textFocus.hasFocus) {
                   _hardwareFocus.requestFocus();
                 }
@@ -1893,8 +1894,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                       child: const SizedBox.expand(),
                     ),
                   ),
-                  if (Platform.isWindows && !_keyboardVisible)
-                    _buildWindowsImeProxy(constraints),
+                  if (_desktopDirectImeAvailable)
+                    _buildDesktopImeProxy(constraints),
                   if (widget.inputSettings.pointerMode ==
                           RemotePointerMode.touchpad &&
                       !_keyboardVisible)
@@ -1969,7 +1970,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     );
   }
 
-  Widget _buildWindowsImeProxy(BoxConstraints constraints) {
+  Widget _buildDesktopImeProxy(BoxConstraints constraints) {
     const proxyWidth = 180.0;
     const proxyHeight = 28.0;
     final maximumLeft = (constraints.maxWidth - proxyWidth - 8).clamp(
@@ -1980,8 +1981,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       8.0,
       double.infinity,
     );
-    final left = _windowsImeAnchor.dx.clamp(8.0, maximumLeft);
-    final top = _windowsImeAnchor.dy.clamp(8.0, maximumTop);
+    final left = _desktopImeAnchor.dx.clamp(8.0, maximumLeft);
+    final top = _desktopImeAnchor.dy.clamp(8.0, maximumTop);
     return Positioned(
       left: left,
       top: top,
@@ -1990,12 +1991,12 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       child: ExcludeSemantics(
         child: IgnorePointer(
           child: Opacity(
-            // Keep a real laid-out EditableText so Windows can position its
-            // candidate window near the last remote click. Text and cursor are
-            // transparent, so the application does not expose a local editor.
+            // Keep a real laid-out EditableText so the desktop IME can position
+            // its candidate window near the last remote click. Text and cursor
+            // stay transparent so no local editor is exposed.
             opacity: 0.01,
             child: TextField(
-              key: const ValueKey('windowsRemoteImeProxy'),
+              key: const ValueKey('desktopRemoteImeProxy'),
               focusNode: _textFocus,
               controller: _textController,
               autocorrect: true,
@@ -2083,24 +2084,24 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                     child: TextField(
                       focusNode: _textFocus,
                       controller: _textController,
-                      autofocus: Platform.isWindows,
+                      autofocus: _usesDesktopIme,
                       autocorrect: true,
                       enableSuggestions: true,
                       maxLines: 1,
                       textInputAction: TextInputAction.done,
                       decoration: InputDecoration(
-                        labelText: Platform.isWindows
+                        labelText: _usesDesktopIme
                             ? (_compositionLength > 0
-                                  ? '微软拼音组合中（$_compositionLength）'
-                                  : 'Windows 兼容文本输入')
+                                  ? '输入法组合中（$_compositionLength）'
+                                  : '桌面端兼容文本输入')
                             : '兼容输入',
-                        helperText: Platform.isWindows
+                        helperText: _usesDesktopIme
                             ? '远程画面已支持直接输入；此输入框仅作兼容后备'
                             : null,
                         prefixIcon: const Icon(Icons.keyboard_outlined),
                       ),
                       onTap: _keepTextSelectionAtEnd,
-                      onTapOutside: Platform.isWindows
+                      onTapOutside: _usesDesktopIme
                           ? (_) {
                               WidgetsBinding.instance.addPostFrameCallback((_) {
                                 if (mounted &&
@@ -2112,7 +2113,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                               });
                             }
                           : null,
-                      onSubmitted: Platform.isWindows
+                      onSubmitted: _usesDesktopIme
                           ? null
                           : (_) {
                               _sendSpecialKey('Enter');
@@ -2160,17 +2161,17 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       session.explainControlUnavailable();
       return;
     }
-    if (_windowsDirectImeAvailable) {
+    if (_desktopDirectImeAvailable) {
       final nextAnchor = event.localPosition;
-      if ((_windowsImeAnchor - nextAnchor).distanceSquared > 16) {
-        setState(() => _windowsImeAnchor = nextAnchor);
+      if ((_desktopImeAnchor - nextAnchor).distanceSquared > 16) {
+        setState(() => _desktopImeAnchor = nextAnchor);
       }
-      unawaited(_activateWindowsDirectIme());
+      unawaited(_activateDesktopDirectIme());
     } else if (_usesDesktopKeyboard &&
         _keyboardVisible &&
         _activeKeyboardMode == RemoteKeyboardMode.system) {
-      // Clicking the remote desktop must not detach the Windows TextInputClient
-      // while the user is composing with Microsoft Pinyin.
+      // Clicking the remote desktop must not detach the TextInputClient while
+      // the user is selecting candidates in a desktop input method.
       _textFocus.requestFocus();
     } else {
       _hardwareFocus.requestFocus();
@@ -2471,7 +2472,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (!session.canSendControl) return KeyEventResult.ignored;
     if (_textFocus.hasFocus) {
-      if (!Platform.isWindows || _windowsIme.isComposing) {
+      if (!_usesDesktopIme || _desktopIme.isComposing) {
         // Let the active IME own candidate selection, cancellation and editing.
         return KeyEventResult.ignored;
       }
@@ -2483,17 +2484,17 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       final keyboard = HardwareKeyboard.instance;
       final modifiers = _remoteModifiers(keyboard);
       final shortcut = _remoteShortcutPressed(keyboard);
-      final shouldRoute = _windowsIme.shouldRouteToRemote(
+      final shouldRoute = _desktopIme.shouldRouteToRemote(
         event,
         shortcutPressed: shortcut,
         remoteKeyIsPressed: _desktopKeyboard.isPressed(event.physicalKey),
       );
       if (!shouldRoute) {
-        // Printable input goes through EditableText so Microsoft Pinyin can
-        // produce a composing range and a single committed Unicode result.
+        // Printable input goes through EditableText so the local input method
+        // can produce a composing range and one committed Unicode result.
         return KeyEventResult.ignored;
       }
-      if (_windowsIme.shouldResetBufferBefore(event)) {
+      if (_desktopIme.shouldResetBufferBefore(event)) {
         _resetTextInput();
       }
       final actions = _desktopKeyboard.translate(event, modifiers: modifiers);
@@ -2576,12 +2577,12 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
 
   void _textChanged() {
     final value = _textController.value;
-    final edit = Platform.isWindows
-        ? _windowsIme.update(value)
+    final edit = _usesDesktopIme
+        ? _desktopIme.update(value)
         : _textSynchronizer.update(value);
     final composing = value.composing;
-    final compositionLength = Platform.isWindows
-        ? _windowsIme.compositionLength
+    final compositionLength = _usesDesktopIme
+        ? _desktopIme.compositionLength
         : (composing.isValid && !composing.isCollapsed
               ? composing.end - composing.start
               : 0);
@@ -2594,8 +2595,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     if (edit.insertedText.isNotEmpty) {
       session.sendText(edit.insertedText);
     }
-    final shouldCompact = Platform.isWindows
-        ? _windowsIme.shouldCompact()
+    final shouldCompact = _usesDesktopIme
+        ? _desktopIme.shouldCompact()
         : _textSynchronizer.shouldCompact();
     if (shouldCompact &&
         (!value.composing.isValid || value.composing.isCollapsed)) {
@@ -2606,8 +2607,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   }
 
   void _resetTextInput({bool rebuildComposition = true}) {
-    if (Platform.isWindows) {
-      _windowsIme.reset();
+    if (_usesDesktopIme) {
+      _desktopIme.reset();
     } else {
       _textSynchronizer.reset();
     }

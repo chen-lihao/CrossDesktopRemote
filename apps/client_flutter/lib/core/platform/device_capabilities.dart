@@ -12,7 +12,7 @@ class DeviceCapabilities {
     return DeviceCapabilities(
       canControl: true,
       canHost: Platform.isMacOS || Platform.isWindows,
-      canDiscover: Platform.isIOS || Platform.isMacOS,
+      canDiscover: Platform.isIOS || Platform.isMacOS || Platform.isWindows,
       // Keep Windows on its established controller-first startup path. The
       // user can explicitly switch to "共享本机" after the runner capability
       // handshake succeeds.

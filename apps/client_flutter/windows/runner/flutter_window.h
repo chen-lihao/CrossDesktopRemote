@@ -9,6 +9,7 @@
 
 #include "win32_window.h"
 #include "windows_host_bridge.h"
+#include "windows_lan_discovery_bridge.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -34,6 +35,7 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       window_channel_;
   std::unique_ptr<WindowsHostBridge> host_bridge_;
+  std::unique_ptr<WindowsLanDiscoveryBridge> lan_discovery_bridge_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

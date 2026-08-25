@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -77,6 +78,21 @@ final class SignalingRoomRegistry {
 			return Optional.empty();
 		}
 		return room.session(role.peerRole());
+	}
+
+	OptionalLong invitationRemainingMillis(
+			String roomCode,
+			SignalingRole role,
+			WebSocketSession session) {
+		if (role != SignalingRole.HOST) {
+			return OptionalLong.empty();
+		}
+		var room = rooms.get(roomCode);
+		if (room == null || !room.contains(role, session)) {
+			return OptionalLong.empty();
+		}
+		var expiresAt = room.createdAtMillis() + roomTtlMillis;
+		return OptionalLong.of(Math.max(0, expiresAt - currentTimeMillis.getAsLong()));
 	}
 
 	String rejectionReason(JoinResult result, String roomCode, WebSocketSession session) {
@@ -244,6 +260,10 @@ final class SignalingRoomRegistry {
 
 		synchronized boolean isEmpty() {
 			return participants.isEmpty();
+		}
+
+		synchronized long createdAtMillis() {
+			return createdAtMillis;
 		}
 	}
 

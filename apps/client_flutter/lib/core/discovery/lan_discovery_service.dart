@@ -79,6 +79,8 @@ class DiscoveredDevice {
 }
 
 abstract interface class LanDiscoveryService {
+  bool get isSupported;
+
   Stream<List<DiscoveredDevice>> get devices;
 
   Future<void> startBrowsing();
@@ -93,7 +95,7 @@ abstract interface class LanDiscoveryService {
 }
 
 LanDiscoveryService createLanDiscoveryService() {
-  if (Platform.isIOS || Platform.isMacOS) {
+  if (Platform.isIOS || Platform.isMacOS || Platform.isWindows) {
     return MethodChannelLanDiscoveryService();
   }
   return UnsupportedLanDiscoveryService();
@@ -108,6 +110,9 @@ class MethodChannelLanDiscoveryService implements LanDiscoveryService {
   );
 
   Stream<List<DiscoveredDevice>>? _devices;
+
+  @override
+  bool get isSupported => true;
 
   @override
   Stream<List<DiscoveredDevice>> get devices =>
@@ -167,16 +172,23 @@ class MethodChannelLanDiscoveryService implements LanDiscoveryService {
 
 class UnsupportedLanDiscoveryService implements LanDiscoveryService {
   @override
+  bool get isSupported => false;
+
+  @override
   Stream<List<DiscoveredDevice>> get devices => const Stream.empty();
 
   @override
-  Future<void> startBrowsing() async {}
+  Future<void> startBrowsing() async {
+    throw UnsupportedError('当前平台暂不支持局域网设备发现');
+  }
 
   @override
   Future<void> stopBrowsing() async {}
 
   @override
-  Future<void> publishHost(HostAdvertisement host) async {}
+  Future<void> publishHost(HostAdvertisement host) async {
+    throw UnsupportedError('当前平台暂不支持局域网设备发布');
+  }
 
   @override
   Future<void> stopPublishing() async {}

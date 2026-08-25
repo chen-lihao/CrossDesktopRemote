@@ -1,6 +1,7 @@
 package com.crossdesktopremote.controlplane.signaling;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
@@ -60,7 +61,13 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 		session.getAttributes().put(ROOM_ATTRIBUTE, roomCode);
 		session.getAttributes().put(ROLE_ATTRIBUTE, role.get());
-		sendJson(session, Map.of("type", "ready", "room", roomCode, "role", role.get().wireName()));
+		var ready = new HashMap<String, Object>();
+		ready.put("type", "ready");
+		ready.put("room", roomCode);
+		ready.put("role", role.get().wireName());
+		rooms.invitationRemainingMillis(roomCode, role.get(), session)
+				.ifPresent(value -> ready.put("invitationExpiresInMillis", value));
+		sendJson(session, ready);
 		rooms.peer(roomCode, role.get()).ifPresent(peer -> {
 			sendJsonQuietly(peer, Map.of("type", "peer-joined", "role", role.get().wireName()));
 			sendJsonQuietly(session, Map.of("type", "peer-joined", "role", role.get().peerRole().wireName()));

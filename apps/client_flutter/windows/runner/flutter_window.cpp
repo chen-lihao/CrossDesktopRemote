@@ -32,6 +32,8 @@ bool FlutterWindow::OnCreate() {
 
   host_bridge_ = std::make_unique<WindowsHostBridge>(
       flutter_controller_->engine()->messenger());
+  lan_discovery_bridge_ = std::make_unique<WindowsLanDiscoveryBridge>(
+      flutter_controller_->engine()->messenger(), GetHandle());
 
   window_channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
@@ -87,6 +89,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  lan_discovery_bridge_.reset();
   host_bridge_.reset();
   window_channel_.reset();
   if (flutter_controller_) {
@@ -100,6 +103,11 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (lan_discovery_bridge_ &&
+      lan_discovery_bridge_->HandleWindowMessage(message)) {
+    return 0;
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

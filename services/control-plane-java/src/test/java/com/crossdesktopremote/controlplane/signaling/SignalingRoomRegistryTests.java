@@ -22,6 +22,13 @@ class SignalingRoomRegistryTests {
 
 		assertThat(registry.join("123456", SignalingRole.HOST, host))
 				.isEqualTo(SignalingRoomRegistry.JoinResult.JOINED);
+		assertThat(registry.invitationRemainingMillis("123456", SignalingRole.HOST, host))
+				.hasValue(Duration.ofMinutes(5).toMillis());
+		assertThat(registry.invitationRemainingMillis("123456", SignalingRole.CONTROLLER, controller))
+				.isEmpty();
+		now.addAndGet(1_000);
+		assertThat(registry.invitationRemainingMillis("123456", SignalingRole.HOST, host))
+				.hasValue(Duration.ofMinutes(5).minusSeconds(1).toMillis());
 		assertThat(registry.join("123456", SignalingRole.CONTROLLER, controller))
 				.isEqualTo(SignalingRoomRegistry.JoinResult.JOINED);
 		assertThat(registry.join("123456", SignalingRole.CONTROLLER, openSession("other", "192.168.1.21")))

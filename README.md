@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 的基本连接、画面和远程输入已经用户验证；Windows→Mac 已具备直接微软拼音与单 Surface 原生全屏。Windows 被控端首轮代码已接通原生能力握手、显示器/DPI枚举、虚拟桌面坐标、`SendInput`鼠标/扫描码/Unicode输入和现有`flutter_webrtc`主屏采集。本轮只开放有人值守单主屏，Windows MSVC构建和Mac→Windows物理会话仍待Windows设备验证，多显示器、自动发现及无人值守尚未开放。
+> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 的基本连接、画面和远程输入已经用户验证；Windows→Mac 已具备直接微软拼音与单 Surface 原生全屏。Windows 被控端首轮代码已接通原生能力握手、显示器/DPI枚举、虚拟桌面坐标、`SendInput`鼠标/扫描码/Unicode输入和现有`flutter_webrtc`主屏采集；Windows DNS-SD 发布/浏览与 Mac 桌面输入法直输也已编码。本轮只开放有人值守单主屏，新增 Windows 原生代码和 Mac→Windows 物理会话仍待 Windows 设备验证，多显示器及无人值守尚未开放。
 
 ## 项目定位
 
@@ -215,6 +215,8 @@ flutter run -d <ipad-device-id>
 
 Mac 选择“共享本机”，先点击“设置远程输入权限”，然后点击“开始共享本机”；iPad 的“附近设备”会通过 Bonjour 自动显示被控端，点击后只需输入相同六位连接码。未过期的正确连接码验证成功后自动建立会话，不再需要被控端二次允许。一段远程会话结束后，Mac 保持共享意图，自动生成新的单次连接码并恢复等待；只有点击“停止共享本机”才会退出共享状态。如果网络禁止 mDNS，仍可从“控制端可用连接地址”列表选择对应 Wi-Fi/有线地址手动输入。macOS 的屏幕录制和事件注入权限必须由本机用户在系统设置中授予；未授权时会话降级为仅观看。当前连接码信令只用于开发环境，不可暴露到公网。
 
+等待连接期间，客户端按 Java 信令返回的剩余租约显示倒计时，并在过期前自动生成、注册新的六位连接码；相对时长不依赖两台设备的系统时钟是否完全一致。用户也可点击“刷新连接码”立即轮换。旧版服务端未返回租约时仍可连接，但不会启用定时轮换。
+
 ### iPad 远程输入
 
 - 直接触控：轻点左键、双击、按住拖选、双击第二下拖选、双指轻点右键、双指滚动；静止长按是备用右键。
@@ -229,13 +231,14 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 
 物理设备验收步骤见 [iPad 控制 Mac 输入验收](./docs/iPad控制Mac输入验收.md)。
 
-### Windows 控制端输入
+### 桌面控制端输入
 
 - Windows 连接远端后，远程画面常驻透明的 `EditableText` IME 代理；单击或重新进入画面即可直接使用微软拼音，不需要先打开“全局键盘”输入框。
 - 拼音组合、候选翻页、空格选词和组合内退格保留在 Windows；只有输入法提交后的 Unicode 文本才发送到被控端。
 - `Ctrl`/`Alt`/`Win` 组合键以及 Enter、Tab、方向键和 F1～F12 继续使用成对的物理按键通道；切换窗口或失焦时统一释放按键并取消本地组合态。
 - 输入法候选窗口锚定在最近一次远程点击位置附近；工具栏的“系统完整键盘”保留为第三方输入法兼容入口，不再是微软拼音的必经步骤。
-- 此路径由 `Platform.isWindows` 隔离，不改变 iPad 的 UIKit IME、双键盘、触控和移动端全屏实现。
+- 同一输入代理已在 macOS 控制端启用，使系统拼音在本地完成组合和选词后直接向 Windows 被控端发送已提交 Unicode；无需打开“全局键盘”文本框。
+- 此路径只在 Windows/macOS 桌面端启用，不改变 iPad 的 UIKit IME、双键盘、触控和移动端全屏实现。
 
 物理设备验收步骤见 [Windows 控制 Mac 验收](./docs/Windows控制Mac验收.md)。
 
@@ -246,7 +249,7 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 - 绝对指针以协议归一化坐标传输，再结合目标显示器与整个虚拟桌面映射到`0～65535`；物理按键使用扫描码，文字使用`KEYEVENTF_UNICODE`。
 - 断开和Runner退出时统一释放合成按键与鼠标按钮，避免远端异常退出后出现粘键。
 - UIPI限制普通权限进程控制管理员/UAC安全桌面；应用会提示限制，不通过长期管理员运行规避。
-- Windows默认仍以控制端启动；用户需要主动切换到“共享本机”。多显示器事务和DNS-SD发现待单屏实机闭环后启用。
+- Windows默认仍以控制端启动；用户需要主动切换到“共享本机”。Runner 已使用 Windows 10+ DNS Service Discovery API 发布和浏览`_cdrremote._tcp.local`，且永久保留手动地址后备；多显示器事务仍待单屏实机闭环后启用。
 
 构建和物理检查步骤见 [Windows 被控端首轮验收](./docs/Windows被控端验收.md)。
 
@@ -314,7 +317,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter / Native | 响应式壳层、Apple纵向链路、Windows控制端直接IME/原生全屏；`HostPlatformAdapter`已接入Windows能力握手、显示器/DPI枚举、主屏采集和`SendInput`鼠标/扫描码/Unicode输入；`analyze`零告警、95项测试通过且1项按设计跳过，macOS/iOS Debug构建通过 | Windows MSVC原生构建、Mac→Windows单屏实机验收；随后实现Windows多显示器事务和DNS-SD |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；`HostPlatformAdapter`已接入Windows能力握手、显示器/DPI枚举、主屏采集和`SendInput`鼠标/扫描码/Unicode输入；Windows DNS-SD注册/浏览已接入；`analyze`零告警、99项测试通过且1项按设计跳过 | Windows MSVC原生构建、Mac→Windows单屏/拼音/DNS-SD实机验收；随后实现Windows多显示器事务 |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |
@@ -381,4 +384,4 @@ flutter build ios --simulator --debug
 
 ## 当前里程碑
 
-当前并行推进 **M1 Apple 稳定性验收** 与 **M1B Windows 双向原型**。Windows控制端链路已进入真机回归；被控端首轮单主屏代码已完成，下一门禁是在Windows上完成MSVC Debug构建并验证Mac→Windows的画面、九宫格指针、Unicode/扫描码输入、断线释放和30分钟稳定性。单屏闭环通过后，再实现Windows多显示器`replaceTrack()`事务与DNS-SD自动发现。
+当前并行推进 **M1 Apple 稳定性验收** 与 **M1B Windows 双向原型**。Windows控制端链路已进入真机回归；被控端首轮单主屏、桌面端直接IME和Windows DNS-SD代码已完成。下一门禁是在Windows上完成MSVC Debug构建，并验证Mac→Windows的画面、九宫格指针、系统拼音直输、局域网互相发现、断线释放和30分钟稳定性。单屏闭环通过后，再实现Windows多显示器`replaceTrack()`事务。

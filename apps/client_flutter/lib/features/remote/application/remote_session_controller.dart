@@ -165,6 +165,7 @@ class RemoteSessionController extends ChangeNotifier {
   String? _error;
   DateTime? _lastControlUnavailableNotice;
   DateTime? _automaticQualitySuppressedUntil;
+  DateTime? _hostInvitationExpiresAt;
   RemoteQualityProfile _selectedQuality;
   RemoteQualityProfile? _queuedQualityProfile;
   int? _actualVideoWidth;
@@ -191,6 +192,7 @@ class RemoteSessionController extends ChangeNotifier {
   String get statusMessage => _statusMessage;
   String? get error => _error;
   String? get controlError => _controlError;
+  DateTime? get hostInvitationExpiresAt => _hostInvitationExpiresAt;
   bool get screenCaptureGranted => _screenCaptureGranted;
   bool? get accessibilityGranted => _accessibilityGranted;
   RemoteQualityProfile get selectedQuality => _selectedQuality;
@@ -313,6 +315,7 @@ class RemoteSessionController extends ChangeNotifier {
     await _closeSession(notifyPeer: false);
     _closing = false;
     _error = null;
+    _hostInvitationExpiresAt = null;
     if (role == RemoteRole.controller) {
       _controlError = null;
     }
@@ -1754,8 +1757,20 @@ class RemoteSessionController extends ChangeNotifier {
   Future<void> _handleSignalingMessage(Map<String, dynamic> message) async {
     switch (message['type']) {
       case 'ready':
+        if (role == RemoteRole.host) {
+          final rawRemaining = message['invitationExpiresInMillis'];
+          final rawExpiry = message['invitationExpiresAtUnixMillis'];
+          _hostInvitationExpiresAt = rawRemaining is num
+              ? DateTime.now().add(
+                  Duration(milliseconds: rawRemaining.toInt().clamp(0, 300000)),
+                )
+              : rawExpiry is num
+              ? DateTime.fromMillisecondsSinceEpoch(rawExpiry.toInt())
+              : null;
+        }
         _setState(RemoteSessionState.waitingForPeer, '已进入房间，等待另一台设备');
       case 'peer-joined':
+        _hostInvitationExpiresAt = null;
         if (role == RemoteRole.host) {
           await _authorizePeer();
         } else {
@@ -2786,6 +2801,7 @@ class RemoteSessionController extends ChangeNotifier {
     _renderedDisplayId = null;
     _pendingDisplayId = null;
     _remoteDeviceId = null;
+    _hostInvitationExpiresAt = null;
     _decoderOutputColorDiagnostics = null;
     _renderOutputColorDiagnostics = null;
     _receiverColorConversion = null;

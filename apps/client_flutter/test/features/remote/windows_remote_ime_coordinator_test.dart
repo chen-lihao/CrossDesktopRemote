@@ -8,7 +8,7 @@ void main() {
   const keyEnter = PhysicalKeyboardKey.enter;
 
   test('keeps Pinyin composition local and emits only committed CJK text', () {
-    final coordinator = WindowsRemoteImeCoordinator();
+    final coordinator = DesktopRemoteImeCoordinator();
 
     final composing = coordinator.update(
       const TextEditingValue(
@@ -16,18 +16,18 @@ void main() {
         composing: TextRange(start: 0, end: 5),
       ),
     );
-    expect(coordinator.phase, WindowsRemoteImePhase.composing);
+    expect(coordinator.phase, DesktopRemoteImePhase.composing);
     expect(coordinator.compositionLength, 5);
     expect(composing.isEmpty, isTrue);
 
     final committed = coordinator.update(const TextEditingValue(text: '你好'));
-    expect(coordinator.phase, WindowsRemoteImePhase.idle);
+    expect(coordinator.phase, DesktopRemoteImePhase.idle);
     expect(committed.backspaceCount, 0);
     expect(committed.insertedText, '你好');
   });
 
   test('does not route candidate keys while composition is active', () {
-    final coordinator = WindowsRemoteImeCoordinator();
+    final coordinator = DesktopRemoteImeCoordinator();
     coordinator.update(
       const TextEditingValue(
         text: 'ni',
@@ -58,7 +58,7 @@ void main() {
   });
 
   test('routes shortcuts and navigation but leaves printable text to IME', () {
-    final coordinator = WindowsRemoteImeCoordinator();
+    final coordinator = DesktopRemoteImeCoordinator();
     final letter = KeyDownEvent(
       physicalKey: keyA,
       logicalKey: LogicalKeyboardKey.keyA,
@@ -92,7 +92,7 @@ void main() {
   });
 
   test('routes key up for a key that was sent with a modifier', () {
-    final coordinator = WindowsRemoteImeCoordinator();
+    final coordinator = DesktopRemoteImeCoordinator();
     final keyUp = KeyUpEvent(
       physicalKey: keyC,
       logicalKey: LogicalKeyboardKey.keyC,
@@ -110,7 +110,7 @@ void main() {
   });
 
   test('resets the append baseline before remote caret editing', () {
-    final coordinator = WindowsRemoteImeCoordinator();
+    final coordinator = DesktopRemoteImeCoordinator();
     coordinator.update(const TextEditingValue(text: 'hello'));
     final backspace = KeyDownEvent(
       physicalKey: PhysicalKeyboardKey.backspace,
@@ -127,7 +127,7 @@ void main() {
   });
 
   test('cancelling composition emits no remote edit', () {
-    final coordinator = WindowsRemoteImeCoordinator();
+    final coordinator = DesktopRemoteImeCoordinator();
     coordinator.update(const TextEditingValue(text: 'A'));
     coordinator.update(
       const TextEditingValue(
@@ -139,6 +139,6 @@ void main() {
     final cancelled = coordinator.update(const TextEditingValue(text: 'A'));
 
     expect(cancelled.isEmpty, isTrue);
-    expect(coordinator.phase, WindowsRemoteImePhase.idle);
+    expect(coordinator.phase, DesktopRemoteImePhase.idle);
   });
 }

@@ -2,6 +2,22 @@ import 'package:cross_desktop_remote/core/discovery/lan_discovery_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'unsupported discovery reports its capability instead of succeeding',
+    () {
+      final service = UnsupportedLanDiscoveryService();
+
+      expect(service.isSupported, isFalse);
+      expect(service.startBrowsing(), throwsUnsupportedError);
+      expect(
+        service.publishHost(
+          const HostAdvertisement(deviceId: 'linux', name: 'Linux', port: 8080),
+        ),
+        throwsUnsupportedError,
+      );
+    },
+  );
+
   test('parses a Bonjour advertisement into a signaling endpoint', () {
     final device = DiscoveredDevice.fromMap({
       'id': 'macbook-pro',

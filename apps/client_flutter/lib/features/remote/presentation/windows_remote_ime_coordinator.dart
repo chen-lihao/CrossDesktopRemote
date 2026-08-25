@@ -2,31 +2,31 @@ import 'package:cross_desktop_remote/features/remote/presentation/remote_keyboar
 import 'package:cross_desktop_remote/features/remote/presentation/remote_text_input_synchronizer.dart';
 import 'package:flutter/services.dart';
 
-enum WindowsRemoteImePhase { idle, composing }
+enum DesktopRemoteImePhase { idle, composing }
 
-/// Keeps Windows IME composition local and decides which physical keys must
+/// Keeps desktop IME composition local and decides which physical keys must
 /// bypass the text client and be sent to the remote host.
 ///
 /// The coordinator contains no platform calls so its composition and routing
 /// rules can be regression-tested on every development host.
-class WindowsRemoteImeCoordinator {
-  WindowsRemoteImeCoordinator({RemoteTextInputSynchronizer? synchronizer})
+class DesktopRemoteImeCoordinator {
+  DesktopRemoteImeCoordinator({RemoteTextInputSynchronizer? synchronizer})
     : _synchronizer = synchronizer ?? RemoteTextInputSynchronizer();
 
   final RemoteTextInputSynchronizer _synchronizer;
-  WindowsRemoteImePhase _phase = WindowsRemoteImePhase.idle;
+  DesktopRemoteImePhase _phase = DesktopRemoteImePhase.idle;
   int _compositionLength = 0;
 
-  WindowsRemoteImePhase get phase => _phase;
-  bool get isComposing => _phase == WindowsRemoteImePhase.composing;
+  DesktopRemoteImePhase get phase => _phase;
+  bool get isComposing => _phase == DesktopRemoteImePhase.composing;
   int get compositionLength => _compositionLength;
 
   RemoteTextEdit update(TextEditingValue value) {
     final composing = value.composing;
     final active = composing.isValid && !composing.isCollapsed;
     _phase = active
-        ? WindowsRemoteImePhase.composing
-        : WindowsRemoteImePhase.idle;
+        ? DesktopRemoteImePhase.composing
+        : DesktopRemoteImePhase.idle;
     _compositionLength = active ? composing.end - composing.start : 0;
     return _synchronizer.update(value);
   }
@@ -59,7 +59,7 @@ class WindowsRemoteImeCoordinator {
       _synchronizer.shouldCompact(maximumGraphemes: maximumGraphemes);
 
   void reset() {
-    _phase = WindowsRemoteImePhase.idle;
+    _phase = DesktopRemoteImePhase.idle;
     _compositionLength = 0;
     _synchronizer.reset();
   }
