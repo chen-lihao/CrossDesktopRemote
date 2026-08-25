@@ -1,3 +1,5 @@
+import 'package:cross_desktop_remote/core/protocol/wire_value_parsers.dart';
+
 class RemoteDisplay {
   const RemoteDisplay({
     required this.id,
@@ -19,7 +21,7 @@ class RemoteDisplay {
       pixelWidth: (message['pixelWidth'] as num?)?.toInt() ?? 0,
       pixelHeight: (message['pixelHeight'] as num?)?.toInt() ?? 0,
       pointPixelScale: (message['pointPixelScale'] as num?)?.toDouble() ?? 1,
-      isPrimary: message['isPrimary'] as bool? ?? false,
+      isPrimary: wireBool(message['isPrimary']),
     );
   }
 
@@ -121,6 +123,123 @@ class RemoteVideoFrameSize {
   Map<String, dynamic> toMessage() => {'width': width, 'height': height};
 }
 
+/// Geometry for one committed remote-display media generation.
+///
+/// The logical desktop, capture surface, encoded canvas and active pixels are
+/// intentionally kept separate. Input is normalized against [activeContent]
+/// and then applied to the logical desktop; renderer dimensions are only a
+/// validation signal and never become the coordinate system by themselves.
+class RemoteFrameGeometry {
+  const RemoteFrameGeometry({
+    required this.displayId,
+    required this.generation,
+    required this.logicalWidth,
+    required this.logicalHeight,
+    required this.captureWidth,
+    required this.captureHeight,
+    required this.encodedWidth,
+    required this.encodedHeight,
+    required this.activeContentX,
+    required this.activeContentY,
+    required this.activeContentWidth,
+    required this.activeContentHeight,
+    this.rotation = 0,
+  });
+
+  factory RemoteFrameGeometry.fromMessage(Map<String, dynamic> message) {
+    return RemoteFrameGeometry(
+      displayId: message['displayId'] as String? ?? '',
+      generation: (message['generation'] as num?)?.toInt() ?? 0,
+      logicalWidth: (message['logicalWidth'] as num?)?.toInt() ?? 0,
+      logicalHeight: (message['logicalHeight'] as num?)?.toInt() ?? 0,
+      captureWidth: (message['captureWidth'] as num?)?.toInt() ?? 0,
+      captureHeight: (message['captureHeight'] as num?)?.toInt() ?? 0,
+      encodedWidth: (message['encodedWidth'] as num?)?.toInt() ?? 0,
+      encodedHeight: (message['encodedHeight'] as num?)?.toInt() ?? 0,
+      activeContentX: (message['activeContentX'] as num?)?.toDouble() ?? 0,
+      activeContentY: (message['activeContentY'] as num?)?.toDouble() ?? 0,
+      activeContentWidth:
+          (message['activeContentWidth'] as num?)?.toDouble() ?? 0,
+      activeContentHeight:
+          (message['activeContentHeight'] as num?)?.toDouble() ?? 0,
+      rotation: (message['rotation'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  final String displayId;
+  final int generation;
+  final int logicalWidth;
+  final int logicalHeight;
+  final int captureWidth;
+  final int captureHeight;
+  final int encodedWidth;
+  final int encodedHeight;
+  final double activeContentX;
+  final double activeContentY;
+  final double activeContentWidth;
+  final double activeContentHeight;
+  final int rotation;
+
+  bool get isValid =>
+      displayId.isNotEmpty &&
+      logicalWidth > 0 &&
+      logicalHeight > 0 &&
+      captureWidth > 0 &&
+      captureHeight > 0 &&
+      encodedWidth > 0 &&
+      encodedHeight > 0 &&
+      activeContentWidth > 0 &&
+      activeContentHeight > 0 &&
+      activeContentX >= 0 &&
+      activeContentY >= 0 &&
+      activeContentX + activeContentWidth <= encodedWidth + 1 &&
+      activeContentY + activeContentHeight <= encodedHeight + 1;
+
+  RemoteVideoFrameSize get encodedSize =>
+      RemoteVideoFrameSize(width: encodedWidth, height: encodedHeight);
+
+  double get activeAspectRatio => activeContentWidth / activeContentHeight;
+
+  bool belongsTo({required String? displayId, required int generation}) {
+    return isValid &&
+        this.displayId == displayId &&
+        (generation <= 0 || this.generation == generation);
+  }
+
+  Map<String, dynamic> toMessage() => {
+    'displayId': displayId,
+    'generation': generation,
+    'logicalWidth': logicalWidth,
+    'logicalHeight': logicalHeight,
+    'captureWidth': captureWidth,
+    'captureHeight': captureHeight,
+    'encodedWidth': encodedWidth,
+    'encodedHeight': encodedHeight,
+    'activeContentX': activeContentX,
+    'activeContentY': activeContentY,
+    'activeContentWidth': activeContentWidth,
+    'activeContentHeight': activeContentHeight,
+    'rotation': rotation,
+  };
+
+  String get label =>
+      '$displayId · logical $logicalWidth×$logicalHeight · '
+      'capture $captureWidth×$captureHeight · '
+      'encoded $encodedWidth×$encodedHeight · '
+      'active ${activeContentWidth.toStringAsFixed(0)}×'
+      '${activeContentHeight.toStringAsFixed(0)} @ '
+      '${activeContentX.toStringAsFixed(0)},'
+      '${activeContentY.toStringAsFixed(0)} · gen $generation';
+}
+
+RemoteFrameGeometry? remoteFrameGeometryFromValue(Object? value) {
+  if (value is! Map) return null;
+  final geometry = RemoteFrameGeometry.fromMessage(
+    value.map((key, item) => MapEntry(key.toString(), item)),
+  );
+  return geometry.isValid ? geometry : null;
+}
+
 enum RemoteVideoGeometryState {
   stable,
   adapting,
@@ -202,8 +321,8 @@ class RemoteDisplayColorDiagnostics {
       id: message['id'] as String? ?? '',
       name: message['name'] as String? ?? 'Display',
       colorSpace: message['colorSpace'] as String? ?? 'Unknown',
-      hdrActive: message['hdrActive'] as bool? ?? false,
-      hdrCapable: message['hdrCapable'] as bool? ?? false,
+      hdrActive: wireBool(message['hdrActive']),
+      hdrCapable: wireBool(message['hdrCapable']),
       currentEdrHeadroom:
           (message['currentEdrHeadroom'] as num?)?.toDouble() ?? 1,
       potentialEdrHeadroom:
@@ -337,9 +456,10 @@ class RemoteCaptureFrameGeometry {
           (message['visibleWidthCoverage'] as num?)?.toDouble() ?? 0,
       visibleHeightCoverage:
           (message['visibleHeightCoverage'] as num?)?.toDouble() ?? 0,
-      contentRectMetadataPresent:
-          message['contentRectMetadataPresent'] as bool? ?? false,
-      contentFillsBuffer: message['contentFillsBuffer'] as bool? ?? false,
+      contentRectMetadataPresent: wireBool(
+        message['contentRectMetadataPresent'],
+      ),
+      contentFillsBuffer: wireBool(message['contentFillsBuffer']),
       captureGeneration: (message['captureGeneration'] as num?)?.toInt() ?? 0,
     );
   }
@@ -418,7 +538,7 @@ class RemoteColorDiagnostics {
       captureDynamicRange:
           capture['captureDynamicRange'] as String? ?? 'Unknown',
       normalization: capture['normalization'] as String? ?? 'Unknown',
-      normalizationBypassed: capture['normalizationBypassed'] as bool? ?? false,
+      normalizationBypassed: wireBool(capture['normalizationBypassed']),
       normalizationDurationMs: (capture['normalizationDurationMs'] as num?)
           ?.toDouble(),
       rawFrame: _frameDiagnosticsFromValue(capture['rawFrame']),

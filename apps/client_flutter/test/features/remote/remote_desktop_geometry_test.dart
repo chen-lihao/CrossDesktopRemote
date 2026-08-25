@@ -128,4 +128,21 @@ void main() {
     expect(transform.normalize(const Offset(400, 330)), const Offset(.5, .5));
     expect(transform.normalize(const Offset(400, 40)), isNull);
   });
+
+  test('maps direct touch through the encoded active-content rectangle', () {
+    final transform = RemoteContentTransform.forViewport(
+      sourceSize: const Size(1920, 1080),
+      activeContentRect: const Rect.fromLTWH(160, 108, 1600, 864),
+      viewportSize: const Size(1000, 540),
+      fit: BoxFit.contain,
+    );
+
+    expect(transform.destinationRect, const Rect.fromLTWH(0, 0, 1000, 540));
+    expect(transform.normalize(const Offset(500, 270)), const Offset(.5, .5));
+    expect(transform.normalize(const Offset(0, 270))!.dx, closeTo(0, 0.0001));
+    expect(
+      transform.normalize(const Offset(999.999, 270))!.dx,
+      closeTo(1, 0.0001),
+    );
+  });
 }

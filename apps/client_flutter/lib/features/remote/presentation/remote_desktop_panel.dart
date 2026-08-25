@@ -1208,7 +1208,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     WidgetsBinding.instance.addObserver(this);
     _activeKeyboardMode = widget.inputSettings.keyboardMode;
     _lastDisplaySwitchPending = session.displaySwitchPending;
-    _committedVideoSourceSize = _currentRendererSourceSize();
+    _committedVideoSourceSize =
+        _committedFrameGeometrySourceSize() ?? _currentRendererSourceSize();
     _presentationGeometryLocked = _lastDisplaySwitchPending;
     session.addListener(_handleDisplaySwitchState);
     _imeClientId = 'remote-surface-${identityHashCode(this)}';
@@ -1369,10 +1370,10 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         token != _presentationSwitchToken) {
       return;
     }
-    final rendererSize = _currentRendererSourceSize();
+    final geometrySize = _committedFrameGeometrySourceSize();
     final fallbackSize = _selectedDisplaySourceSize();
     setState(() {
-      _committedVideoSourceSize = rendererSize ?? fallbackSize;
+      _committedVideoSourceSize = geometrySize ?? fallbackSize;
       _presentationGeometryLocked = false;
     });
     await WidgetsBinding.instance.endOfFrame;
@@ -1393,6 +1394,27 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     final renderer = session.remoteRenderer.value;
     if (renderer.width <= 0 || renderer.height <= 0) return null;
     return Size(renderer.width, renderer.height);
+  }
+
+  RemoteFrameGeometry? _committedFrameGeometry() {
+    final geometry = session.committedFrameGeometry;
+    final renderedDisplayId = session.renderedDisplayId;
+    if (geometry == null ||
+        !geometry.isValid ||
+        renderedDisplayId == null ||
+        geometry.displayId != renderedDisplayId) {
+      return null;
+    }
+    return geometry;
+  }
+
+  Size? _committedFrameGeometrySourceSize() {
+    final geometry = _committedFrameGeometry();
+    if (geometry == null) return null;
+    return Size(
+      geometry.encodedWidth.toDouble(),
+      geometry.encodedHeight.toDouble(),
+    );
   }
 
   Size _selectedDisplaySourceSize() {
@@ -1593,10 +1615,17 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
           final renderer = session.remoteRenderer.value;
           final rendererSize = Size(renderer.width, renderer.height);
           final fallbackSize = _selectedDisplaySourceSize();
+          final frameGeometry = _committedFrameGeometry();
+          final geometrySourceSize = frameGeometry == null
+              ? null
+              : Size(
+                  frameGeometry.encodedWidth.toDouble(),
+                  frameGeometry.encodedHeight.toDouble(),
+                );
           final sourceSize = resolveRemotePresentationSourceSize(
             rendererSize: rendererSize,
             fallbackSize: fallbackSize,
-            committedSize: _committedVideoSourceSize,
+            committedSize: geometrySourceSize ?? _committedVideoSourceSize,
             geometryLocked: _presentationGeometryLocked,
           );
           if (_committedVideoSourceSize == null &&
@@ -1615,6 +1644,14 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
             sourceSize: sourceSize,
             viewportSize: Size(constraints.maxWidth, viewportHeight),
             fit: boxFit,
+            activeContentRect: frameGeometry == null
+                ? null
+                : Rect.fromLTWH(
+                    frameGeometry.activeContentX,
+                    frameGeometry.activeContentY,
+                    frameGeometry.activeContentWidth,
+                    frameGeometry.activeContentHeight,
+                  ),
           );
           _latestTransform = transform;
           return Focus(

@@ -1,3 +1,4 @@
+import 'package:cross_desktop_remote/core/protocol/wire_value_parsers.dart';
 import 'package:flutter/services.dart';
 
 class MacDisplayInfo {
@@ -21,7 +22,7 @@ class MacDisplayInfo {
       pixelWidth: (map['pixelWidth'] as num?)?.toInt() ?? 0,
       pixelHeight: (map['pixelHeight'] as num?)?.toInt() ?? 0,
       pointPixelScale: (map['pointPixelScale'] as num?)?.toDouble() ?? 1,
-      isPrimary: map['isPrimary'] as bool? ?? false,
+      isPrimary: wireBool(map['isPrimary']),
     );
   }
 

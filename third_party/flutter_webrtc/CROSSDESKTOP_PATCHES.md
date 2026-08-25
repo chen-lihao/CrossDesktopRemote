@@ -14,9 +14,9 @@ CrossDesktopRemote-specific macOS changes:
   scaleFactor` metadata instead of assuming that the outer IOSurface is fully
   occupied;
 - keep the zero-copy path when active content fills the buffer, otherwise crop
-  every valid metadata-defined region and aspect-fit it at the exact center of
-  the canonical full-frame NV12 canvas before encoding; codec alignment and
-  automatic quality rounding never invalidate an otherwise valid contentRect;
+  every valid metadata-defined region and aspect-fill the canonical full-frame
+  NV12 canvas before encoding; only the small alignment excess may be cropped,
+  so the encoder never receives an internally letterboxed desktop;
 - disable ScreenCaptureKit's extra aspect-preserving transform for full-display
   capture on macOS 14+, because the target canvas already comes from the
   selected display geometry;
@@ -33,9 +33,8 @@ CrossDesktopRemote-specific macOS changes:
   frame dimensions, so display switching can prove that the requested
   ScreenCaptureKit source is live before committing the WebRTC transaction;
 - switch displays with an Active/Pending/Retired ScreenCaptureKit transaction:
-  construct a target-bound `SCStream`, warm it for two complete post-barrier
-  frames whose buffer or visible content can be canonicalized to the target
-  aspect, promote it into the existing WebRTC source, and retain the untouched
+  construct a target-bound `SCStream`, promote its first usable post-barrier
+  pixel buffer into the existing WebRTC source, and retain the untouched
   previous stream until the controller commits or rolls back;
 - keep the RTC track, sender, transceiver, MID, SSRC, and data channels stable
   while the short-lived capture streams overlap;
@@ -52,29 +51,37 @@ CrossDesktopRemote-specific macOS changes:
 - forward the active stream while a target stream warms, then admit only the
   promoted stream and ignore retained rollback-stream callbacks;
 - reject queued pre-switch frames with a generation-local `displayTime`
-  barrier, while treating temporarily missing content metadata as a bounded
-  soft gate instead of a permanent switch failure;
+  barrier; accept usable `.started`, `.complete`, and `.idle` samples, while
+  treating missing or aspect-mismatched content metadata as advisory and
+  immediately falling back to the full canonical buffer;
 - aggregate privacy-safe frame-gate rejection counters for stale timestamps,
   wrong buffer dimensions, missing metadata, aspect mismatch, and failed GPU
   normalization;
-- include Pending complete/stable/stale/geometry counters, last raw dimensions,
-  expected canonical dimensions, and elapsed time in warm-up failures; use an
-  `SCStreamDelegate` error as an immediate failure and retain a 5-second maximum
-  Sidecar warm-up window;
+- include Pending usable/accepted/stale/geometry/content-aspect/metadata-fallback
+  counters, last raw dimensions, expected canonical dimensions, and elapsed
+  time in warm-up failures; use an `SCStreamDelegate` error as an immediate
+  failure and retain a 5-second maximum Sidecar warm-up window;
 - clear each switch canvas to video-range black before rendering the first
   target frames, preventing stale IOSurface regions from leaking across
   displays;
 - preconfigure `RTCVideoSource` output width, height, and frame rate before
   forwarding target frames, without rebuilding the sender, changing SSRC, or
   renegotiating SDP;
-- expose capture-level target dimensions and frame-rate updates, so automatic
-  quality adaptation reduces ScreenCaptureKit/GPU/encoder work instead of only
-  scaling an already oversized RTP frame;
+- keep capture-level target dimensions and frame-rate updates available for a
+  future session restart, but keep the active session on one stable capture
+  envelope; automatic and manual quality changes adjust only sender bitrate,
+  frame-rate and resolution scale, avoiding `SCStream` reconfiguration races
+  with display transactions;
 - prefer VideoToolbox-backed H.264 on macOS and wrap the encoder with a
   generation-based force-keyframe coordinator used by display-switch
   transactions;
 - report ScreenCaptureKit `contentRect`, `contentScale`, `scaleFactor`, buffer
   dimensions, and capture generation without logging screen pixels.
+- promote a target-bound stream after its first usable post-barrier frame with
+  the exact requested Buffer dimensions; use matching `contentRect` metadata
+  for crop/scale, but immediately fall back to the canonical full Buffer when
+  Sidecar keeps stale descriptive metadata or a static desktop emits no second
+  frame.
 
 CrossDesktopRemote-specific iOS renderer changes:
 

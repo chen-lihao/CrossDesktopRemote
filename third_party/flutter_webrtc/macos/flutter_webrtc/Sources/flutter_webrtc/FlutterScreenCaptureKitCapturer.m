@@ -6,6 +6,7 @@
 #import <Metal/Metal.h>
 #import <mach/mach_time.h>
 #import <math.h>
+#import <stdlib.h>
 #import <string.h>
 
 #import "VideoProcessingAdapter.h"
@@ -64,6 +65,8 @@ typedef void (^CDRCaptureSwitchCompletion)(
 @property(nonatomic, assign) NSUInteger pendingRejectedStaleFrameCount;
 @property(nonatomic, assign) NSUInteger pendingRejectedGeometryFrameCount;
 @property(nonatomic, assign) NSUInteger pendingMissingMetadataFrameCount;
+@property(nonatomic, assign) NSUInteger pendingContentAspectMismatchCount;
+@property(nonatomic, assign) NSUInteger pendingMetadataFallbackCount;
 @property(nonatomic, assign) size_t pendingLastFrameWidth;
 @property(nonatomic, assign) size_t pendingLastFrameHeight;
 @property(nonatomic, assign) CFAbsoluteTime pendingStartedAt;
@@ -163,7 +166,7 @@ static NSDictionary<SCStreamFrameInfo, id> *CDRFrameAttachments(
       CFArrayGetValueAtIndex(attachmentsArray, 0);
 }
 
-static BOOL CDRFrameIsComplete(
+static BOOL CDRFrameIsUsable(
     CMSampleBufferRef sampleBuffer,
     NSDictionary<SCStreamFrameInfo, id> **frameAttachments)
     API_AVAILABLE(macos(12.3)) {
@@ -173,21 +176,18 @@ static BOOL CDRFrameIsComplete(
   NSDictionary<SCStreamFrameInfo, id> *attachments =
       CDRFrameAttachments(sampleBuffer);
   NSNumber *status = attachments[SCStreamFrameInfoStatus];
-  if (status == nil || status.integerValue != SCFrameStatusComplete) {
-    return NO;
-  }
-  id contentRectValue = attachments[SCStreamFrameInfoContentRect];
-  if (contentRectValue != nil) {
-    CGRect contentRect = CGRectZero;
-    if (![contentRectValue isKindOfClass:[NSDictionary class]] ||
-        !CGRectMakeWithDictionaryRepresentation(
-            (__bridge CFDictionaryRef)contentRectValue, &contentRect) ||
-        CGRectIsEmpty(contentRect)) {
-      return NO;
+  if (status != nil) {
+    switch (status.integerValue) {
+      case SCFrameStatusComplete:
+      case SCFrameStatusStarted:
+      case SCFrameStatusIdle:
+        break;
+      default:
+        return NO;
     }
   }
   if (frameAttachments != NULL) {
-    *frameAttachments = attachments;
+    *frameAttachments = attachments ?: @{};
   }
   return YES;
 }
@@ -255,17 +255,17 @@ static BOOL CDRVisibleContentFillsBuffer(
       fabs(CGRectGetMaxY(visibleRect) - height) <= tolerance;
 }
 
-static BOOL CDRGeometryApproximatelyMatches(
-    CGFloat width,
-    CGFloat height,
-    CGFloat targetWidth,
-    CGFloat targetHeight) {
-  if (width <= 0 || height <= 0 || targetWidth <= 0 || targetHeight <= 0) {
+static BOOL CDRBufferDimensionsMatch(
+    size_t width,
+    size_t height,
+    size_t targetWidth,
+    size_t targetHeight) {
+  if (width == 0 || height == 0 || targetWidth == 0 || targetHeight == 0) {
     return NO;
   }
-  const CGFloat aspect = width / height;
-  const CGFloat targetAspect = targetWidth / targetHeight;
-  return fabs((aspect / targetAspect) - 1.0) <= 0.03;
+  const long long widthDelta = llabs((long long)width - (long long)targetWidth);
+  const long long heightDelta = llabs((long long)height - (long long)targetHeight);
+  return widthDelta <= 2 && heightDelta <= 2;
 }
 
 static BOOL CDRVisibleContentMatchesTargetAspect(
@@ -290,7 +290,7 @@ static BOOL CDRVisibleContentMatchesTargetAspect(
   // a transient non-zero origin during a display-filter update.
   const CGFloat visibleAspect = contentRect.size.width / contentRect.size.height;
   const CGFloat targetAspect = (CGFloat)targetWidth / (CGFloat)targetHeight;
-  return fabs((visibleAspect / targetAspect) - 1.0) <= 0.02;
+  return fabs((visibleAspect / targetAspect) - 1.0) <= 0.005;
 }
 
 static NSDictionary<NSString *, id> *CDRFrameGeometryDiagnostics(
@@ -631,22 +631,29 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
   CDRCaptureSwitchCompletion completion = self.pendingSwitchCompletion;
   NSMutableDictionary *diagnostics = [error.userInfo mutableCopy] ?: [NSMutableDictionary dictionary];
   NSString *summary = [NSString stringWithFormat:
-      @"%@ (complete=%lu, stable=%lu, stale=%lu, geometry=%lu, last=%zux%zu, expected=%zux%zu)",
+      @"%@ (usable=%lu, accepted=%lu, stale=%lu, geometry=%lu, contentAspect=%lu, metadataFallback=%lu, last=%zux%zu, expected=%zux%zu)",
       error.localizedDescription,
       (unsigned long)self.pendingCompleteFrameCount,
       (unsigned long)self.pendingStableFrameCount,
       (unsigned long)self.pendingRejectedStaleFrameCount,
       (unsigned long)self.pendingRejectedGeometryFrameCount,
+      (unsigned long)self.pendingContentAspectMismatchCount,
+      (unsigned long)self.pendingMetadataFallbackCount,
       self.pendingLastFrameWidth,
       self.pendingLastFrameHeight,
       self.pendingExpectedFrameWidth,
       self.pendingExpectedFrameHeight];
   diagnostics[NSLocalizedDescriptionKey] = summary;
+  diagnostics[@"pendingUsableFrames"] = @(self.pendingCompleteFrameCount);
   diagnostics[@"pendingCompleteFrames"] = @(self.pendingCompleteFrameCount);
   diagnostics[@"pendingStableFrames"] = @(self.pendingStableFrameCount);
   diagnostics[@"pendingRejectedStaleFrames"] = @(self.pendingRejectedStaleFrameCount);
   diagnostics[@"pendingRejectedGeometryFrames"] = @(self.pendingRejectedGeometryFrameCount);
   diagnostics[@"pendingMissingMetadataFrames"] = @(self.pendingMissingMetadataFrameCount);
+  diagnostics[@"pendingContentAspectMismatchFrames"] =
+      @(self.pendingContentAspectMismatchCount);
+  diagnostics[@"pendingMetadataFallbackFrames"] =
+      @(self.pendingMetadataFallbackCount);
   diagnostics[@"pendingLastWidth"] = @(self.pendingLastFrameWidth);
   diagnostics[@"pendingLastHeight"] = @(self.pendingLastFrameHeight);
   diagnostics[@"pendingExpectedWidth"] = @(self.pendingExpectedFrameWidth);
@@ -670,6 +677,8 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
   self.pendingRejectedStaleFrameCount = 0;
   self.pendingRejectedGeometryFrameCount = 0;
   self.pendingMissingMetadataFrameCount = 0;
+  self.pendingContentAspectMismatchCount = 0;
+  self.pendingMetadataFallbackCount = 0;
   self.pendingLastFrameWidth = 0;
   self.pendingLastFrameHeight = 0;
   self.pendingStartedAt = 0;
@@ -903,6 +912,8 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
             self.pendingRejectedStaleFrameCount = 0;
             self.pendingRejectedGeometryFrameCount = 0;
             self.pendingMissingMetadataFrameCount = 0;
+            self.pendingContentAspectMismatchCount = 0;
+            self.pendingMetadataFallbackCount = 0;
             self.pendingLastFrameWidth = 0;
             self.pendingLastFrameHeight = 0;
             self.pendingStartedAt = CFAbsoluteTimeGetCurrent();
@@ -927,7 +938,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
                                      code:-6
                                  userInfo:@{
                                    NSLocalizedDescriptionKey:
-                                       @"Target display stream did not produce stable frames"
+                                       @"Target display stream did not produce a usable frame"
                                  }];
                       [self failPendingSwitchGeneration:generation error:timeout];
                     }
@@ -1376,7 +1387,10 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
     CVPixelBufferRelease(output);
     return NULL;
   }
-  const CGFloat scale = MIN(
+  // Interactive desktop frames must not contain a second, hidden letterbox
+  // coordinate system. Fill the canonical target canvas and crop only the
+  // sub-pixel/alignment excess after the content aspect has passed the gate.
+  const CGFloat scale = MAX(
       (CGFloat)width / croppedExtent.size.width,
       (CGFloat)height / croppedExtent.size.height);
   const CGFloat scaledWidth = croppedExtent.size.width * scale;
@@ -1469,7 +1483,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
   }
 
   NSDictionary<SCStreamFrameInfo, id> *frameAttachments = nil;
-  if (!CDRFrameIsComplete(sampleBuffer, &frameAttachments)) {
+  if (!CDRFrameIsUsable(sampleBuffer, &frameAttachments)) {
     return;
   }
 
@@ -1492,36 +1506,43 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
       return;
     }
     BOOL pendingHasVisibleMetadata = NO;
-    const CGRect pendingVisibleRect = CDRVisibleContentPixelRect(
+    (void)CDRVisibleContentPixelRect(
         frameAttachments, pixelBuffer, &pendingHasVisibleMetadata);
     if (!pendingHasVisibleMetadata) {
       self.pendingMissingMetadataFrameCount += 1;
     }
-    const BOOL bufferGeometryMatches = CDRGeometryApproximatelyMatches(
+    const BOOL bufferGeometryMatches = CDRBufferDimensionsMatch(
         width,
         height,
         self.pendingExpectedFrameWidth,
         self.pendingExpectedFrameHeight);
-    const BOOL contentGeometryMatches = pendingHasVisibleMetadata &&
-        CDRGeometryApproximatelyMatches(
-            pendingVisibleRect.size.width,
-            pendingVisibleRect.size.height,
-            self.pendingExpectedFrameWidth,
-            self.pendingExpectedFrameHeight);
-    if (!bufferGeometryMatches && !contentGeometryMatches) {
+    if (!bufferGeometryMatches) {
       self.pendingRejectedGeometryFrameCount += 1;
       self.pendingStableFrameCount = 0;
       return;
     }
-    self.pendingStableFrameCount += 1;
-    if (self.pendingStableFrameCount < 2) {
-      return;
+    const BOOL pendingContentAspectMatches = pendingHasVisibleMetadata &&
+        CDRVisibleContentMatchesTargetAspect(
+            frameAttachments,
+            self.pendingExpectedFrameWidth,
+            self.pendingExpectedFrameHeight);
+    if (!pendingHasVisibleMetadata || !pendingContentAspectMatches) {
+      if (pendingHasVisibleMetadata) {
+        self.pendingContentAspectMismatchCount += 1;
+      }
+      // contentRect is advisory crop/scale metadata. Sidecar can omit it or
+      // briefly report the previous surface even when this target-bound stream
+      // already owns a valid pixel buffer. Fall back to the full canonical
+      // buffer immediately instead of waiting for another frame which a static
+      // desktop might never emit.
+      self.pendingMetadataFallbackCount += 1;
     }
+    self.pendingStableFrameCount = 1;
 
-    // Promote only after a newly constructed stream has delivered two
-    // complete post-barrier frames whose outer buffer or visible content can
-    // be canonicalized to the target aspect. The previous stream keeps
-    // running until the controller confirms the target key frame was decoded.
+    // The stream object, capture generation, post-start display time and exact
+    // destination dimensions identify the target transaction. Promote its
+    // first usable pixel buffer; the previous stream remains warm until the
+    // controller confirms that new media arrived.
     self.retiredStream = self.stream;
     self.retiredSourceId = self.sourceId ?: @"";
     self.retiredExpectedFrameWidth = self.expectedFrameWidth;
@@ -1543,6 +1564,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     self.pendingSwitchCompletion = nil;
     const NSUInteger acceptedCompleteFrames = self.pendingCompleteFrameCount;
     const NSUInteger acceptedGeometryRejects = self.pendingRejectedGeometryFrameCount;
+    const NSUInteger acceptedContentAspectMismatches =
+        self.pendingContentAspectMismatchCount;
+    const NSUInteger acceptedMetadataFallbacks =
+        self.pendingMetadataFallbackCount;
     self.pendingStableFrameCount = 0;
     self.pendingExpectedFrameWidth = 0;
     self.pendingExpectedFrameHeight = 0;
@@ -1551,6 +1576,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     self.pendingRejectedStaleFrameCount = 0;
     self.pendingRejectedGeometryFrameCount = 0;
     self.pendingMissingMetadataFrameCount = 0;
+    self.pendingContentAspectMismatchCount = 0;
+    self.pendingMetadataFallbackCount = 0;
     self.pendingLastFrameWidth = 0;
     self.pendingLastFrameHeight = 0;
     self.pendingStartedAt = 0;
@@ -1572,13 +1599,15 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
       @"height": @(self.expectedFrameHeight),
       @"frameRate": @(self.expectedFrameRate),
     };
-    NSLog(@"CrossDesktopRemote promoted capture generation %lu for source %@ (%zux%zu), complete=%lu geometryRejects=%lu",
+    NSLog(@"CrossDesktopRemote promoted capture generation %lu for source %@ (%zux%zu), usable=%lu geometryRejects=%lu contentAspect=%lu metadataFallback=%lu",
           (unsigned long)generation,
           self.sourceId,
           self.expectedFrameWidth,
           self.expectedFrameHeight,
           (unsigned long)acceptedCompleteFrames,
-          (unsigned long)acceptedGeometryRejects);
+          (unsigned long)acceptedGeometryRejects,
+          (unsigned long)acceptedContentAspectMismatches,
+          (unsigned long)acceptedMetadataFallbacks);
     if (completion != nil) {
       completion(configuration, nil);
     }
@@ -1609,7 +1638,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
       return;
     }
     if (self.expectedFrameWidth > 0 && self.expectedFrameHeight > 0 &&
-        !CDRGeometryApproximatelyMatches(
+        !CDRBufferDimensionsMatch(
             width,
             height,
             self.expectedFrameWidth,
@@ -1620,53 +1649,46 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                          attachments:frameAttachments];
       return;
     }
-    const CFAbsoluteTime gateElapsed =
-        CFAbsoluteTimeGetCurrent() - self.switchFrameGateStartedAt;
     if (!hasVisibleContentMetadata) {
       [self recordFrameGateRejection:@"missingContentMetadata"
                          pixelBuffer:pixelBuffer
                          attachments:frameAttachments];
-      // Frame attachments are descriptive metadata, not a transactional
-      // acknowledgement of a same-display format update. Give them a short
-      // bounded window, then trust the canonical destination surface.
-      if (gateElapsed < 0.45) {
-        return;
-      }
     } else if (!contentAspectMatches) {
       [self recordFrameGateRejection:@"contentAspectMismatch"
                          pixelBuffer:pixelBuffer
                          attachments:frameAttachments];
     }
-    self.stableSwitchFrameCount += 1;
-    if (self.stableSwitchFrameCount < 2) {
-      return;
-    }
+    self.stableSwitchFrameCount = 1;
     self.awaitingStableSwitchFrames = NO;
     frameGateBecameReady = YES;
-    NSLog(@"CrossDesktopRemote accepted display generation %lu after %lu complete frames (%zux%zu), metadata=%@",
+    NSLog(@"CrossDesktopRemote accepted display generation %lu after its first usable frame (%zux%zu), metadata=%@",
           (unsigned long)self.captureGeneration,
-          (unsigned long)self.stableSwitchFrameCount,
           width,
           height,
           frameAttachments);
   }
 
-  // A correctly sized IOSurface may still contain an inset image left by the
-  // previous display's ScreenCaptureKit transform. Never encode that frame as
-  // a valid target generation. Cropping the metadata-defined visible region
-  // below restores a canonical full-frame desktop and keeps pointer mapping
-  // aligned with the pixels the user sees.
+  // contentRect can temporarily describe an old or differently transformed
+  // surface after a Sidecar switch. Do not drop an otherwise valid target-bound
+  // frame, and do not crop with metadata that disagrees with the selected
+  // display. The canonical output buffer is the safe fallback coordinate
+  // space.
   if (hasVisibleContentMetadata && !contentAspectMatches) {
-    [self recordFrameGateRejection:@"contentAspectMismatch"
-                       pixelBuffer:pixelBuffer
-                       attachments:frameAttachments];
+    if (!frameGateBecameReady) {
+      // The bounded gate already reported its mismatch before becoming ready.
+      // Outside a gate this remains a diagnostic counter only; publishing a
+      // waiting/ready notification for every frame would create control-plane
+      // churn while the canonical-buffer fallback is working normally.
+      self.contentAspectMismatchCount += 1;
+    }
   }
   // contentRect describes the pixels that belong to the selected display.
   // Its validity is independent from the encoder target aspect: automatic
   // quality scaling and codec alignment may legitimately make those aspects
   // differ by a few pixels. Ignoring a valid inset here encodes ScreenCaptureKit
   // padding and makes Sidecar appear top-aligned on the controller.
-  const BOOL hasTrustedVisibleContentMetadata = hasVisibleContentMetadata;
+  const BOOL hasTrustedVisibleContentMetadata =
+      hasVisibleContentMetadata && contentAspectMatches;
   const CGRect normalizationVisiblePixelRect =
       hasTrustedVisibleContentMetadata
       ? visiblePixelRect

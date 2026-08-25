@@ -247,4 +247,38 @@ void main() {
     expect(diagnostics.frameGeometry?.label, contains('83.3%×80.0%'));
     expect(diagnostics.forDisplay('2')?.hdrActive, isTrue);
   });
+
+  test(
+    'parses a committed frame geometry without collapsing coordinate spaces',
+    () {
+      final geometry = remoteFrameGeometryFromValue({
+        'displayId': 'sidecar',
+        'generation': 12,
+        'logicalWidth': 1112,
+        'logicalHeight': 758,
+        'captureWidth': 1310,
+        'captureHeight': 892,
+        'encodedWidth': 1280,
+        'encodedHeight': 872,
+        'activeContentX': 0,
+        'activeContentY': 0,
+        'activeContentWidth': 1280,
+        'activeContentHeight': 872,
+        'rotation': 0,
+      });
+
+      expect(geometry, isNotNull);
+      expect(geometry!.isValid, isTrue);
+      expect(geometry.encodedSize.label, '1280×872');
+      expect(geometry.belongsTo(displayId: 'sidecar', generation: 12), isTrue);
+      expect(geometry.logicalWidth, isNot(geometry.encodedWidth));
+      expect(
+        remoteFrameGeometryFromValue({
+          ...geometry.toMessage(),
+          'captureWidth': 0,
+        }),
+        isNull,
+      );
+    },
+  );
 }

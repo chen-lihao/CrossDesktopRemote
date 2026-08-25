@@ -33,12 +33,14 @@ class RemoteContentTransform {
     required this.sourceSize,
     required this.sourceRect,
     required this.destinationRect,
+    required this.activeContentRect,
   });
 
   factory RemoteContentTransform.forViewport({
     required Size sourceSize,
     required Size viewportSize,
     required BoxFit fit,
+    Rect? activeContentRect,
     Offset viewportOffset = Offset.zero,
   }) {
     if (sourceSize.isEmpty || viewportSize.isEmpty) {
@@ -46,25 +48,40 @@ class RemoteContentTransform {
         sourceSize: sourceSize,
         sourceRect: Rect.zero,
         destinationRect: Rect.zero,
+        activeContentRect: Rect.zero,
       );
     }
-    final fitted = applyBoxFit(fit, sourceSize, viewportSize);
+    final sourceBounds = Offset.zero & sourceSize;
+    final requestedActiveRect = activeContentRect ?? sourceBounds;
+    final activeRect = requestedActiveRect.intersect(sourceBounds);
+    if (activeRect.isEmpty) {
+      return RemoteContentTransform(
+        sourceSize: sourceSize,
+        sourceRect: Rect.zero,
+        destinationRect: Rect.zero,
+        activeContentRect: Rect.zero,
+      );
+    }
+    final fitted = applyBoxFit(fit, activeRect.size, viewportSize);
+    final fittedSourceRect = Alignment.center.inscribe(
+      fitted.source,
+      Offset.zero & activeRect.size,
+    );
     return RemoteContentTransform(
       sourceSize: sourceSize,
-      sourceRect: Alignment.center.inscribe(
-        fitted.source,
-        Offset.zero & sourceSize,
-      ),
+      sourceRect: fittedSourceRect.shift(activeRect.topLeft),
       destinationRect: Alignment.center.inscribe(
         fitted.destination,
         viewportOffset & viewportSize,
       ),
+      activeContentRect: activeRect,
     );
   }
 
   final Size sourceSize;
   final Rect sourceRect;
   final Rect destinationRect;
+  final Rect activeContentRect;
 
   Offset? normalize(Offset viewportPosition) {
     if (sourceRect.isEmpty ||
@@ -76,9 +93,11 @@ class RemoteContentTransform {
         (viewportPosition.dx - destinationRect.left) / destinationRect.width;
     final destinationY =
         (viewportPosition.dy - destinationRect.top) / destinationRect.height;
+    final sourceX = sourceRect.left + sourceRect.width * destinationX;
+    final sourceY = sourceRect.top + sourceRect.height * destinationY;
     return Offset(
-      (sourceRect.left + sourceRect.width * destinationX) / sourceSize.width,
-      (sourceRect.top + sourceRect.height * destinationY) / sourceSize.height,
+      (sourceX - activeContentRect.left) / activeContentRect.width,
+      (sourceY - activeContentRect.top) / activeContentRect.height,
     );
   }
 }
