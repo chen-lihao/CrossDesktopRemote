@@ -59,7 +59,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _capabilities = DeviceCapabilities.current();
     _settings = AppSettingsController();
     _history = SessionHistoryController(settings: _settings);
-    _role = _capabilities.canHost ? RemoteRole.host : RemoteRole.controller;
+    _role = _capabilities.defaultToHost
+        ? RemoteRole.host
+        : RemoteRole.controller;
     _createWorkspace();
     _settings.addListener(_handleSettingsChanged);
     unawaited(_loadPersistentState());

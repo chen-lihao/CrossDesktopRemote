@@ -30,6 +30,9 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
+  host_bridge_ = std::make_unique<WindowsHostBridge>(
+      flutter_controller_->engine()->messenger());
+
   window_channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
           flutter_controller_->engine()->messenger(),
@@ -84,6 +87,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  host_bridge_.reset();
   window_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;

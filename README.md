@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 iPad→Mac 局域网原型进行中。** 基本连接、画面和远程输入已经用户验证；Apple 媒体链已具备三阶段色彩诊断、Mac GPU HDR→SDR 和 iPad BT.709 渲染。主屏与 Sidecar 使用 Active/Pending/Retired 采集事务，新目标流首个有效 PixelBuffer 接管同一 RTC Track/Source，失败原子回滚。`contentRect` 仅作为裁剪元数据，缺失或短暂陈旧时立即回退规范 Buffer，不再阻断静态 Sidecar 切屏。显示协议传递四层几何，iPad使用同一份已提交几何完成居中显示与直接触控；自动/手动画质只修改WebRTC Sender。Flutter `analyze`、78个测试及macOS/iOS Debug构建通过；连续往返切屏、九宫格触控误差、实际清晰度和延迟仍需物理双设备复验。
+> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 的基本连接、画面和远程输入已经用户验证；Windows→Mac 已具备直接微软拼音与单 Surface 原生全屏。Windows 被控端首轮代码已接通原生能力握手、显示器/DPI枚举、虚拟桌面坐标、`SendInput`鼠标/扫描码/Unicode输入和现有`flutter_webrtc`主屏采集。本轮只开放有人值守单主屏，Windows MSVC构建和Mac→Windows物理会话仍待Windows设备验证，多显示器、自动发现及无人值守尚未开放。
 
 ## 项目定位
 
@@ -112,7 +112,7 @@ flowchart LR
 
 ## 仓库结构
 
-当前目录边界、三类主要工程、协议生成、本地基础设施和统一验收入口已经建立；Apple 纵向原型已进入双设备人工验收，其他平台媒体适配仍未实现：
+当前目录边界、三类主要工程、协议生成、本地基础设施和统一验收入口已经建立；Apple 纵向原型已进入双设备人工验收，Windows被控端已进入单主屏原生构建门禁，其他平台媒体适配仍未实现：
 
 ```text
 CrossDesktopRemote/
@@ -239,6 +239,17 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 
 物理设备验收步骤见 [Windows 控制 Mac 验收](./docs/Windows控制Mac验收.md)。
 
+### Windows 被控端（首轮单屏）
+
+- Windows Runner通过版本化能力握手开放被控角色；握手缺失或不兼容时拒绝开始共享。
+- 首轮复用仓库内`flutter_webrtc`桌面采集，只发布主屏；Win32原生层提供显示器/DPI信息和`SendInput`输入注入。
+- 绝对指针以协议归一化坐标传输，再结合目标显示器与整个虚拟桌面映射到`0～65535`；物理按键使用扫描码，文字使用`KEYEVENTF_UNICODE`。
+- 断开和Runner退出时统一释放合成按键与鼠标按钮，避免远端异常退出后出现粘键。
+- UIPI限制普通权限进程控制管理员/UAC安全桌面；应用会提示限制，不通过长期管理员运行规避。
+- Windows默认仍以控制端启动；用户需要主动切换到“共享本机”。多显示器事务和DNS-SD发现待单屏实机闭环后启用。
+
+构建和物理检查步骤见 [Windows 被控端首轮验收](./docs/Windows被控端验收.md)。
+
 ### 显示调整与色彩诊断
 
 - 全局 Message 使用安全区下方、屏幕高度约 17% 的 Overlay，不再占据底部操作区域。
@@ -303,7 +314,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter | 响应式壳层、真实会话/设置页面、会话元数据历史、Apple Bonjour、共享恢复、Active/Pending/Retired采集热切换、四层显示几何、Sender-only自动画质、双键盘、iOS原生IME；会话层已通过`HostPlatformAdapter`隔离Mac/Windows被控能力；Windows控制端增加透明IME代理、组合/物理键分流和保留同一WebRTC Texture的原生无边框全屏；`analyze`零告警、93项测试通过且1项按设计跳过，macOS/iOS Debug构建通过 | Windows真机验证直接微软拼音和30次全屏；iPad回归；再启用Windows被控端采集和输入注入 |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows控制端直接IME/原生全屏；`HostPlatformAdapter`已接入Windows能力握手、显示器/DPI枚举、主屏采集和`SendInput`鼠标/扫描码/Unicode输入；`analyze`零告警、95项测试通过且1项按设计跳过，macOS/iOS Debug构建通过 | Windows MSVC原生构建、Mac→Windows单屏实机验收；随后实现Windows多显示器事务和DNS-SD |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |
@@ -317,6 +328,7 @@ flutter build ios --simulator --debug
 - [AGENT.md](./AGENT.md)
 - [工程搭建说明](./docs/工程搭建.md)
 - [局域网发现与跨平台适配](./docs/局域网发现与跨平台适配.md)
+- [Windows 被控端首轮验收](./docs/Windows被控端验收.md)
 
 ## 工程复现方式
 
@@ -369,4 +381,4 @@ flutter build ios --simulator --debug
 
 ## 当前里程碑
 
-当前并行推进 **M1 Apple 稳定性验收** 与 **M1B Windows 控制端基线**。Windows 下一门禁是完成 Debug 原生构建，验证物理键盘、微软拼音和30次原生全屏往返，同时确认全屏前后会话、Renderer和Texture不重建；随后执行iPad回归。通过后再实现Windows被控端采集、输入注入和多显示器事务。
+当前并行推进 **M1 Apple 稳定性验收** 与 **M1B Windows 双向原型**。Windows控制端链路已进入真机回归；被控端首轮单主屏代码已完成，下一门禁是在Windows上完成MSVC Debug构建并验证Mac→Windows的画面、九宫格指针、Unicode/扫描码输入、断线释放和30分钟稳定性。单屏闭环通过后，再实现Windows多显示器`replaceTrack()`事务与DNS-SD自动发现。

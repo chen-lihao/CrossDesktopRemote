@@ -19,7 +19,7 @@ git status --short --branch
 rg --files
 ```
 
-仓库当前已完成 M0 工程基线，并进入 M1 iPad→Mac 局域网原型。开发态连接码已有 5 分钟 TTL、单次消费和每来源限流，验证后自动建立 WebRTC；动态比例/全屏、触控板/直接触控、系统/快捷双键盘、Mac 权限状态、单 `SCStream` 多显示器切换、帧时间屏障、有界 `contentRect` 软门禁、一次幂等原地采集重试、采集/编码/解码/渲染目标几何事务、ScreenCaptureKit 有效内容区域裁剪与规范化、iPad 单一呈现/触控几何、稳定画布/原子几何、事件驱动遮罩、区间媒体诊断和带滞回自动画质已编码。macOS、iOS 和物理 iPad 构建通过。真实双设备输入、有效区域铺满与触控对齐、连续切屏画布、自动升降档、多屏热插拔和稳定性仍需人工验收，不得声称完整远控或生产安全已经完成。
+仓库当前已完成 M0 工程基线，并进入 M1 Apple 与 M1B Windows 双向原型。开发态连接码已有 5 分钟 TTL、单次消费和每来源限流，验证后自动建立 WebRTC；Apple 链路的动态画布、输入、采集事务、色彩和自动画质已编码。Windows控制端已实现直接IME和单Surface原生全屏；Windows被控端首轮已实现版本化原生握手、单主屏采集、显示器/DPI枚举与`SendInput`鼠标/扫描码/Unicode输入，但仍待Windows + MSVC构建和Mac→Windows实机验证。Windows多显示器、DNS-SD、UAC安全桌面和无人值守尚未开放。不得把Mac上的Dart/Apple构建通过表述为Windows原生能力已验收，也不得声称完整远控或生产安全已经完成。
 
 ## 2. 固定技术决策
 

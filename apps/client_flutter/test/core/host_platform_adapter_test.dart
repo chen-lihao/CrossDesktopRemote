@@ -2,6 +2,7 @@ import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/mac_host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/unsupported_host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/windows_host_platform_adapter.dart';
+import 'package:cross_desktop_remote/core/input/windows_input_bridge.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -103,11 +104,179 @@ void main() {
     },
   );
 
-  test('Windows adapter does not advertise unverified host support', () async {
-    const adapter = WindowsHostPlatformAdapter();
+  test(
+    'Windows adapter enables host only through a compatible bridge',
+    () async {
+      final bridge = _FakeWindowsInputBridge();
+      final adapter = WindowsHostPlatformAdapter(bridge: bridge);
 
-    expect(adapter.type, HostPlatformType.windows);
-    expect(adapter.capabilities.canHostDesktop, isFalse);
-    expect((await adapter.checkPermissions()).limitation, contains('Windows'));
+      expect(adapter.type, HostPlatformType.windows);
+      expect(adapter.capabilities.canHostDesktop, isTrue);
+      final permission = await adapter.requestPermissions();
+      expect(permission.inputGranted, isTrue);
+      expect(permission.limitation, contains('UAC'));
+      expect((await adapter.listDisplays()).single.pixelWidth, 1920);
+
+      await adapter.sendPointer(
+        const HostPointerEvent(
+          phase: 'down',
+          x: .5,
+          y: .5,
+          displayId: r'\\.\DISPLAY1',
+        ),
+      );
+      await adapter.sendKey(
+        const HostKeyEvent(
+          phase: 'down',
+          key: 'KeyA',
+          modifiers: ['control'],
+          physicalHidUsage: 0x70004,
+        ),
+      );
+      await adapter.sendText('中文');
+      await adapter.releasePointerButtons();
+
+      expect(bridge.pointerEvents.single.displayId, r'\\.\DISPLAY1');
+      expect(bridge.keyEvents.single.physicalHidUsage, 0x70004);
+      expect(bridge.textValues, ['中文']);
+      expect(bridge.releaseCount, 1);
+    },
+  );
+
+  test('Windows method channel preserves the native host contract', () async {
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(inputChannel, (call) async {
+          calls.add(call);
+          return switch (call.method) {
+            'getHostCapabilities' => {
+              'protocolVersion': 1,
+              'canHostDesktop': true,
+              'canInjectInput': true,
+              'canEnumerateDisplays': true,
+              'supportsUnicode': true,
+              'supportsVirtualDesktop': true,
+              'limitation': 'UAC secure desktop is unavailable',
+            },
+            'listDisplays' => [
+              {
+                'id': r'\\.\DISPLAY1',
+                'name': 'DISPLAY1',
+                'width': 1536,
+                'height': 864,
+                'pixelWidth': 1920,
+                'pixelHeight': 1080,
+                'pointPixelScale': 1.25,
+                'isPrimary': true,
+              },
+            ],
+            _ => null,
+          };
+        });
+
+    const bridge = WindowsInputBridge();
+    final capabilities = await bridge.getHostCapabilities();
+    final displays = await bridge.listDisplays();
+    await bridge.sendPointer(
+      const HostPointerEvent(
+        phase: 'scroll',
+        x: .5,
+        y: .5,
+        displayId: r'\\.\DISPLAY1',
+        deltaY: 20,
+      ),
+    );
+    await bridge.sendKey(
+      const HostKeyEvent(
+        phase: 'down',
+        key: 'KeyC',
+        modifiers: ['control'],
+        physicalHidUsage: 0x70006,
+      ),
+    );
+    await bridge.sendText('你好');
+    await bridge.releasePointerButtons();
+
+    expect(capabilities.isCompatible, isTrue);
+    expect(displays.single.pointPixelScale, 1.25);
+    expect(calls.map((call) => call.method), [
+      'getHostCapabilities',
+      'listDisplays',
+      'pointer',
+      'keyboard',
+      'keyboard',
+      'releasePointerButtons',
+    ]);
+    expect((calls[3].arguments as Map)['physicalHidUsage'], 0x70006);
+    expect((calls[4].arguments as Map)['text'], '你好');
   });
+
+  test('Windows adapter rejects an incompatible native bridge', () async {
+    final adapter = WindowsHostPlatformAdapter(
+      bridge: _FakeWindowsInputBridge(protocolVersion: 0),
+    );
+
+    final permission = await adapter.checkPermissions();
+    expect(permission.inputGranted, isFalse);
+    await expectLater(adapter.requestPermissions(), throwsA(isA<StateError>()));
+  });
+}
+
+class _FakeWindowsInputBridge implements WindowsInputBridgeApi {
+  _FakeWindowsInputBridge({this.protocolVersion = 1});
+
+  final int protocolVersion;
+  final pointerEvents = <HostPointerEvent>[];
+  final keyEvents = <HostKeyEvent>[];
+  final textValues = <String>[];
+  int releaseCount = 0;
+
+  @override
+  Future<WindowsNativeHostCapabilities> getHostCapabilities() async {
+    return WindowsNativeHostCapabilities(
+      protocolVersion: protocolVersion,
+      canHostDesktop: true,
+      canInjectInput: true,
+      canEnumerateDisplays: true,
+      supportsUnicode: true,
+      supportsVirtualDesktop: true,
+      limitation: 'UAC secure desktop is unavailable',
+    );
+  }
+
+  @override
+  Future<List<HostDisplay>> listDisplays() async {
+    return const [
+      HostDisplay(
+        id: r'\\.\DISPLAY1',
+        name: 'DISPLAY1',
+        width: 1920,
+        height: 1080,
+        pixelWidth: 1920,
+        pixelHeight: 1080,
+        pointPixelScale: 1,
+        isPrimary: true,
+      ),
+    ];
+  }
+
+  @override
+  Future<void> releasePointerButtons() async {
+    releaseCount += 1;
+  }
+
+  @override
+  Future<void> sendKey(HostKeyEvent event) async {
+    keyEvents.add(event);
+  }
+
+  @override
+  Future<void> sendPointer(HostPointerEvent event) async {
+    pointerEvents.add(event);
+  }
+
+  @override
+  Future<void> sendText(String text) async {
+    textValues.add(text);
+  }
 }

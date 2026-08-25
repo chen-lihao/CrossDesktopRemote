@@ -514,6 +514,10 @@ class RemoteSessionController extends ChangeNotifier {
       if (_accessibilityGranted == true) {
         _controlError = null;
         _emitNotice('远程输入权限已就绪', level: RemoteNoticeLevel.success);
+        final limitation = permission.limitation;
+        if (limitation != null) {
+          _emitNotice(limitation, level: RemoteNoticeLevel.warning);
+        }
       } else {
         _controlError = permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
         if (_hostPlatform.capabilities.permissionSettings) {
@@ -1863,6 +1867,10 @@ class RemoteSessionController extends ChangeNotifier {
     _controlError = _accessibilityGranted == true
         ? null
         : permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
+    final limitation = permission.limitation;
+    if (_accessibilityGranted == true && limitation != null) {
+      _emitNotice(limitation, level: RemoteNoticeLevel.warning);
+    }
     await _loadDisplaySources();
     if (_displaySources.isEmpty) {
       throw StateError('没有可共享的显示器，请检查屏幕录制权限');
@@ -2044,7 +2052,7 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<void> _loadDisplaySources() async {
-    final sources = await desktopCapturer.getSources(
+    final availableSources = await desktopCapturer.getSources(
       types: [SourceType.Screen],
       thumbnailSize: ThumbnailSize(160, 100),
     );
@@ -2052,10 +2060,26 @@ class RemoteSessionController extends ChangeNotifier {
     final nativeById = {
       for (final display in nativeDisplays) display.id: display,
     };
+    // The Windows flutter_webrtc source id and Win32 display device id come
+    // from different APIs and cannot yet be joined reliably. Keep the first
+    // Windows host milestone deliberately single-screen; this preserves a
+    // correct capture/input mapping instead of exposing unsafe display
+    // switching. Multi-display will be enabled with the replaceTrack
+    // transaction once a stable source-to-monitor identity is available.
+    final sources =
+        _hostPlatform.type == HostPlatformType.windows &&
+            availableSources.isNotEmpty
+        ? <DesktopCapturerSource>[availableSources.first]
+        : availableSources;
+    final singleNativeFallback =
+        sources.length == 1 && nativeDisplays.isNotEmpty
+        ? nativeDisplays.where((display) => display.isPrimary).firstOrNull ??
+              nativeDisplays.first
+        : null;
     _displaySources = sources;
     _displays = sources
         .map((source) {
-          final native = nativeById[source.id];
+          final native = nativeById[source.id] ?? singleNativeFallback;
           return RemoteDisplay(
             id: source.id,
             name: native?.name ?? source.name,
