@@ -7,6 +7,10 @@ Thumbs.db
 *.swp
 *.swo
 
+# Xcode user-specific settings
+**/xcuserdata/
+**/*.xcuserstate
+
 # Secrets and local configuration
 .env
 .env.*
