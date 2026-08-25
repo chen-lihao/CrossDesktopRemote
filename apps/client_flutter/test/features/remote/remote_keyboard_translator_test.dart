@@ -42,6 +42,7 @@ void main() {
       ),
       modifiers: const ['control'],
     );
+    expect(translator.isPressed(PhysicalKeyboardKey.keyC), isTrue);
     final up = translator.translate(
       const KeyUpEvent(
         physicalKey: PhysicalKeyboardKey.keyC,
@@ -56,6 +57,7 @@ void main() {
     expect(down.single.key, 'KeyC');
     expect(down.single.physicalHidUsage, isNonZero);
     expect(up.single.phase, 'up');
+    expect(translator.isPressed(PhysicalKeyboardKey.keyC), isFalse);
   });
 
   test('focus loss releases all physical keys', () {

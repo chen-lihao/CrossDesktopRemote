@@ -229,6 +229,16 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 
 物理设备验收步骤见 [iPad 控制 Mac 输入验收](./docs/iPad控制Mac输入验收.md)。
 
+### Windows 控制端输入
+
+- Windows 连接远端后，远程画面常驻透明的 `EditableText` IME 代理；单击或重新进入画面即可直接使用微软拼音，不需要先打开“全局键盘”输入框。
+- 拼音组合、候选翻页、空格选词和组合内退格保留在 Windows；只有输入法提交后的 Unicode 文本才发送到被控端。
+- `Ctrl`/`Alt`/`Win` 组合键以及 Enter、Tab、方向键和 F1～F12 继续使用成对的物理按键通道；切换窗口或失焦时统一释放按键并取消本地组合态。
+- 输入法候选窗口锚定在最近一次远程点击位置附近；工具栏的“系统完整键盘”保留为第三方输入法兼容入口，不再是微软拼音的必经步骤。
+- 此路径由 `Platform.isWindows` 隔离，不改变 iPad 的 UIKit IME、双键盘、触控和移动端全屏实现。
+
+物理设备验收步骤见 [Windows 控制 Mac 验收](./docs/Windows控制Mac验收.md)。
+
 ### 显示调整与色彩诊断
 
 - 全局 Message 使用安全区下方、屏幕高度约 17% 的 Overlay，不再占据底部操作区域。
@@ -293,7 +303,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter | 响应式壳层、真实会话/设置页面、会话元数据历史、Apple Bonjour、共享恢复、Active/Pending/Retired采集热切换、四层显示几何、Sender-only自动画质、双键盘、iOS原生IME；会话层已通过`HostPlatformAdapter`隔离Mac/Windows被控能力；Windows控制端增加物理键状态机、微软拼音TextInputClient分流和保留同一WebRTC Texture的原生无边框全屏；`analyze`和87项测试通过，macOS/iOS Debug构建通过 | Windows验证微软拼音和30次全屏；iPad回归；再启用Windows被控端采集和输入注入 |
+| Flutter | 响应式壳层、真实会话/设置页面、会话元数据历史、Apple Bonjour、共享恢复、Active/Pending/Retired采集热切换、四层显示几何、Sender-only自动画质、双键盘、iOS原生IME；会话层已通过`HostPlatformAdapter`隔离Mac/Windows被控能力；Windows控制端增加透明IME代理、组合/物理键分流和保留同一WebRTC Texture的原生无边框全屏；`analyze`零告警、93项测试通过且1项按设计跳过，macOS/iOS Debug构建通过 | Windows真机验证直接微软拼音和30次全屏；iPad回归；再启用Windows被控端采集和输入注入 |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |

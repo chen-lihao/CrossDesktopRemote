@@ -34,6 +34,8 @@ class RemoteKeyboardAction {
 class RemoteKeyboardTranslator {
   final Map<PhysicalKeyboardKey, _PressedRemoteKey> _pressed = {};
 
+  bool isPressed(PhysicalKeyboardKey key) => _pressed.containsKey(key);
+
   List<RemoteKeyboardAction> translate(
     KeyEvent event, {
     required List<String> modifiers,

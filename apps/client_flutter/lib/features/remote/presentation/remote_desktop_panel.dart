@@ -13,6 +13,7 @@ import 'package:cross_desktop_remote/features/remote/presentation/remote_keyboar
 import 'package:cross_desktop_remote/features/remote/presentation/remote_pointer_event_coalescer.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_text_input_synchronizer.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_touch_gesture_controller.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/windows_remote_ime_coordinator.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -1158,7 +1159,9 @@ class _RemoteToolbar extends StatelessWidget {
                       ),
                       PopupMenuButton<RemoteKeyboardMode>(
                         tooltip: session.canSendControl
-                            ? '远程键盘：${keyboardMode.label}'
+                            ? (Platform.isWindows
+                                  ? '兼容键盘与快捷键'
+                                  : '远程键盘：${keyboardMode.label}')
                             : '远程键盘（等待输入权限）',
                         initialValue: keyboardMode,
                         onSelected: onKeyboardModeSelected,
@@ -1178,7 +1181,9 @@ class _RemoteToolbar extends StatelessWidget {
                                 subtitle: Text(
                                   mode == RemoteKeyboardMode.compact
                                       ? '快捷键和方向键，不打开输入法'
-                                      : '文字、拼音、符号和表情',
+                                      : (Platform.isWindows
+                                            ? '兼容文本输入；远程画面已支持直接拼音'
+                                            : '文字、拼音、符号和表情'),
                                 ),
                               ),
                             ),
@@ -1252,6 +1257,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   final _textFocus = FocusNode(debugLabel: 'remote-soft-keyboard');
   final _textController = TextEditingController();
   final _textSynchronizer = RemoteTextInputSynchronizer();
+  late final WindowsRemoteImeCoordinator _windowsIme =
+      WindowsRemoteImeCoordinator(synchronizer: _textSynchronizer);
   final _desktopKeyboard = RemoteKeyboardTranslator();
   final RemoteImeInputAdapter _nativeIme = MethodChannelRemoteImeInputAdapter();
   final _pointerCoalescer = RemotePointerEventCoalescer();
@@ -1286,20 +1293,30 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   final Set<String> _compactModifiers = {};
   RemoteContentTransform? _latestTransform;
   Offset? _lastNormalizedPointer;
+  Offset _windowsImeAnchor = const Offset(24, 24);
 
   RemoteSessionController get session => widget.session;
 
   bool get _usesDesktopKeyboard =>
       Platform.isWindows || Platform.isMacOS || Platform.isLinux;
 
+  bool get _windowsDirectImeAvailable =>
+      Platform.isWindows && !_keyboardVisible && session.canSendControl;
+
   void requestHardwareKeyboardFocus() {
-    if (mounted) _hardwareFocus.requestFocus();
+    if (!mounted) return;
+    if (_windowsDirectImeAvailable) {
+      unawaited(_activateWindowsDirectIme());
+    } else {
+      _hardwareFocus.requestFocus();
+    }
   }
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _textController.addListener(_textChanged);
     _activeKeyboardMode = widget.inputSettings.keyboardMode;
     _lastDisplaySwitchPending = session.displaySwitchPending;
     _committedVideoSourceSize =
@@ -1314,7 +1331,11 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       );
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _updateGestureConfiguration();
+      if (!mounted) return;
+      _updateGestureConfiguration();
+      if (_windowsDirectImeAvailable) {
+        unawaited(_activateWindowsDirectIme());
+      }
     });
     if (_lastDisplaySwitchPending) {
       _presentationSwitchToken += 1;
@@ -1355,8 +1376,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     }
     final nextMode = mode ?? widget.inputSettings.keyboardMode;
     if (nextMode == RemoteKeyboardMode.compact) {
-      if (_keyboardVisible &&
-          _activeKeyboardMode == RemoteKeyboardMode.system) {
+      if ((_keyboardVisible &&
+              _activeKeyboardMode == RemoteKeyboardMode.system) ||
+          Platform.isWindows) {
         if (Platform.isIOS) {
           unawaited(_hideNativeIme());
         } else {
@@ -1401,6 +1423,11 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         _systemKeyboardDocked = false;
         _compactModifiers.clear();
       });
+      if (Platform.isWindows) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) unawaited(_activateWindowsDirectIme());
+        });
+      }
     }
   }
 
@@ -1614,6 +1641,25 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     await SystemChannels.textInput.invokeMethod<void>('TextInput.show');
   }
 
+  Future<void> _activateWindowsDirectIme() async {
+    if (!_windowsDirectImeAvailable) return;
+    _textFocus.requestFocus();
+    // The transparent EditableText must finish attaching before Windows sends
+    // the first WM_IME_COMPOSITION update. Keeping this client mounted also
+    // preserves IME focus across video geometry and full-screen changes.
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted || !_windowsDirectImeAvailable) return;
+    _textFocus.requestFocus();
+    await SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+  }
+
+  void _suspendWindowsDirectIme() {
+    if (!Platform.isWindows || _keyboardVisible) return;
+    _textFocus.unfocus();
+    SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    _resetTextInput(rebuildComposition: false);
+  }
+
   Future<void> _hideNativeIme() async {
     try {
       await _nativeIme.hide(clientId: _imeClientId);
@@ -1679,6 +1725,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     if (_usesDesktopKeyboard && state != AppLifecycleState.resumed) {
       _releaseDesktopKeys();
     }
+    if (Platform.isWindows && state != AppLifecycleState.resumed) {
+      _suspendWindowsDirectIme();
+    }
     if (_keyboardVisible &&
         const {
           AppLifecycleState.inactive,
@@ -1690,7 +1739,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     }
     if (_usesDesktopKeyboard &&
         state == AppLifecycleState.resumed &&
-        widget.desktopFullScreen) {
+        (Platform.isWindows || widget.desktopFullScreen)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         requestHardwareKeyboardFocus();
       });
@@ -1721,7 +1770,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     _dispatchGestureActions(_gestures.cancelAll(releaseDragLock: true));
     _flushPointerMotion();
     _releaseDesktopKeys();
-    if (_keyboardVisible && _activeKeyboardMode == RemoteKeyboardMode.system) {
+    if ((_keyboardVisible &&
+            _activeKeyboardMode == RemoteKeyboardMode.system) ||
+        (Platform.isWindows && _textFocus.hasFocus)) {
       if (Platform.isIOS) {
         unawaited(_hideNativeIme());
       } else {
@@ -1730,6 +1781,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     }
     _hardwareFocus.dispose();
     _textFocus.dispose();
+    _textController.removeListener(_textChanged);
     _textController.dispose();
     super.dispose();
   }
@@ -1789,7 +1841,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
             onKeyEvent: _handleKeyEvent,
             child: MouseRegion(
               onEnter: (_) {
-                if (_usesDesktopKeyboard && !_textFocus.hasFocus) {
+                if (_windowsDirectImeAvailable) {
+                  unawaited(_activateWindowsDirectIme());
+                } else if (_usesDesktopKeyboard && !_textFocus.hasFocus) {
                   _hardwareFocus.requestFocus();
                 }
               },
@@ -1839,6 +1893,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                       child: const SizedBox.expand(),
                     ),
                   ),
+                  if (Platform.isWindows && !_keyboardVisible)
+                    _buildWindowsImeProxy(constraints),
                   if (widget.inputSettings.pointerMode ==
                           RemotePointerMode.touchpad &&
                       !_keyboardVisible)
@@ -1909,6 +1965,50 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
             ),
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildWindowsImeProxy(BoxConstraints constraints) {
+    const proxyWidth = 180.0;
+    const proxyHeight = 28.0;
+    final maximumLeft = (constraints.maxWidth - proxyWidth - 8).clamp(
+      8.0,
+      double.infinity,
+    );
+    final maximumTop = (constraints.maxHeight - proxyHeight - 8).clamp(
+      8.0,
+      double.infinity,
+    );
+    final left = _windowsImeAnchor.dx.clamp(8.0, maximumLeft);
+    final top = _windowsImeAnchor.dy.clamp(8.0, maximumTop);
+    return Positioned(
+      left: left,
+      top: top,
+      width: proxyWidth,
+      height: proxyHeight,
+      child: ExcludeSemantics(
+        child: IgnorePointer(
+          child: Opacity(
+            // Keep a real laid-out EditableText so Windows can position its
+            // candidate window near the last remote click. Text and cursor are
+            // transparent, so the application does not expose a local editor.
+            opacity: 0.01,
+            child: TextField(
+              key: const ValueKey('windowsRemoteImeProxy'),
+              focusNode: _textFocus,
+              controller: _textController,
+              autocorrect: true,
+              enableSuggestions: true,
+              enableInteractiveSelection: false,
+              maxLines: 1,
+              showCursor: false,
+              style: const TextStyle(color: Colors.transparent, fontSize: 14),
+              cursorColor: Colors.transparent,
+              decoration: const InputDecoration.collapsed(hintText: ''),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1992,10 +2092,10 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                         labelText: Platform.isWindows
                             ? (_compositionLength > 0
                                   ? '微软拼音组合中（$_compositionLength）'
-                                  : 'Windows 文字输入')
+                                  : 'Windows 兼容文本输入')
                             : '兼容输入',
                         helperText: Platform.isWindows
-                            ? '选词提交后发送；快捷键请切换快捷小键盘'
+                            ? '远程画面已支持直接输入；此输入框仅作兼容后备'
                             : null,
                         prefixIcon: const Icon(Icons.keyboard_outlined),
                       ),
@@ -2012,11 +2112,12 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                               });
                             }
                           : null,
-                      onChanged: (_) => _textChanged(),
-                      onSubmitted: (_) {
-                        _sendSpecialKey('Enter');
-                        _textFocus.requestFocus();
-                      },
+                      onSubmitted: Platform.isWindows
+                          ? null
+                          : (_) {
+                              _sendSpecialKey('Enter');
+                              _textFocus.requestFocus();
+                            },
                     ),
                   ),
                 IconButton(
@@ -2059,7 +2160,13 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       session.explainControlUnavailable();
       return;
     }
-    if (_usesDesktopKeyboard &&
+    if (_windowsDirectImeAvailable) {
+      final nextAnchor = event.localPosition;
+      if ((_windowsImeAnchor - nextAnchor).distanceSquared > 16) {
+        setState(() => _windowsImeAnchor = nextAnchor);
+      }
+      unawaited(_activateWindowsDirectIme());
+    } else if (_usesDesktopKeyboard &&
         _keyboardVisible &&
         _activeKeyboardMode == RemoteKeyboardMode.system) {
       // Clicking the remote desktop must not detach the Windows TextInputClient
@@ -2364,10 +2471,36 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (!session.canSendControl) return KeyEventResult.ignored;
     if (_textFocus.hasFocus) {
-      // Let Flutter's TextInput client and the Windows/iOS IME own every key
-      // while text composition is active. Intercepting Backspace, arrows, or
-      // Enter here breaks candidate selection before a committed string exists.
-      return KeyEventResult.ignored;
+      if (!Platform.isWindows || _windowsIme.isComposing) {
+        // Let the active IME own candidate selection, cancellation and editing.
+        return KeyEventResult.ignored;
+      }
+      if (widget.desktopFullScreen &&
+          event.logicalKey == LogicalKeyboardKey.escape) {
+        if (event is KeyDownEvent) widget.onExitDesktopFullScreen?.call();
+        return KeyEventResult.handled;
+      }
+      final keyboard = HardwareKeyboard.instance;
+      final modifiers = _remoteModifiers(keyboard);
+      final shortcut = _remoteShortcutPressed(keyboard);
+      final shouldRoute = _windowsIme.shouldRouteToRemote(
+        event,
+        shortcutPressed: shortcut,
+        remoteKeyIsPressed: _desktopKeyboard.isPressed(event.physicalKey),
+      );
+      if (!shouldRoute) {
+        // Printable input goes through EditableText so Microsoft Pinyin can
+        // produce a composing range and a single committed Unicode result.
+        return KeyEventResult.ignored;
+      }
+      if (_windowsIme.shouldResetBufferBefore(event)) {
+        _resetTextInput();
+      }
+      final actions = _desktopKeyboard.translate(event, modifiers: modifiers);
+      for (final action in actions) {
+        _dispatchKeyboardAction(action);
+      }
+      return actions.isEmpty ? KeyEventResult.ignored : KeyEventResult.handled;
     }
     if (widget.desktopFullScreen &&
         event.logicalKey == LogicalKeyboardKey.escape) {
@@ -2375,12 +2508,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       return KeyEventResult.handled;
     }
     final keyboard = HardwareKeyboard.instance;
-    final modifiers = <String>[
-      if (keyboard.isMetaPressed) 'command',
-      if (keyboard.isControlPressed) 'control',
-      if (keyboard.isAltPressed) 'option',
-      if (keyboard.isShiftPressed) 'shift',
-    ];
+    final modifiers = _remoteModifiers(keyboard);
     if (_usesDesktopKeyboard) {
       final actions = _desktopKeyboard.translate(event, modifiers: modifiers);
       for (final action in actions) {
@@ -2414,6 +2542,22 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     return KeyEventResult.ignored;
   }
 
+  List<String> _remoteModifiers(HardwareKeyboard keyboard) => <String>[
+    if (keyboard.isMetaPressed) 'command',
+    if (keyboard.isControlPressed) 'control',
+    if (keyboard.isAltPressed) 'option',
+    if (keyboard.isShiftPressed) 'shift',
+  ];
+
+  bool _remoteShortcutPressed(HardwareKeyboard keyboard) {
+    final altGraph =
+        keyboard.isControlPressed &&
+        keyboard.isAltPressed &&
+        keyboard.logicalKeysPressed.contains(LogicalKeyboardKey.altRight);
+    return keyboard.isMetaPressed ||
+        (!altGraph && (keyboard.isControlPressed || keyboard.isAltPressed));
+  }
+
   void _dispatchKeyboardAction(RemoteKeyboardAction action) {
     switch (action.type) {
       case RemoteKeyboardActionType.key:
@@ -2432,21 +2576,28 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
 
   void _textChanged() {
     final value = _textController.value;
+    final edit = Platform.isWindows
+        ? _windowsIme.update(value)
+        : _textSynchronizer.update(value);
     final composing = value.composing;
-    final compositionLength = composing.isValid && !composing.isCollapsed
-        ? composing.end - composing.start
-        : 0;
+    final compositionLength = Platform.isWindows
+        ? _windowsIme.compositionLength
+        : (composing.isValid && !composing.isCollapsed
+              ? composing.end - composing.start
+              : 0);
     if (_compositionLength != compositionLength && mounted) {
       setState(() => _compositionLength = compositionLength);
     }
-    final edit = _textSynchronizer.update(value);
     for (var index = 0; index < edit.backspaceCount; index += 1) {
       _sendSpecialKey('Backspace');
     }
     if (edit.insertedText.isNotEmpty) {
       session.sendText(edit.insertedText);
     }
-    if (_textSynchronizer.shouldCompact() &&
+    final shouldCompact = Platform.isWindows
+        ? _windowsIme.shouldCompact()
+        : _textSynchronizer.shouldCompact();
+    if (shouldCompact &&
         (!value.composing.isValid || value.composing.isCollapsed)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _resetTextInput();
@@ -2454,9 +2605,20 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     }
   }
 
-  void _resetTextInput() {
-    _textSynchronizer.reset();
+  void _resetTextInput({bool rebuildComposition = true}) {
+    if (Platform.isWindows) {
+      _windowsIme.reset();
+    } else {
+      _textSynchronizer.reset();
+    }
     _textController.clear();
+    if (_compositionLength != 0) {
+      if (rebuildComposition && mounted) {
+        setState(() => _compositionLength = 0);
+      } else {
+        _compositionLength = 0;
+      }
+    }
   }
 
   void _keepTextSelectionAtEnd() {
