@@ -212,11 +212,11 @@ DWORD ButtonFlag(const std::string& button, bool key_up) {
   return key_up ? MOUSEEVENTF_LEFTUP : MOUSEEVENTF_LEFTDOWN;
 }
 
-INPUT ScanCodeInput(WORD scan_code, bool extended, bool key_up) {
+INPUT ScanCodeInput(UINT scan_code, bool extended, bool key_up) {
   INPUT input{};
   input.type = INPUT_KEYBOARD;
   input.ki.wVk = 0;
-  input.ki.wScan = scan_code;
+  input.ki.wScan = static_cast<WORD>(scan_code & 0xFFFFU);
   input.ki.dwFlags = KEYEVENTF_SCANCODE;
   if (extended) {
     input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
@@ -227,27 +227,27 @@ INPUT ScanCodeInput(WORD scan_code, bool extended, bool key_up) {
   return input;
 }
 
-bool DescriptorForVirtualKey(WORD virtual_key,
+bool DescriptorForVirtualKey(UINT virtual_key,
                              WindowsHostBridge::KeyDescriptor* result) {
   const UINT scan = MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC_EX);
   if (scan == 0) {
     return false;
   }
-  result->scan_code = static_cast<WORD>(scan & 0xFF);
+  result->scan_code = scan & 0xFFU;
   result->extended = (scan & 0xFF00) != 0;
   return true;
 }
 
-WORD VirtualKeyForName(const std::string& key) {
+UINT VirtualKeyForName(const std::string& key) {
   if (key.size() == 4 && key.rfind("Key", 0) == 0 &&
       key[3] >= 'A' && key[3] <= 'Z') {
-    return static_cast<WORD>(key[3]);
+    return static_cast<UINT>(key[3]);
   }
   if (key.size() == 6 && key.rfind("Digit", 0) == 0 &&
       key[5] >= '0' && key[5] <= '9') {
-    return static_cast<WORD>(key[5]);
+    return static_cast<UINT>(key[5]);
   }
-  static const std::map<std::string, WORD> keys = {
+  static const std::map<std::string, int> keys = {
       {"Enter", VK_RETURN},       {"Backspace", VK_BACK},
       {"Delete", VK_DELETE},     {"Tab", VK_TAB},
       {"Escape", VK_ESCAPE},     {"Space", VK_SPACE},
@@ -269,7 +269,10 @@ WORD VirtualKeyForName(const std::string& key) {
       {"Backquote", VK_OEM_3},
   };
   const auto found = keys.find(key);
-  return found == keys.end() ? 0 : found->second;
+  if (found == keys.end()) {
+    return 0;
+  }
+  return static_cast<UINT>(found->second);
 }
 
 bool DescriptorForKey(const std::string& key, int64_t physical_hid_usage,
@@ -277,8 +280,8 @@ bool DescriptorForKey(const std::string& key, int64_t physical_hid_usage,
   // USB HID keyboard usages are stable across keyboard layouts. Use them when
   // present, and retain the key name as a compatibility fallback for mobile
   // controllers that do not provide a physical usage.
-  const uint16_t usage = static_cast<uint16_t>(physical_hid_usage & 0xFFFF);
-  static const std::map<uint16_t, WindowsHostBridge::KeyDescriptor> hid = {
+  const int usage = static_cast<int>(physical_hid_usage & 0xFFFF);
+  static const std::map<int, WindowsHostBridge::KeyDescriptor> hid = {
       {0x04, {0x1E, false}}, {0x05, {0x30, false}},
       {0x06, {0x2E, false}}, {0x07, {0x20, false}},
       {0x08, {0x12, false}}, {0x09, {0x21, false}},
@@ -324,23 +327,23 @@ bool DescriptorForKey(const std::string& key, int64_t physical_hid_usage,
       return true;
     }
   }
-  const WORD virtual_key = VirtualKeyForName(key);
+  const UINT virtual_key = VirtualKeyForName(key);
   return virtual_key != 0 && DescriptorForVirtualKey(virtual_key, result);
 }
 
-std::set<WORD> ModifierVirtualKeys(const std::set<std::string>& modifiers) {
-  std::set<WORD> keys;
+std::set<UINT> ModifierVirtualKeys(const std::set<std::string>& modifiers) {
+  std::set<UINT> keys;
   if (modifiers.count("shift") != 0) {
-    keys.insert(VK_LSHIFT);
+    keys.insert(static_cast<UINT>(VK_LSHIFT));
   }
   if (modifiers.count("control") != 0) {
-    keys.insert(VK_LCONTROL);
+    keys.insert(static_cast<UINT>(VK_LCONTROL));
   }
   if (modifiers.count("option") != 0) {
-    keys.insert(VK_LMENU);
+    keys.insert(static_cast<UINT>(VK_LMENU));
   }
   if (modifiers.count("command") != 0) {
-    keys.insert(VK_LWIN);
+    keys.insert(static_cast<UINT>(VK_LWIN));
   }
   return keys;
 }
@@ -638,9 +641,9 @@ bool WindowsHostBridge::HandleText(const std::string& text,
 }
 
 bool WindowsHostBridge::SetSyntheticModifiers(
-    const std::set<WORD>& requested, std::string* error) {
+    const std::set<UINT>& requested, std::string* error) {
   std::vector<INPUT> inputs;
-  for (const WORD modifier : pressed_modifiers_) {
+  for (const UINT modifier : pressed_modifiers_) {
     if (requested.count(modifier) == 0) {
       KeyDescriptor descriptor;
       if (DescriptorForVirtualKey(modifier, &descriptor)) {
@@ -649,7 +652,7 @@ bool WindowsHostBridge::SetSyntheticModifiers(
       }
     }
   }
-  for (const WORD modifier : requested) {
+  for (const UINT modifier : requested) {
     if (pressed_modifiers_.count(modifier) == 0) {
       KeyDescriptor descriptor;
       if (DescriptorForVirtualKey(modifier, &descriptor)) {
@@ -693,7 +696,7 @@ void WindowsHostBridge::ReleaseAllInput() {
     inputs.push_back(ScanCodeInput(key.second.scan_code, key.second.extended,
                                    true));
   }
-  for (const WORD modifier : pressed_modifiers_) {
+  for (const UINT modifier : pressed_modifiers_) {
     KeyDescriptor descriptor;
     if (DescriptorForVirtualKey(modifier, &descriptor)) {
       inputs.push_back(

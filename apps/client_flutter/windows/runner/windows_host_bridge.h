@@ -27,7 +27,7 @@ class WindowsHostBridge {
   void ReleaseAllInput();
 
   struct KeyDescriptor {
-    WORD scan_code = 0;
+    UINT scan_code = 0;
     bool extended = false;
   };
 
@@ -41,14 +41,14 @@ class WindowsHostBridge {
   bool HandleKeyboard(const flutter::EncodableMap& arguments,
                       std::string* error);
   bool HandleText(const std::string& text, std::string* error);
-  bool SetSyntheticModifiers(const std::set<WORD>& requested,
+  bool SetSyntheticModifiers(const std::set<UINT>& requested,
                              std::string* error);
   bool SendInputs(std::vector<INPUT>* inputs, std::string* error);
 
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
   std::set<std::string> pressed_mouse_buttons_;
   std::map<std::string, KeyDescriptor> pressed_keys_;
-  std::set<WORD> pressed_modifiers_;
+  std::set<UINT> pressed_modifiers_;
 };
 
 #endif  // RUNNER_WINDOWS_HOST_BRIDGE_H_
