@@ -12,6 +12,8 @@ final class AppleRemoteImeBridge: NSObject, FlutterStreamHandler {
   private var eventSink: FlutterEventSink?
   private var methodChannel: FlutterMethodChannel?
   private var eventChannel: FlutterEventChannel?
+  private weak var keyboardHostView: UIView?
+  private var keyboardObservers: [NSObjectProtocol] = []
 
   init(binaryMessenger: FlutterBinaryMessenger) {
     super.init()
@@ -73,8 +75,13 @@ final class AppleRemoteImeBridge: NSObject, FlutterStreamHandler {
         self.inputView.immediatePinyinCommit =
           arguments["immediatePinyinCommit"] as? Bool ?? true
         self.inputView.attach(to: hostView)
+        self.startKeyboardTracking(in: hostView)
         self.inputView.cancelComposition()
-        result(self.inputView.becomeFirstResponder())
+        let shown = self.inputView.becomeFirstResponder()
+        DispatchQueue.main.async { [weak self] in
+          self?.emitKeyboardFrame(hidden: !shown)
+        }
+        result(shown)
       case "hide":
         guard self.activeClientId == clientId else {
           result(nil)
@@ -82,6 +89,8 @@ final class AppleRemoteImeBridge: NSObject, FlutterStreamHandler {
         }
         self.inputView.cancelComposition()
         self.inputView.resignFirstResponder()
+        self.emitKeyboardFrame(hidden: true)
+        self.stopKeyboardTracking()
         self.activeClientId = nil
         result(nil)
       case "reset":
@@ -104,6 +113,86 @@ final class AppleRemoteImeBridge: NSObject, FlutterStreamHandler {
     let window = windows.first(where: { $0.isKeyWindow })
       ?? windows.first(where: { !$0.isHidden && $0.windowLevel == .normal })
     return window?.rootViewController?.view
+  }
+
+  private func startKeyboardTracking(in hostView: UIView) {
+    stopKeyboardTracking()
+    keyboardHostView = hostView
+    if #available(iOS 15.0, *) {
+      hostView.keyboardLayoutGuide.followsUndockedKeyboard = true
+    }
+    let center = NotificationCenter.default
+    let names: [NSNotification.Name] = [
+      UIResponder.keyboardWillChangeFrameNotification,
+      UIResponder.keyboardDidChangeFrameNotification,
+      UIResponder.keyboardWillHideNotification,
+      UIResponder.keyboardDidHideNotification,
+    ]
+    keyboardObservers = names.map { name in
+      center.addObserver(
+        forName: name,
+        object: nil,
+        queue: .main
+      ) { [weak self] notification in
+        let hidden = notification.name == UIResponder.keyboardWillHideNotification
+          || notification.name == UIResponder.keyboardDidHideNotification
+        DispatchQueue.main.async {
+          self?.emitKeyboardFrame(hidden: hidden)
+        }
+      }
+    }
+  }
+
+  private func stopKeyboardTracking() {
+    let center = NotificationCenter.default
+    keyboardObservers.forEach { observer in
+      center.removeObserver(observer)
+    }
+    keyboardObservers.removeAll()
+    keyboardHostView = nil
+  }
+
+  private func emitKeyboardFrame(hidden: Bool) {
+    guard let clientId = activeClientId else { return }
+    guard !hidden, let hostView = keyboardHostView else {
+      eventSink?([
+        "clientId": clientId,
+        "type": "keyboardFrame",
+        "visible": false,
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0,
+        "docked": false,
+      ])
+      return
+    }
+    hostView.layoutIfNeeded()
+    let frame: CGRect
+    if #available(iOS 15.0, *) {
+      frame = hostView.keyboardLayoutGuide.layoutFrame
+    } else {
+      frame = .zero
+    }
+    let visible = frame.width > 1 && frame.height > 1
+      && hostView.bounds.intersects(frame)
+    let docked = visible
+      && abs(frame.maxY - hostView.bounds.maxY) <= 2
+      && frame.width >= hostView.bounds.width * 0.9
+    eventSink?([
+      "clientId": clientId,
+      "type": "keyboardFrame",
+      "visible": visible,
+      "x": frame.minX,
+      "y": frame.minY,
+      "width": frame.width,
+      "height": frame.height,
+      "docked": docked,
+    ])
+  }
+
+  deinit {
+    stopKeyboardTracking()
   }
 
   func onListen(

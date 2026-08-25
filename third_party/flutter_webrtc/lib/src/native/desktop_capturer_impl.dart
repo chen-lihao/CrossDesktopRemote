@@ -181,6 +181,7 @@ class DesktopCapturerNative extends DesktopCapturer {
     required String trackId,
     required String sourceId,
     required int frameRate,
+    int? targetLongEdge,
   }) async {
     final response = await WebRTC.invokeMethod(
       'switchDesktopCaptureSource',
@@ -188,10 +189,43 @@ class DesktopCapturerNative extends DesktopCapturer {
         'trackId': trackId,
         'sourceId': sourceId,
         'frameRate': frameRate,
+        if (targetLongEdge != null) 'targetLongEdge': targetLongEdge,
       },
     );
     if (response == null) {
       throw Exception('switchDesktopCaptureSource returned null');
+    }
+    return response['result'] as bool? ?? false;
+  }
+
+  @override
+  Future<bool> updateCaptureFormat({
+    required String trackId,
+    required int frameRate,
+    int? targetLongEdge,
+  }) async {
+    final response = await WebRTC.invokeMethod(
+      'updateDesktopCaptureFormat',
+      <String, dynamic>{
+        'trackId': trackId,
+        'frameRate': frameRate,
+        if (targetLongEdge != null) 'targetLongEdge': targetLongEdge,
+      },
+    );
+    if (response == null) {
+      throw Exception('updateDesktopCaptureFormat returned null');
+    }
+    return response['result'] as bool? ?? false;
+  }
+
+  @override
+  Future<bool> requestKeyFrame() async {
+    final response = await WebRTC.invokeMethod(
+      'requestDesktopCaptureKeyFrame',
+      <String, dynamic>{},
+    );
+    if (response == null) {
+      throw Exception('requestDesktopCaptureKeyFrame returned null');
     }
     return response['result'] as bool? ?? false;
   }

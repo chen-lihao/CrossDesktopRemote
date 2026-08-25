@@ -84,6 +84,7 @@ Future<void> _showRemoteInputSettings(
   BuildContext context, {
   required ValueNotifier<RemoteInputSettings> settings,
   required RemoteSessionController session,
+  ValueChanged<RemoteKeyboardMode>? onKeyboardModeChanged,
 }) {
   return showModalBottomSheet<void>(
     context: context,
@@ -131,6 +132,24 @@ Future<void> _showRemoteInputSettings(
                           settings.value = value.copyWith(dragLock: next);
                         }
                       : null,
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('远程键盘模式'),
+                  subtitle: const Text('快捷键使用小键盘，文字和拼音使用系统键盘'),
+                  trailing: DropdownButton<RemoteKeyboardMode>(
+                    value: value.keyboardMode,
+                    onChanged: (mode) {
+                      if (mode != null) {
+                        settings.value = value.copyWith(keyboardMode: mode);
+                        onKeyboardModeChanged?.call(mode);
+                      }
+                    },
+                    items: [
+                      for (final mode in RemoteKeyboardMode.values)
+                        DropdownMenuItem(value: mode, child: Text(mode.label)),
+                    ],
+                  ),
                 ),
                 const Divider(),
                 ListTile(
@@ -296,6 +315,11 @@ Future<void> _showRemoteDisplayAdjustment(
                         : '${diagnostics.normalization} · '
                               '${diagnostics.normalizationDurationMs!.toStringAsFixed(2)} ms',
                   ),
+                  if (diagnostics.frameGeometry case final geometry?)
+                    _ColorDiagnosticRow(
+                      label: 'SCK ContentRect / Scale',
+                      value: geometry.label,
+                    ),
                   if (diagnostics.rawFrame case final raw?) ...[
                     _ColorDiagnosticRow(
                       label: '① SCK 原始帧',
@@ -431,10 +455,12 @@ class RemoteDesktopPanel extends StatefulWidget {
     super.key,
     required this.session,
     this.initialInputSettings = const RemoteInputSettings(),
+    this.onKeyboardModeChanged,
   });
 
   final RemoteSessionController session;
   final RemoteInputSettings initialInputSettings;
+  final ValueChanged<RemoteKeyboardMode>? onKeyboardModeChanged;
 
   @override
   State<RemoteDesktopPanel> createState() => _RemoteDesktopPanelState();
@@ -472,6 +498,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
           inputSettings: _inputSettings,
           displayAdjustment: _displayAdjustment,
           initialViewFit: _viewFit,
+          onKeyboardModeChanged: widget.onKeyboardModeChanged,
         ),
       ),
     );
@@ -533,6 +560,16 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
     );
   }
 
+  void _showKeyboard(RemoteKeyboardMode mode) {
+    _setKeyboardMode(mode);
+    _surfaceKey.currentState?.showKeyboard(mode);
+  }
+
+  void _setKeyboardMode(RemoteKeyboardMode mode) {
+    _inputSettings.value = _inputSettings.value.copyWith(keyboardMode: mode);
+    widget.onKeyboardModeChanged?.call(mode);
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -556,13 +593,15 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
                     viewFit: _viewFit,
                     onPointerModeChanged: _setPointerMode,
                     onViewFitChanged: _setViewFit,
-                    onKeyboard: () => _surfaceKey.currentState?.showKeyboard(),
+                    keyboardMode: inputSettings.keyboardMode,
+                    onKeyboardModeSelected: _showKeyboard,
                     onHelp: () =>
                         _showGestureHelp(context, inputSettings.pointerMode),
                     onInputSettings: () => _showRemoteInputSettings(
                       context,
                       settings: _inputSettings,
                       session: widget.session,
+                      onKeyboardModeChanged: _setKeyboardMode,
                     ),
                     onDisplayAdjustment: () => _showRemoteDisplayAdjustment(
                       context,
@@ -581,6 +620,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
                           inputSettings: inputSettings,
                           displayAdjustment: _displayAdjustment,
                           viewFit: _viewFit,
+                          onKeyboardModeChanged: _setKeyboardMode,
                           onDragLockChanged: (value) {
                             _inputSettings.value = inputSettings.copyWith(
                               dragLock: value,
@@ -631,12 +671,14 @@ class _FullScreenRemoteDesktopPage extends StatefulWidget {
     required this.inputSettings,
     required this.displayAdjustment,
     required this.initialViewFit,
+    this.onKeyboardModeChanged,
   });
 
   final RemoteSessionController session;
   final ValueNotifier<RemoteInputSettings> inputSettings;
   final RemoteDisplayAdjustmentController displayAdjustment;
   final RemoteViewFit initialViewFit;
+  final ValueChanged<RemoteKeyboardMode>? onKeyboardModeChanged;
 
   @override
   State<_FullScreenRemoteDesktopPage> createState() =>
@@ -690,12 +732,25 @@ class _FullScreenRemoteDesktopPageState
     _showGestureGuideOnce(context, value);
   }
 
+  void _showKeyboard(RemoteKeyboardMode mode) {
+    _setKeyboardMode(mode);
+    _surfaceKey.currentState?.showKeyboard(mode);
+  }
+
+  void _setKeyboardMode(RemoteKeyboardMode mode) {
+    widget.inputSettings.value = widget.inputSettings.value.copyWith(
+      keyboardMode: mode,
+    );
+    widget.onKeyboardModeChanged?.call(mode);
+  }
+
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<RemoteInputSettings>(
       valueListenable: widget.inputSettings,
       builder: (context, inputSettings, _) => Scaffold(
         backgroundColor: Colors.black,
+        resizeToAvoidBottomInset: false,
         body: SafeArea(
           bottom: false,
           child: Column(
@@ -722,13 +777,15 @@ class _FullScreenRemoteDesktopPageState
                       level: AppMessageLevel.success,
                     );
                   },
-                  onKeyboard: () => _surfaceKey.currentState?.showKeyboard(),
+                  keyboardMode: inputSettings.keyboardMode,
+                  onKeyboardModeSelected: _showKeyboard,
                   onHelp: () =>
                       _showGestureHelp(context, inputSettings.pointerMode),
                   onInputSettings: () => _showRemoteInputSettings(
                     context,
                     settings: widget.inputSettings,
                     session: widget.session,
+                    onKeyboardModeChanged: _setKeyboardMode,
                   ),
                   onDisplayAdjustment: () => _showRemoteDisplayAdjustment(
                     context,
@@ -746,6 +803,8 @@ class _FullScreenRemoteDesktopPageState
                   inputSettings: inputSettings,
                   displayAdjustment: widget.displayAdjustment,
                   viewFit: _viewFit,
+                  preserveVideoViewportWhenKeyboardVisible: true,
+                  onKeyboardModeChanged: _setKeyboardMode,
                   onDragLockChanged: (value) {
                     widget.inputSettings.value = inputSettings.copyWith(
                       dragLock: value,
@@ -768,7 +827,8 @@ class _RemoteToolbar extends StatelessWidget {
     required this.viewFit,
     required this.onPointerModeChanged,
     required this.onViewFitChanged,
-    required this.onKeyboard,
+    required this.keyboardMode,
+    required this.onKeyboardModeSelected,
     required this.onHelp,
     required this.onInputSettings,
     required this.onDisplayAdjustment,
@@ -783,7 +843,8 @@ class _RemoteToolbar extends StatelessWidget {
   final RemoteViewFit viewFit;
   final ValueChanged<RemotePointerMode> onPointerModeChanged;
   final ValueChanged<RemoteViewFit> onViewFitChanged;
-  final VoidCallback onKeyboard;
+  final RemoteKeyboardMode keyboardMode;
+  final ValueChanged<RemoteKeyboardMode> onKeyboardModeSelected;
   final VoidCallback onHelp;
   final VoidCallback onInputSettings;
   final VoidCallback onDisplayAdjustment;
@@ -1013,18 +1074,44 @@ class _RemoteToolbar extends StatelessWidget {
                         onPressed: onDisplayAdjustment,
                         icon: const Icon(Icons.tonality_outlined),
                       ),
-                      IconButton(
+                      PopupMenuButton<RemoteKeyboardMode>(
                         tooltip: session.canSendControl
-                            ? '远程键盘'
+                            ? '远程键盘：${keyboardMode.label}'
                             : '远程键盘（等待输入权限）',
-                        onPressed: onKeyboard,
-                        icon: const Icon(Icons.keyboard_outlined),
+                        initialValue: keyboardMode,
+                        onSelected: onKeyboardModeSelected,
+                        itemBuilder: (context) => [
+                          for (final mode in RemoteKeyboardMode.values)
+                            PopupMenuItem(
+                              value: mode,
+                              child: ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(
+                                  mode == RemoteKeyboardMode.compact
+                                      ? Icons.keyboard_command_key
+                                      : Icons.keyboard_outlined,
+                                ),
+                                title: Text(mode.label),
+                                subtitle: Text(
+                                  mode == RemoteKeyboardMode.compact
+                                      ? '快捷键和方向键，不打开输入法'
+                                      : '文字、拼音、符号和表情',
+                                ),
+                              ),
+                            ),
+                        ],
+                        icon: Icon(
+                          keyboardMode == RemoteKeyboardMode.compact
+                              ? Icons.keyboard_command_key
+                              : Icons.keyboard_outlined,
+                        ),
                       ),
                       IconButton(
-                        tooltip: '刷新显示器',
+                        tooltip: '刷新显示器列表',
                         onPressed: () {
                           session.refreshRemoteDisplays();
-                          AppMessenger.show('正在刷新远程显示器');
+                          AppMessenger.show('正在刷新远程显示器列表');
                         },
                         icon: const Icon(Icons.refresh),
                       ),
@@ -1056,14 +1143,18 @@ class _RemoteDesktopSurface extends StatefulWidget {
     required this.inputSettings,
     required this.displayAdjustment,
     required this.viewFit,
+    required this.onKeyboardModeChanged,
     required this.onDragLockChanged,
+    this.preserveVideoViewportWhenKeyboardVisible = false,
   });
 
   final RemoteSessionController session;
   final RemoteInputSettings inputSettings;
   final RemoteDisplayAdjustmentController displayAdjustment;
   final RemoteViewFit viewFit;
+  final ValueChanged<RemoteKeyboardMode> onKeyboardModeChanged;
   final ValueChanged<bool> onDragLockChanged;
+  final bool preserveVideoViewportWhenKeyboardVisible;
 
   @override
   State<_RemoteDesktopSurface> createState() => _RemoteDesktopSurfaceState();
@@ -1071,7 +1162,6 @@ class _RemoteDesktopSurface extends StatefulWidget {
 
 class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     with WidgetsBindingObserver {
-  static const _keyboardDockHeight = 72.0;
   final _hardwareFocus = FocusNode(debugLabel: 'remote-hardware-keyboard');
   final _textFocus = FocusNode(debugLabel: 'remote-soft-keyboard');
   final _textController = TextEditingController();
@@ -1088,12 +1178,22 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       );
   Timer? _longPressTimer;
   Timer? _pointerFlushTimer;
+  Timer? _switchOverlayDelayTimer;
+  Timer? _switchOverlaySlowTimer;
   StreamSubscription<RemoteImeInputEvent>? _imeSubscription;
   late final String _imeClientId;
   final List<String> _imeDiagnostics = [];
   bool _keyboardVisible = false;
   bool _nativeImeFailed = false;
+  bool _switchOverlayVisible = false;
+  bool _switchOverlaySlow = false;
+  bool _lastDisplaySwitchPending = false;
   int _compositionLength = 0;
+  late RemoteKeyboardMode _activeKeyboardMode;
+  Rect _systemKeyboardFrame = Rect.zero;
+  bool _systemKeyboardDocked = false;
+  Offset _compactKeyboardOffset = Offset.zero;
+  final Set<String> _compactModifiers = {};
   RemoteContentTransform? _latestTransform;
   Offset? _lastNormalizedPointer;
 
@@ -1103,6 +1203,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _activeKeyboardMode = widget.inputSettings.keyboardMode;
+    _lastDisplaySwitchPending = session.displaySwitchPending;
+    session.addListener(_handleDisplaySwitchState);
     _imeClientId = 'remote-surface-${identityHashCode(this)}';
     if (Platform.isIOS) {
       _imeSubscription = _nativeIme.events.listen(
@@ -1113,6 +1216,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _updateGestureConfiguration();
     });
+    if (_lastDisplaySwitchPending) {
+      _scheduleDisplaySwitchOverlay();
+    }
   }
 
   @override
@@ -1120,6 +1226,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.inputSettings != widget.inputSettings) {
       _updateGestureConfiguration();
+      if (!_keyboardVisible) {
+        _activeKeyboardMode = widget.inputSettings.keyboardMode;
+      }
     }
   }
 
@@ -1135,32 +1244,137 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     );
   }
 
-  void showKeyboard() {
+  void showKeyboard([RemoteKeyboardMode? mode]) {
     if (!session.canSendControl) {
       session.explainControlUnavailable();
       return;
     }
-    if (!_keyboardVisible) {
-      setState(() => _keyboardVisible = true);
+    final nextMode = mode ?? widget.inputSettings.keyboardMode;
+    if (nextMode == RemoteKeyboardMode.compact) {
+      if (_keyboardVisible &&
+          _activeKeyboardMode == RemoteKeyboardMode.system) {
+        if (Platform.isIOS) {
+          unawaited(_hideNativeIme());
+        } else {
+          _textFocus.unfocus();
+          SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+        }
+      }
+      setState(() {
+        _activeKeyboardMode = nextMode;
+        _keyboardVisible = true;
+        _compositionLength = 0;
+        _systemKeyboardFrame = Rect.zero;
+        _systemKeyboardDocked = false;
+      });
+      _hardwareFocus.requestFocus();
+      AppMessenger.show('快捷小键盘已打开，可拖动并使用常用组合键');
+      return;
     }
+    setState(() {
+      _activeKeyboardMode = nextMode;
+      _keyboardVisible = true;
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(_activateKeyboard());
     });
   }
 
   void _hideKeyboard() {
-    if (Platform.isIOS) {
-      unawaited(_hideNativeIme());
-    } else {
-      _textFocus.unfocus();
-      SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    if (_activeKeyboardMode == RemoteKeyboardMode.system) {
+      if (Platform.isIOS) {
+        unawaited(_hideNativeIme());
+      } else {
+        _textFocus.unfocus();
+        SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+      }
     }
     if (mounted) {
       setState(() {
         _keyboardVisible = false;
         _compositionLength = 0;
+        _systemKeyboardFrame = Rect.zero;
+        _systemKeyboardDocked = false;
+        _compactModifiers.clear();
       });
     }
+  }
+
+  void _handleDisplaySwitchState() {
+    final pending = session.displaySwitchPending;
+    if (pending == _lastDisplaySwitchPending) return;
+    _lastDisplaySwitchPending = pending;
+    if (pending) {
+      _scheduleDisplaySwitchOverlay();
+      return;
+    }
+    _switchOverlayDelayTimer?.cancel();
+    _switchOverlaySlowTimer?.cancel();
+    if (mounted && (_switchOverlayVisible || _switchOverlaySlow)) {
+      setState(() {
+        _switchOverlayVisible = false;
+        _switchOverlaySlow = false;
+      });
+    }
+  }
+
+  void _scheduleDisplaySwitchOverlay() {
+    _switchOverlayDelayTimer?.cancel();
+    _switchOverlaySlowTimer?.cancel();
+    _switchOverlayVisible = false;
+    _switchOverlaySlow = false;
+    _switchOverlayDelayTimer = Timer(const Duration(milliseconds: 120), () {
+      if (!mounted || !session.displaySwitchPending) return;
+      setState(() => _switchOverlayVisible = true);
+    });
+    _switchOverlaySlowTimer = Timer(const Duration(milliseconds: 800), () {
+      if (!mounted || !session.displaySwitchPending) return;
+      setState(() {
+        _switchOverlayVisible = true;
+        _switchOverlaySlow = true;
+      });
+    });
+  }
+
+  void _changeKeyboardMode(RemoteKeyboardMode mode) {
+    widget.onKeyboardModeChanged(mode);
+    showKeyboard(mode);
+  }
+
+  void _toggleCompactModifier(String modifier) {
+    setState(() {
+      if (!_compactModifiers.remove(modifier)) {
+        _compactModifiers.add(modifier);
+      }
+    });
+  }
+
+  void _sendCompactKey(String key, [List<String>? fixedModifiers]) {
+    final modifiers =
+        fixedModifiers ?? _compactModifiers.toList(growable: false);
+    session.sendKey(phase: 'down', key: key, modifiers: modifiers);
+    session.sendKey(phase: 'up', key: key, modifiers: modifiers);
+    unawaited(HapticFeedback.selectionClick());
+  }
+
+  void _moveCompactKeyboard(
+    DragUpdateDetails details,
+    BoxConstraints constraints,
+  ) {
+    final horizontalLimit = (constraints.maxWidth - 120).clamp(0.0, 720.0) / 2;
+    final verticalLimit = (constraints.maxHeight - 100).clamp(0.0, 720.0);
+    setState(() {
+      _compactKeyboardOffset = Offset(
+        (_compactKeyboardOffset.dx + details.delta.dx).clamp(
+          -horizontalLimit,
+          horizontalLimit,
+        ),
+        (_compactKeyboardOffset.dy + details.delta.dy).clamp(
+          -verticalLimit,
+          0.0,
+        ),
+      );
+    });
   }
 
   Future<void> _activateKeyboard({bool announce = true}) async {
@@ -1198,7 +1412,10 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   }
 
   void _handleNativeImeEvent(RemoteImeInputEvent event) {
-    if (!mounted || event.clientId != _imeClientId || !_keyboardVisible) {
+    if (!mounted ||
+        event.clientId != _imeClientId ||
+        !_keyboardVisible ||
+        _activeKeyboardMode != RemoteKeyboardMode.system) {
       return;
     }
     switch (event.type) {
@@ -1222,13 +1439,24 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
           'cjk=${event.containsCjk}',
         );
         if (_imeDiagnostics.length > 30) _imeDiagnostics.removeAt(0);
+      case RemoteImeInputEventType.keyboardFrame:
+        if (_systemKeyboardFrame != event.keyboardFrame ||
+            _systemKeyboardDocked != event.keyboardDocked) {
+          setState(() {
+            _systemKeyboardFrame = event.keyboardVisible
+                ? event.keyboardFrame
+                : Rect.zero;
+            _systemKeyboardDocked =
+                event.keyboardVisible && event.keyboardDocked;
+          });
+        }
     }
   }
 
   void _handleNativeImeError(Object error, [StackTrace? stackTrace]) {
     if (!mounted || _nativeImeFailed) return;
     setState(() => _nativeImeFailed = true);
-    if (_keyboardVisible) {
+    if (_keyboardVisible && _activeKeyboardMode == RemoteKeyboardMode.system) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _activateFlutterKeyboard();
       });
@@ -1253,10 +1481,13 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     WidgetsBinding.instance.removeObserver(this);
     _longPressTimer?.cancel();
     _pointerFlushTimer?.cancel();
+    _switchOverlayDelayTimer?.cancel();
+    _switchOverlaySlowTimer?.cancel();
+    session.removeListener(_handleDisplaySwitchState);
     unawaited(_imeSubscription?.cancel());
     _dispatchGestureActions(_gestures.cancelAll(releaseDragLock: true));
     _flushPointerMotion();
-    if (_keyboardVisible) {
+    if (_keyboardVisible && _activeKeyboardMode == RemoteKeyboardMode.system) {
       if (Platform.isIOS) {
         unawaited(_hideNativeIme());
       } else {
@@ -1286,13 +1517,10 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
           final boxFit = widget.viewFit == RemoteViewFit.contain
               ? BoxFit.contain
               : BoxFit.cover;
-          final safeBottom = MediaQuery.paddingOf(context).bottom;
-          final keyboardExtent = _keyboardVisible
-              ? _keyboardDockHeight + safeBottom + 16
-              : 0.0;
-          final viewportHeight = (constraints.maxHeight - keyboardExtent)
-              .clamp(0.0, constraints.maxHeight)
-              .toDouble();
+          // The remote canvas keeps a stable size while either keyboard floats
+          // above it. Resizing this viewport changes the pointer transform and
+          // makes the remote desktop unreadably small in full-screen mode.
+          final viewportHeight = constraints.maxHeight;
           final transform = RemoteContentTransform.forViewport(
             sourceSize: sourceSize,
             viewportSize: Size(constraints.maxWidth, viewportHeight),
@@ -1365,115 +1593,171 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                       ),
                     ),
                   ),
-                if (_keyboardVisible)
-                  Positioned(
-                    left: 8,
-                    right: 8,
-                    bottom: 8,
-                    child: SafeArea(
-                      top: false,
-                      child: Material(
-                        elevation: 8,
-                        borderRadius: BorderRadius.circular(14),
-                        clipBehavior: Clip.antiAlias,
-                        child: Focus(
-                          onKeyEvent: _handleKeyEvent,
-                          child: Row(
-                            children: [
-                              if (Platform.isIOS && !_nativeImeFailed)
-                                Expanded(
-                                  child: InkWell(
-                                    onTap: () => unawaited(
-                                      _activateKeyboard(announce: false),
-                                    ),
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 14,
-                                        vertical: 10,
-                                      ),
-                                      child: Row(
-                                        children: [
-                                          const Icon(Icons.keyboard_outlined),
-                                          const SizedBox(width: 10),
-                                          Expanded(
-                                            child: Column(
-                                              mainAxisSize: MainAxisSize.min,
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.start,
-                                              children: [
-                                                Text(
-                                                  _compositionLength > 0
-                                                      ? '正在组合输入（$_compositionLength）'
-                                                      : '即时远程键盘',
-                                                ),
-                                                const Text(
-                                                  '提交后立即发送，本机不保留历史文本',
-                                                  maxLines: 1,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                                )
-                              else
-                                Expanded(
-                                  child: TextField(
-                                    focusNode: _textFocus,
-                                    controller: _textController,
-                                    autocorrect: true,
-                                    enableSuggestions: true,
-                                    maxLines: 1,
-                                    textInputAction: TextInputAction.done,
-                                    decoration: const InputDecoration(
-                                      labelText: '兼容输入',
-                                      prefixIcon: Icon(Icons.keyboard_outlined),
-                                    ),
-                                    onTap: _keepTextSelectionAtEnd,
-                                    onChanged: (_) => _textChanged(),
-                                    onSubmitted: (_) {
-                                      _sendSpecialKey('Enter');
-                                      _textFocus.requestFocus();
-                                    },
-                                  ),
-                                ),
-                              IconButton(
-                                tooltip: '本地编辑后发送（兼容）',
-                                onPressed: _showComposedTextDialog,
-                                icon: const Icon(Icons.edit_note),
-                              ),
-                              IconButton(
-                                tooltip: '远程退格',
-                                onPressed: () => _sendSpecialKey('Backspace'),
-                                icon: const Icon(Icons.backspace_outlined),
-                              ),
-                              if (kDebugMode &&
-                                  Platform.isIOS &&
-                                  !_nativeImeFailed)
-                                IconButton(
-                                  tooltip: '输入法诊断',
-                                  onPressed: _showImeDiagnostics,
-                                  icon: const Icon(Icons.bug_report_outlined),
-                                ),
-                              IconButton(
-                                tooltip: '关闭远程键盘',
-                                onPressed: _hideKeyboard,
-                                icon: const Icon(Icons.close),
-                              ),
-                            ],
-                          ),
-                        ),
+                if (_keyboardVisible &&
+                    _activeKeyboardMode == RemoteKeyboardMode.system)
+                  _buildSystemKeyboardBar(context),
+                if (_keyboardVisible &&
+                    _activeKeyboardMode == RemoteKeyboardMode.compact)
+                  Align(
+                    alignment: Alignment.bottomCenter,
+                    child: Transform.translate(
+                      offset: _compactKeyboardOffset,
+                      child: _CompactRemoteKeyboard(
+                        modifiers: _compactModifiers,
+                        onDragUpdate: (details) =>
+                            _moveCompactKeyboard(details, constraints),
+                        onModifierChanged: _toggleCompactModifier,
+                        onKey: _sendCompactKey,
+                        onSystemKeyboard: () =>
+                            _changeKeyboardMode(RemoteKeyboardMode.system),
+                        onClose: _hideKeyboard,
                       ),
                     ),
                   ),
+                Positioned.fill(
+                  child: IgnorePointer(
+                    ignoring: !_switchOverlayVisible,
+                    child: AnimatedOpacity(
+                      opacity: _switchOverlayVisible ? 1 : 0,
+                      duration: const Duration(milliseconds: 120),
+                      curve: Curves.easeOut,
+                      child: _DisplaySwitchOverlay(
+                        displayName: session.displays
+                            .where(
+                              (item) => item.id == session.pendingDisplayId,
+                            )
+                            .firstOrNull
+                            ?.name,
+                        takingLonger: _switchOverlaySlow,
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildSystemKeyboardBar(BuildContext context) {
+    final reportedInset = _systemKeyboardDocked
+        ? _systemKeyboardFrame.height
+        : 0.0;
+    final mediaInset = MediaQuery.viewInsetsOf(context).bottom;
+    final bottomInset = widget.preserveVideoViewportWhenKeyboardVisible
+        ? (reportedInset > mediaInset ? reportedInset : mediaInset)
+        : 0.0;
+    final floating =
+        _systemKeyboardFrame != Rect.zero &&
+        !_systemKeyboardDocked &&
+        widget.preserveVideoViewportWhenKeyboardVisible;
+    return Positioned(
+      left: 8,
+      right: 8,
+      top: floating ? 8 : null,
+      bottom: floating ? null : bottomInset + 8,
+      child: SafeArea(
+        top: floating,
+        bottom: !floating && bottomInset == 0,
+        child: Material(
+          elevation: 8,
+          borderRadius: BorderRadius.circular(14),
+          clipBehavior: Clip.antiAlias,
+          child: Focus(
+            onKeyEvent: _handleKeyEvent,
+            child: Row(
+              children: [
+                if (Platform.isIOS && !_nativeImeFailed)
+                  Expanded(
+                    child: InkWell(
+                      onTap: () =>
+                          unawaited(_activateKeyboard(announce: false)),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 10,
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.keyboard_outlined),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _compositionLength > 0
+                                        ? '正在组合输入（$_compositionLength）'
+                                        : '即时远程键盘',
+                                  ),
+                                  const Text(
+                                    '画面保持原尺寸；提交后立即发送',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                else
+                  Expanded(
+                    child: TextField(
+                      focusNode: _textFocus,
+                      controller: _textController,
+                      autocorrect: true,
+                      enableSuggestions: true,
+                      maxLines: 1,
+                      textInputAction: TextInputAction.done,
+                      decoration: const InputDecoration(
+                        labelText: '兼容输入',
+                        prefixIcon: Icon(Icons.keyboard_outlined),
+                      ),
+                      onTap: _keepTextSelectionAtEnd,
+                      onChanged: (_) => _textChanged(),
+                      onSubmitted: (_) {
+                        _sendSpecialKey('Enter');
+                        _textFocus.requestFocus();
+                      },
+                    ),
+                  ),
+                IconButton(
+                  tooltip: '快捷小键盘',
+                  onPressed: () =>
+                      _changeKeyboardMode(RemoteKeyboardMode.compact),
+                  icon: const Icon(Icons.keyboard_command_key),
+                ),
+                IconButton(
+                  tooltip: '本地编辑后发送（兼容）',
+                  onPressed: _showComposedTextDialog,
+                  icon: const Icon(Icons.edit_note),
+                ),
+                IconButton(
+                  tooltip: '远程退格',
+                  onPressed: () => _sendSpecialKey('Backspace'),
+                  icon: const Icon(Icons.backspace_outlined),
+                ),
+                if (kDebugMode && Platform.isIOS && !_nativeImeFailed)
+                  IconButton(
+                    tooltip: '输入法诊断',
+                    onPressed: _showImeDiagnostics,
+                    icon: const Icon(Icons.bug_report_outlined),
+                  ),
+                IconButton(
+                  tooltip: '关闭远程键盘',
+                  onPressed: _hideKeyboard,
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1857,7 +2141,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         level: AppMessageLevel.success,
       );
     }
-    if (_keyboardVisible) {
+    if (_keyboardVisible && _activeKeyboardMode == RemoteKeyboardMode.system) {
       await _activateKeyboard(announce: false);
     }
   }
@@ -1940,6 +2224,270 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       LogicalKeyboardKey.slash: 'Slash',
       LogicalKeyboardKey.backquote: 'Backquote',
     }[key];
+  }
+}
+
+class _DisplaySwitchOverlay extends StatelessWidget {
+  const _DisplaySwitchOverlay({
+    required this.displayName,
+    required this.takingLonger,
+  });
+
+  final String? displayName;
+  final bool takingLonger;
+
+  @override
+  Widget build(BuildContext context) {
+    final target = displayName?.trim();
+    return ColoredBox(
+      color: Colors.black.withValues(alpha: 0.78),
+      child: Center(
+        child: Semantics(
+          liveRegion: true,
+          label: takingLonger ? '等待目标显示器画面' : '正在切换显示器',
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (takingLonger)
+                const SizedBox.square(
+                  dimension: 30,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: Colors.white,
+                  ),
+                )
+              else
+                const Icon(
+                  Icons.screenshot_monitor_outlined,
+                  color: Colors.white,
+                  size: 34,
+                ),
+              const SizedBox(height: 14),
+              Text(
+                target == null || target.isEmpty
+                    ? '正在切换远程显示器'
+                    : '正在切换到 $target',
+                style: Theme.of(context).textTheme.titleMedium
+                    ?.copyWith(color: Colors.white),
+              ),
+              if (takingLonger) ...[
+                const SizedBox(height: 6),
+                const Text(
+                  '等待目标画面解码完成…',
+                  style: TextStyle(color: Colors.white70),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CompactRemoteKeyboard extends StatelessWidget {
+  const _CompactRemoteKeyboard({
+    required this.modifiers,
+    required this.onDragUpdate,
+    required this.onModifierChanged,
+    required this.onKey,
+    required this.onSystemKeyboard,
+    required this.onClose,
+  });
+
+  final Set<String> modifiers;
+  final GestureDragUpdateCallback onDragUpdate;
+  final ValueChanged<String> onModifierChanged;
+  final void Function(String key, List<String>? modifiers) onKey;
+  final VoidCallback onSystemKeyboard;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      minimum: const EdgeInsets.all(10),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: Material(
+          elevation: 14,
+          color: Theme.of(context).colorScheme.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(18),
+          clipBehavior: Clip.antiAlias,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onPanUpdate: onDragUpdate,
+                  child: Row(
+                    children: [
+                      const Icon(Icons.drag_indicator, size: 20),
+                      const SizedBox(width: 6),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text('快捷小键盘'),
+                            Text(
+                              '可拖动；文字和拼音请切换系统键盘',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        tooltip: '系统完整键盘',
+                        onPressed: onSystemKeyboard,
+                        icon: const Icon(Icons.keyboard_outlined),
+                      ),
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        tooltip: '关闭快捷小键盘',
+                        onPressed: onClose,
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 10),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  alignment: WrapAlignment.center,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    for (final item in const [
+                      ('command', '⌘'),
+                      ('control', 'Ctrl'),
+                      ('option', 'Option'),
+                      ('shift', '⇧'),
+                    ])
+                      FilterChip(
+                        label: Text(item.$2),
+                        selected: modifiers.contains(item.$1),
+                        onSelected: (_) => onModifierChanged(item.$1),
+                      ),
+                    _CompactKeyButton(
+                      label: 'Esc',
+                      onPressed: () => onKey('Escape', null),
+                    ),
+                    _CompactKeyButton(
+                      label: 'Tab',
+                      onPressed: () => onKey('Tab', null),
+                    ),
+                    _CompactKeyButton(
+                      label: 'Enter',
+                      onPressed: () => onKey('Enter', null),
+                    ),
+                    _CompactKeyButton(
+                      icon: Icons.backspace_outlined,
+                      tooltip: '退格',
+                      onPressed: () => onKey('Backspace', null),
+                    ),
+                    _CompactKeyButton(
+                      label: 'Del',
+                      onPressed: () => onKey('Delete', null),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    _CompactKeyButton(
+                      icon: Icons.arrow_back,
+                      tooltip: '向左',
+                      onPressed: () => onKey('ArrowLeft', null),
+                    ),
+                    _CompactKeyButton(
+                      icon: Icons.arrow_upward,
+                      tooltip: '向上',
+                      onPressed: () => onKey('ArrowUp', null),
+                    ),
+                    _CompactKeyButton(
+                      icon: Icons.arrow_downward,
+                      tooltip: '向下',
+                      onPressed: () => onKey('ArrowDown', null),
+                    ),
+                    _CompactKeyButton(
+                      icon: Icons.arrow_forward,
+                      tooltip: '向右',
+                      onPressed: () => onKey('ArrowRight', null),
+                    ),
+                    _CompactKeyButton(
+                      label: '⌘A',
+                      tooltip: '全选',
+                      onPressed: () => onKey('KeyA', const ['command']),
+                    ),
+                    _CompactKeyButton(
+                      label: '⌘C',
+                      tooltip: '复制',
+                      onPressed: () => onKey('KeyC', const ['command']),
+                    ),
+                    _CompactKeyButton(
+                      label: '⌘V',
+                      tooltip: '粘贴',
+                      onPressed: () => onKey('KeyV', const ['command']),
+                    ),
+                    _CompactKeyButton(
+                      label: '⌘X',
+                      tooltip: '剪切',
+                      onPressed: () => onKey('KeyX', const ['command']),
+                    ),
+                    _CompactKeyButton(
+                      label: '⌘Z',
+                      tooltip: '撤销',
+                      onPressed: () => onKey('KeyZ', const ['command']),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CompactKeyButton extends StatelessWidget {
+  const _CompactKeyButton({
+    required this.onPressed,
+    this.label,
+    this.icon,
+    this.tooltip,
+  }) : assert(label != null || icon != null);
+
+  final VoidCallback onPressed;
+  final String? label;
+  final IconData? icon;
+  final String? tooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    final button = icon == null
+        ? FilledButton.tonal(
+            onPressed: onPressed,
+            style: FilledButton.styleFrom(
+              minimumSize: const Size(48, 42),
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              visualDensity: VisualDensity.compact,
+            ),
+            child: Text(label!),
+          )
+        : IconButton.filledTonal(
+            onPressed: onPressed,
+            visualDensity: VisualDensity.compact,
+            icon: Icon(icon, size: 20),
+          );
+    return tooltip == null ? button : Tooltip(message: tooltip!, child: button);
   }
 }
 

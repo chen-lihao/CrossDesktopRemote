@@ -1,6 +1,7 @@
 #import "FlutterWebRTCPlugin.h"
 #import "AudioUtils.h"
 #import "CameraUtils.h"
+#import "CrossDesktopVideoKeyFrame.h"
 
 #import "FlutterRTCDataChannel.h"
 #import "FlutterDataPacketCryptor.h"
@@ -39,6 +40,14 @@
 @interface VideoEncoderFactory : RTCDefaultVideoEncoderFactory
 @end
 
+#if TARGET_OS_OSX
+@interface CDRKeyFrameVideoEncoder : NSObject <RTCVideoEncoder>
+
+- (instancetype)initWithEncoder:(id<RTCVideoEncoder>)encoder;
+
+@end
+#endif
+
 @interface VideoDecoderFactory : RTCDefaultVideoDecoderFactory
 @end
 
@@ -76,24 +85,138 @@ NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *>* motifyH264ProfileLevelId(
   return newCodecs;
 }
 
+static NSArray<RTCVideoCodecInfo *> *CDRPreferAppleHardwareH264(
+    NSArray<RTCVideoCodecInfo *> *codecs) {
+#if TARGET_OS_OSX
+  NSMutableArray<RTCVideoCodecInfo *> *ordered = [NSMutableArray arrayWithCapacity:codecs.count];
+  for (RTCVideoCodecInfo *codec in codecs) {
+    if ([codec.name isEqualToString:kRTCVideoCodecH264Name]) {
+      [ordered addObject:codec];
+    }
+  }
+  for (RTCVideoCodecInfo *codec in codecs) {
+    if (![codec.name isEqualToString:kRTCVideoCodecH264Name]) {
+      [ordered addObject:codec];
+    }
+  }
+  return ordered;
+#else
+  return codecs;
+#endif
+}
+
 @implementation VideoEncoderFactory
 - (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *>*)supportedCodecs {
   NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo)*>* codecs = [super supportedCodecs];
-  return motifyH264ProfileLevelId(codecs);
+  return CDRPreferAppleHardwareH264(motifyH264ProfileLevelId(codecs));
+}
+
+- (nullable id<RTCVideoEncoder>)createEncoder:(RTCVideoCodecInfo *)info {
+  id<RTCVideoEncoder> encoder = [super createEncoder:info];
+#if TARGET_OS_OSX
+  if (encoder != nil) {
+    return [[CDRKeyFrameVideoEncoder alloc] initWithEncoder:encoder];
+  }
+#endif
+  return encoder;
 }
 @end
+
+#if TARGET_OS_OSX
+@implementation CDRKeyFrameVideoEncoder {
+  id<RTCVideoEncoder> _encoder;
+  NSUInteger _consumedKeyFrameGeneration;
+}
+
+- (instancetype)initWithEncoder:(id<RTCVideoEncoder>)encoder {
+  self = [super init];
+  if (self) {
+    _encoder = encoder;
+    // A replacement encoder created after a request must still emit a clean
+    // reference frame. Replaying the latest generation is harmless because a
+    // new encoder starts with no usable inter-frame reference state anyway.
+    _consumedKeyFrameGeneration = 0;
+  }
+  return self;
+}
+
+- (void)setCallback:(RTCVideoEncoderCallback)callback {
+  [_encoder setCallback:callback];
+}
+
+- (NSInteger)startEncodeWithSettings:(RTCVideoEncoderSettings *)settings
+                       numberOfCores:(int)numberOfCores {
+  return [_encoder startEncodeWithSettings:settings numberOfCores:numberOfCores];
+}
+
+- (NSInteger)releaseEncoder {
+  return [_encoder releaseEncoder];
+}
+
+- (NSInteger)encode:(RTCVideoFrame *)frame
+    codecSpecificInfo:(nullable id<RTCCodecSpecificInfo>)info
+           frameTypes:(NSArray<NSNumber *> *)frameTypes {
+  const NSUInteger requestedGeneration = CDRDesktopVideoKeyFrameGeneration();
+  const BOOL forceKeyFrame = requestedGeneration > _consumedKeyFrameGeneration;
+  NSArray<NSNumber *> *effectiveFrameTypes = frameTypes;
+  if (forceKeyFrame) {
+    const NSUInteger layerCount = MAX((NSUInteger)1, frameTypes.count);
+    NSMutableArray<NSNumber *> *keyFrameTypes =
+        [NSMutableArray arrayWithCapacity:layerCount];
+    for (NSUInteger index = 0; index < layerCount; index += 1) {
+      [keyFrameTypes addObject:@(RTCFrameTypeVideoFrameKey)];
+    }
+    effectiveFrameTypes = keyFrameTypes;
+  }
+  const NSInteger result = [_encoder encode:frame
+                           codecSpecificInfo:info
+                                  frameTypes:effectiveFrameTypes];
+  if (forceKeyFrame && result == 0) {
+    _consumedKeyFrameGeneration = requestedGeneration;
+    NSLog(@"CrossDesktopRemote requested encoder key frame for generation %lu",
+          (unsigned long)requestedGeneration);
+  }
+  return result;
+}
+
+- (int)setBitrate:(uint32_t)bitrateKbit framerate:(uint32_t)framerate {
+  return [_encoder setBitrate:bitrateKbit framerate:framerate];
+}
+
+- (NSString *)implementationName {
+  return [_encoder implementationName];
+}
+
+- (nullable RTCVideoEncoderQpThresholds *)scalingSettings {
+  return [_encoder scalingSettings];
+}
+
+- (NSInteger)resolutionAlignment {
+  return [_encoder resolutionAlignment];
+}
+
+- (BOOL)applyAlignmentToAllSimulcastLayers {
+  return [_encoder applyAlignmentToAllSimulcastLayers];
+}
+
+- (BOOL)supportsNativeHandle {
+  return [_encoder supportsNativeHandle];
+}
+
+@end
+#endif
 
 @implementation VideoDecoderFactory
 - (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *>*)supportedCodecs {
   NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo)*>* codecs = [super supportedCodecs];
-  return motifyH264ProfileLevelId(codecs);
+  return CDRPreferAppleHardwareH264(motifyH264ProfileLevelId(codecs));
 }
 @end
 
 @implementation VideoEncoderFactorySimulcast
 - (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *>*)supportedCodecs {
   NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo)*>* codecs = [super supportedCodecs];
-  return motifyH264ProfileLevelId(codecs);
+  return CDRPreferAppleHardwareH264(motifyH264ProfileLevelId(codecs));
 }
 @end
 
@@ -488,6 +611,16 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
   } else if ([@"switchDesktopCaptureSource" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     [self switchDesktopCaptureSource:argsMap result:result];
+  } else if ([@"updateDesktopCaptureFormat" isEqualToString:call.method]) {
+    NSDictionary* argsMap = call.arguments;
+    [self updateDesktopCaptureFormat:argsMap result:result];
+  } else if ([@"requestDesktopCaptureKeyFrame" isEqualToString:call.method]) {
+#if TARGET_OS_OSX
+    const NSUInteger generation = CDRRequestDesktopVideoKeyFrame();
+    result(@{@"result" : @YES, @"generation" : @(generation)});
+#else
+    result(@{@"result" : @NO, @"reason" : @"unsupported platform"});
+#endif
   } else if ([@"requestCapturePermission" isEqualToString:call.method]) {
 #if TARGET_OS_OSX || TARGET_OS_MACCATALYST
     if (@available(macOS 10.15, macCatalyst 13.1, *)) {

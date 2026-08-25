@@ -101,6 +101,7 @@ NSArray<RTCDesktopSource*>* _captureSources;
   NSString* sourceId = nil;
   BOOL useDefaultScreen = NO;
   NSInteger fps = 30;
+  NSInteger targetLongEdge = 0;
   id videoConstraints = constraints[@"video"];
   if ([videoConstraints isKindOfClass:[NSNumber class]] && [videoConstraints boolValue] == YES) {
     useDefaultScreen = YES;
@@ -123,6 +124,11 @@ NSArray<RTCDesktopSource*>* _captureSources;
       id frameRate = mandatory[@"frameRate"];
       if (frameRate != nil && [frameRate isKindOfClass:[NSNumber class]]) {
         fps = [frameRate integerValue];
+      }
+      id requestedLongEdge = mandatory[@"targetLongEdge"];
+      if (requestedLongEdge != nil &&
+          [requestedLongEdge isKindOfClass:[NSNumber class]]) {
+        targetLongEdge = MAX((NSInteger)0, [requestedLongEdge integerValue]);
       }
     }
   }
@@ -156,6 +162,7 @@ NSArray<RTCDesktopSource*>* _captureSources;
           [[FlutterScreenCaptureKitCapturer alloc] initWithDelegate:videoProcessingAdapter];
       [screenCaptureKitCapturer startCaptureWithFPS:fps
                                            sourceId:sourceId
+                                     targetLongEdge:targetLongEdge
                                           onStarted:^(NSError * _Nullable error) {
                                             if (error != nil) {
                                               NSLog(@"ScreenCaptureKit start failed: %@", error);
@@ -225,6 +232,7 @@ NSArray<RTCDesktopSource*>* _captureSources;
   NSString *trackId = argsMap[@"trackId"];
   NSString *sourceId = argsMap[@"sourceId"];
   NSNumber *frameRate = argsMap[@"frameRate"];
+  NSNumber *targetLongEdge = argsMap[@"targetLongEdge"];
   if (trackId.length == 0 || sourceId.length == 0) {
     result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
                                message:@"trackId and sourceId are required"
@@ -239,6 +247,7 @@ NSArray<RTCDesktopSource*>* _captureSources;
   NSInteger fps = MAX((NSInteger)1, frameRate.integerValue ?: 30);
   [capturer switchCaptureToSourceId:sourceId
                                 fps:fps
+                     targetLongEdge:MAX((NSInteger)0, targetLongEdge.integerValue)
                        onCompletion:^(NSError * _Nullable error) {
                          dispatch_async(dispatch_get_main_queue(), ^{
                            if (error != nil) {
@@ -250,6 +259,41 @@ NSArray<RTCDesktopSource*>* _captureSources;
                            }
                          });
                        }];
+#else
+  result(@{@"result" : @NO, @"reason" : @"unsupported platform"});
+#endif
+}
+
+- (void)updateDesktopCaptureFormat:(NSDictionary*)argsMap result:(FlutterResult)result {
+#if TARGET_OS_OSX
+  NSString *trackId = argsMap[@"trackId"];
+  NSNumber *frameRate = argsMap[@"frameRate"];
+  NSNumber *targetLongEdge = argsMap[@"targetLongEdge"];
+  if (trackId.length == 0) {
+    result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                               message:@"trackId is required"
+                               details:nil]);
+    return;
+  }
+  FlutterScreenCaptureKitCapturer *capturer = self.screenCaptureKitCapturers[trackId];
+  if (capturer == nil) {
+    result(@{@"result" : @NO, @"reason" : @"running capturer cannot reconfigure"});
+    return;
+  }
+  const NSInteger fps = MAX((NSInteger)1, frameRate.integerValue ?: 30);
+  [capturer updateCaptureWithFPS:fps
+                  targetLongEdge:MAX((NSInteger)0, targetLongEdge.integerValue)
+                    onCompletion:^(NSError * _Nullable error) {
+                      dispatch_async(dispatch_get_main_queue(), ^{
+                        if (error != nil) {
+                          result([FlutterError errorWithCode:@"CAPTURE_FORMAT_FAILED"
+                                                     message:error.localizedDescription
+                                                     details:nil]);
+                        } else {
+                          result(@{@"result" : @YES});
+                        }
+                      });
+                    }];
 #else
   result(@{@"result" : @NO, @"reason" : @"unsupported platform"});
 #endif

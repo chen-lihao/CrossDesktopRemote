@@ -3,7 +3,13 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-enum RemoteImeInputEventType { composition, commit, key, diagnostic }
+enum RemoteImeInputEventType {
+  composition,
+  commit,
+  key,
+  diagnostic,
+  keyboardFrame,
+}
 
 @immutable
 class RemoteImeInputEvent {
@@ -16,6 +22,9 @@ class RemoteImeInputEvent {
     this.diagnosticName = '',
     this.markedLength = 0,
     this.containsCjk = false,
+    this.keyboardFrame = Rect.zero,
+    this.keyboardVisible = false,
+    this.keyboardDocked = false,
   });
 
   final String clientId;
@@ -26,6 +35,9 @@ class RemoteImeInputEvent {
   final String diagnosticName;
   final int markedLength;
   final bool containsCjk;
+  final Rect keyboardFrame;
+  final bool keyboardVisible;
+  final bool keyboardDocked;
 
   static RemoteImeInputEvent? tryParse(Object? value) {
     if (value is! Map<Object?, Object?>) return null;
@@ -37,6 +49,7 @@ class RemoteImeInputEvent {
       'commit' => RemoteImeInputEventType.commit,
       'key' => RemoteImeInputEventType.key,
       'diagnostic' => RemoteImeInputEventType.diagnostic,
+      'keyboardFrame' => RemoteImeInputEventType.keyboardFrame,
       _ => null,
     };
     if (parsedType == null) return null;
@@ -49,6 +62,14 @@ class RemoteImeInputEvent {
       diagnosticName: value['name'] is String ? value['name']! as String : '',
       markedLength: (value['markedLength'] as num?)?.toInt() ?? 0,
       containsCjk: value['containsCjk'] == true,
+      keyboardFrame: Rect.fromLTWH(
+        (value['x'] as num?)?.toDouble() ?? 0,
+        (value['y'] as num?)?.toDouble() ?? 0,
+        (value['width'] as num?)?.toDouble() ?? 0,
+        (value['height'] as num?)?.toDouble() ?? 0,
+      ),
+      keyboardVisible: value['visible'] == true,
+      keyboardDocked: value['docked'] == true,
     );
   }
 }

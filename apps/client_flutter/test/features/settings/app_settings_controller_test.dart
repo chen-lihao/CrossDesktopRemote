@@ -1,4 +1,5 @@
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -11,11 +12,14 @@ void main() {
       await controller.load();
       await controller.setDefaultQuality(RemoteQualityProfile.ultra);
       await controller.setPointerSensitivity(9);
+      await controller.setKeyboardMode(RemoteKeyboardMode.compact);
       await controller.setSessionHistoryLimit(1);
 
       expect(controller.loaded, isTrue);
       expect(controller.defaultQuality, RemoteQualityProfile.ultra);
       expect(controller.pointerSensitivity, 2.5);
+      expect(controller.keyboardMode, RemoteKeyboardMode.compact);
+      expect(controller.inputSettings.keyboardMode, RemoteKeyboardMode.compact);
       expect(controller.sessionHistoryLimit, 10);
     },
   );

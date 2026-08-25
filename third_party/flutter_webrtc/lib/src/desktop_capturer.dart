@@ -75,5 +75,19 @@ abstract class DesktopCapturer {
     required String trackId,
     required String sourceId,
     required int frameRate,
+    int? targetLongEdge,
   });
+
+  /// Reconfigures the running desktop capturer without replacing its track.
+  Future<bool> updateCaptureFormat({
+    required String trackId,
+    required int frameRate,
+    int? targetLongEdge,
+  });
+
+  /// Requests that the next desktop video frame be encoded as a key frame.
+  ///
+  /// This is used after an in-place display switch so the decoder never
+  /// references pixels from the previously selected screen.
+  Future<bool> requestKeyFrame();
 }

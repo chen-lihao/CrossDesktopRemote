@@ -144,7 +144,12 @@ class _SessionsPageState extends State<SessionsPage> {
         ('抖动缓冲', '${media!.jitterBufferMsPerFrame!.toStringAsFixed(1)} ms'),
       if (media?.networkRoundTripMs != null)
         ('网络 RTT', '${media!.networkRoundTripMs!.toStringAsFixed(0)} ms'),
+      if (media?.bitrateMbps != null)
+        ('实际码率', '${media!.bitrateMbps!.toStringAsFixed(1)} Mbps'),
+      if (media?.packetLossPercent != null)
+        ('区间丢包', '${media!.packetLossPercent!.toStringAsFixed(2)}%'),
       if (media?.packetsLost != null) ('累计丢包', '${media!.packetsLost}'),
+      if (media?.codec != null) ('编解码', media!.codec!),
       if (duration != null) ('时长', _formatDuration(duration)),
     ];
     return Card(
@@ -229,7 +234,17 @@ class _SessionsPageState extends State<SessionsPage> {
       '解码耗时: ${media?.decodeMsPerFrame?.toStringAsFixed(1) ?? 'Unknown'} ms/frame',
       '抖动缓冲: ${media?.jitterBufferMsPerFrame?.toStringAsFixed(1) ?? 'Unknown'} ms/frame',
       '网络 RTT: ${media?.networkRoundTripMs?.toStringAsFixed(0) ?? 'Unknown'} ms',
+      '实际码率: ${media?.bitrateMbps?.toStringAsFixed(2) ?? 'Unknown'} Mbps',
+      '可用发送带宽: ${media?.availableOutgoingBitrateMbps?.toStringAsFixed(2) ?? 'Unknown'} Mbps',
+      '区间丢包: ${media?.packetLossPercent?.toStringAsFixed(2) ?? 'Unknown'}%',
       '累计丢包: ${media?.packetsLost ?? 'Unknown'}',
+      '区间丢帧: ${media?.framesDroppedDelta ?? 'Unknown'}',
+      '区间冻结: ${media?.freezeCountDelta ?? 'Unknown'}',
+      '关键帧 encoded/decoded: ${media?.keyFramesEncoded ?? 'Unknown'}/${media?.keyFramesDecoded ?? 'Unknown'}',
+      '区间 NACK/PLI/FIR: ${media?.nackCountDelta ?? 'Unknown'}/${media?.pliCountDelta ?? 'Unknown'}/${media?.firCountDelta ?? 'Unknown'}',
+      'Codec: ${media?.codec ?? 'Unknown'}',
+      'Encoder: ${media?.encoderImplementation ?? 'Unknown'}',
+      'Decoder: ${media?.decoderImplementation ?? 'Unknown'}',
       '质量限制: ${media?.qualityLimitationReason ?? 'Unknown'}',
     ].join('\n');
     await Clipboard.setData(ClipboardData(text: text));

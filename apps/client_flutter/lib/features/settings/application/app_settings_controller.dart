@@ -10,6 +10,7 @@ class AppSettingsController extends ChangeNotifier {
   static const _pointerModeKey = 'settings.pointer_mode';
   static const _pointerSensitivityKey = 'settings.pointer_sensitivity';
   static const _scrollSensitivityKey = 'settings.scroll_sensitivity';
+  static const _keyboardModeKey = 'settings.keyboard_mode';
   static const _lanDiscoveryKey = 'settings.lan_discovery';
   static const _historyEnabledKey = 'settings.session_history_enabled';
   static const _historyLimitKey = 'settings.session_history_limit';
@@ -31,6 +32,7 @@ class AppSettingsController extends ChangeNotifier {
   RemotePointerMode pointerMode = RemotePointerMode.touchpad;
   double pointerSensitivity = 1.25;
   double scrollSensitivity = 2;
+  RemoteKeyboardMode keyboardMode = RemoteKeyboardMode.system;
   bool lanDiscoveryEnabled = true;
   bool sessionHistoryEnabled = true;
   int sessionHistoryLimit = 50;
@@ -41,6 +43,7 @@ class AppSettingsController extends ChangeNotifier {
     pointerMode: pointerMode,
     pointerSensitivity: pointerSensitivity,
     scrollSensitivity: scrollSensitivity,
+    keyboardMode: keyboardMode,
   );
 
   Future<void> load() async {
@@ -60,6 +63,11 @@ class AppSettingsController extends ChangeNotifier {
     );
     pointerSensitivity = await store.getDouble(_pointerSensitivityKey) ?? 1.25;
     scrollSensitivity = await store.getDouble(_scrollSensitivityKey) ?? 2;
+    final storedKeyboardMode = await store.getString(_keyboardModeKey);
+    keyboardMode = RemoteKeyboardMode.values.firstWhere(
+      (value) => value.name == (storedKeyboardMode ?? keyboardMode.name),
+      orElse: () => RemoteKeyboardMode.system,
+    );
     lanDiscoveryEnabled = await store.getBool(_lanDiscoveryKey) ?? true;
     sessionHistoryEnabled = await store.getBool(_historyEnabledKey) ?? true;
     sessionHistoryLimit = (await store.getInt(_historyLimitKey) ?? 50).clamp(
@@ -99,6 +107,13 @@ class AppSettingsController extends ChangeNotifier {
     await _persist(
       (store) => store.setDouble(_scrollSensitivityKey, scrollSensitivity),
     );
+  }
+
+  Future<void> setKeyboardMode(RemoteKeyboardMode value) async {
+    if (keyboardMode == value) return;
+    keyboardMode = value;
+    notifyListeners();
+    await _persist((store) => store.setString(_keyboardModeKey, value.name));
   }
 
   Future<void> setLanDiscoveryEnabled(bool value) async {

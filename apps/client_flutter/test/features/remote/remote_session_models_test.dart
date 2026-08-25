@@ -56,7 +56,7 @@ void main() {
     expect(RemoteQualityProfile.automatic.scaleFor(sidecar), 1);
     expect(RemoteQualityProfile.high.scaleFor(sidecar), 1);
     expect(RemoteQualityProfile.ultra.scaleFor(sidecar), 1);
-    expect(RemoteQualityProfile.automatic.maxFramerate, 60);
+    expect(RemoteQualityProfile.automatic.maxFramerate, 30);
     expect(RemoteQualityProfile.ultra.maxFramerate, 30);
   });
 

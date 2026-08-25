@@ -5,6 +5,9 @@
 #import <CoreMedia/CoreMedia.h>
 #import <Metal/Metal.h>
 #import <math.h>
+#import <string.h>
+
+#import "VideoProcessingAdapter.h"
 
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
@@ -24,6 +27,13 @@
 @property(nonatomic, assign) CVPixelBufferPoolRef normalizationPool;
 @property(nonatomic, assign) size_t normalizationPoolWidth;
 @property(nonatomic, assign) size_t normalizationPoolHeight;
+@property(nonatomic, assign) BOOL suppressingFramesForSwitch;
+@property(nonatomic, assign) BOOL awaitingStableSwitchFrames;
+@property(nonatomic, assign) NSUInteger stableSwitchFrameCount;
+@property(nonatomic, assign) NSUInteger freshCanvasFrameCount;
+@property(nonatomic, assign) NSUInteger captureGeneration;
+@property(nonatomic, assign) size_t expectedFrameWidth;
+@property(nonatomic, assign) size_t expectedFrameHeight;
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
 @property(nonatomic, strong) SCStream *stream API_AVAILABLE(macos(12.3));
 #endif
@@ -67,6 +77,106 @@ static NSInteger CDREvenPixelDimension(CGFloat value) {
   NSInteger rounded = MAX((NSInteger)2, (NSInteger)llround(value));
   return rounded - (rounded % 2);
 }
+
+static CGColorRef CDRBlackBackgroundColor(void) {
+  static CGColorRef color = NULL;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    color = CGColorCreateGenericRGB(0, 0, 0, 1);
+  });
+  return color;
+}
+
+static void CDRFillVideoRangeBlack(CVPixelBufferRef pixelBuffer) {
+  if (pixelBuffer == NULL ||
+      CVPixelBufferGetPixelFormatType(pixelBuffer) !=
+          kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+      CVPixelBufferLockBaseAddress(pixelBuffer, 0) != kCVReturnSuccess) {
+    return;
+  }
+  const size_t planeCount = CVPixelBufferGetPlaneCount(pixelBuffer);
+  if (planeCount >= 2) {
+    uint8_t *luma = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
+    const size_t lumaStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
+    const size_t lumaHeight = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0);
+    for (size_t row = 0; row < lumaHeight; row += 1) {
+      memset(luma + row * lumaStride, 16, lumaStride);
+    }
+    uint8_t *chroma = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1);
+    const size_t chromaStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1);
+    const size_t chromaHeight = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1);
+    for (size_t row = 0; row < chromaHeight; row += 1) {
+      memset(chroma + row * chromaStride, 128, chromaStride);
+    }
+  }
+  CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+}
+
+#if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
+static NSDictionary<SCStreamFrameInfo, id> *CDRFrameAttachments(
+    CMSampleBufferRef sampleBuffer) API_AVAILABLE(macos(12.3)) {
+  CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(
+      sampleBuffer, false);
+  if (attachmentsArray == NULL || CFArrayGetCount(attachmentsArray) == 0) {
+    return nil;
+  }
+  return (__bridge NSDictionary<SCStreamFrameInfo, id> *)
+      CFArrayGetValueAtIndex(attachmentsArray, 0);
+}
+
+static BOOL CDRFrameIsComplete(
+    CMSampleBufferRef sampleBuffer,
+    NSDictionary<SCStreamFrameInfo, id> **frameAttachments)
+    API_AVAILABLE(macos(12.3)) {
+  if (!CMSampleBufferIsValid(sampleBuffer)) {
+    return NO;
+  }
+  NSDictionary<SCStreamFrameInfo, id> *attachments =
+      CDRFrameAttachments(sampleBuffer);
+  NSNumber *status = attachments[SCStreamFrameInfoStatus];
+  if (status == nil || status.integerValue != SCFrameStatusComplete) {
+    return NO;
+  }
+  id contentRectValue = attachments[SCStreamFrameInfoContentRect];
+  if (contentRectValue != nil) {
+    CGRect contentRect = CGRectZero;
+    if (![contentRectValue isKindOfClass:[NSDictionary class]] ||
+        !CGRectMakeWithDictionaryRepresentation(
+            (__bridge CFDictionaryRef)contentRectValue, &contentRect) ||
+        CGRectIsEmpty(contentRect)) {
+      return NO;
+    }
+  }
+  if (frameAttachments != NULL) {
+    *frameAttachments = attachments;
+  }
+  return YES;
+}
+
+static NSDictionary<NSString *, id> *CDRFrameGeometryDiagnostics(
+    NSDictionary<SCStreamFrameInfo, id> *attachments,
+    CVPixelBufferRef pixelBuffer) API_AVAILABLE(macos(12.3)) {
+  CGRect contentRect = CGRectZero;
+  id contentRectValue = attachments[SCStreamFrameInfoContentRect];
+  if ([contentRectValue isKindOfClass:[NSDictionary class]]) {
+    CGRectMakeWithDictionaryRepresentation(
+        (__bridge CFDictionaryRef)contentRectValue, &contentRect);
+  }
+  NSNumber *contentScale = attachments[SCStreamFrameInfoContentScale];
+  NSNumber *scaleFactor = attachments[SCStreamFrameInfoScaleFactor];
+  return @{
+    @"bufferWidth": @(CVPixelBufferGetWidth(pixelBuffer)),
+    @"bufferHeight": @(CVPixelBufferGetHeight(pixelBuffer)),
+    @"contentRectX": @(contentRect.origin.x),
+    @"contentRectY": @(contentRect.origin.y),
+    @"contentRectWidth": @(contentRect.size.width),
+    @"contentRectHeight": @(contentRect.size.height),
+    @"contentScale": contentScale ?: @0,
+    @"scaleFactor": scaleFactor ?: @0,
+    @"captureGeneration": @0,
+  };
+}
+#endif
 
 static NSString *CDRAttachmentString(CVPixelBufferRef pixelBuffer, CFStringRef key) {
   CFTypeRef value = CVBufferGetAttachment(pixelBuffer, key, NULL);
@@ -243,7 +353,9 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
 - (SCStreamConfiguration *)streamConfigurationForDisplay:(SCDisplay *)display
                                                    filter:(SCContentFilter *)filter
-                                                      fps:(NSInteger)fps API_AVAILABLE(macos(12.3)) {
+                                                      fps:(NSInteger)fps
+                                           targetLongEdge:(NSInteger)targetLongEdge
+    API_AVAILABLE(macos(12.3)) {
   SCStreamConfiguration *config = [SCStreamConfiguration new];
   CGFloat outputWidth = display.width;
   CGFloat outputHeight = display.height;
@@ -261,6 +373,12 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
       outputHeight = pixelHeight;
     }
   }
+  const CGFloat sourceLongEdge = MAX(outputWidth, outputHeight);
+  if (targetLongEdge > 0 && sourceLongEdge > targetLongEdge) {
+    const CGFloat scale = (CGFloat)targetLongEdge / sourceLongEdge;
+    outputWidth *= scale;
+    outputHeight *= scale;
+  }
   config.width = CDREvenPixelDimension(outputWidth);
   config.height = CDREvenPixelDimension(outputHeight);
   config.minimumFrameInterval = CMTimeMake(1, (int32_t)MAX(1, fps));
@@ -268,8 +386,15 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
   config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
   config.colorSpaceName = kCGColorSpaceITUR_709;
   config.colorMatrix = kCGDisplayStreamYCbCrMatrix_ITU_R_709_2;
+  config.scalesToFit = YES;
+  config.destinationRect = CGRectMake(0, 0, config.width, config.height);
+  config.backgroundColor = CDRBlackBackgroundColor();
   if (@available(macOS 15.0, *)) {
     config.captureDynamicRange = SCCaptureDynamicRangeSDR;
+  }
+  if (@available(macOS 14.0, *)) {
+    config.preservesAspectRatio = YES;
+    config.shouldBeOpaque = YES;
   }
   if (@available(macOS 13.0, *)) {
     config.showsCursor = YES;
@@ -280,6 +405,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
 
 - (void)startCaptureWithFPS:(NSInteger)fps
                    sourceId:(NSString* _Nullable)sourceId
+             targetLongEdge:(NSInteger)targetLongEdge
                   onStarted:(void (^)(NSError * _Nullable error))onStarted {
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
   if (@available(macOS 12.3, *)) {
@@ -303,7 +429,15 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
 
       SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
       SCStreamConfiguration *config =
-          [self streamConfigurationForDisplay:display filter:filter fps:fps];
+          [self streamConfigurationForDisplay:display
+                                       filter:filter
+                                          fps:fps
+                               targetLongEdge:targetLongEdge];
+
+      dispatch_async(self.captureQueue, ^{
+        self.expectedFrameWidth = config.width;
+        self.expectedFrameHeight = config.height;
+      });
 
       self.stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:nil];
       NSError *addOutputError = nil;
@@ -332,6 +466,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
 
 - (void)switchCaptureToSourceId:(NSString *)sourceId
                             fps:(NSInteger)fps
+                 targetLongEdge:(NSInteger)targetLongEdge
                    onCompletion:(void (^)(NSError * _Nullable error))onCompletion {
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
   if (@available(macOS 13.0, *)) {
@@ -346,10 +481,27 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
       onCompletion(notRunning);
       return;
     }
-    [SCShareableContent
-        getShareableContentWithCompletionHandler:^(SCShareableContent *content, NSError *error) {
+    dispatch_async(self.captureQueue, ^{
+      self.captureGeneration += 1;
+      const NSUInteger generation = self.captureGeneration;
+      self.suppressingFramesForSwitch = YES;
+      self.awaitingStableSwitchFrames = NO;
+      self.stableSwitchFrameCount = 0;
+      self.freshCanvasFrameCount = 0;
+      [SCShareableContent
+          getShareableContentWithCompletionHandler:^(SCShareableContent *content, NSError *error) {
+          void (^finishWithError)(NSError *) = ^(NSError *switchError) {
+            dispatch_async(self.captureQueue, ^{
+              if (generation == self.captureGeneration) {
+                self.suppressingFramesForSwitch = NO;
+                self.awaitingStableSwitchFrames = NO;
+                self.stableSwitchFrameCount = 0;
+              }
+              onCompletion(switchError);
+            });
+          };
           if (error != nil) {
-            onCompletion(error);
+            finishWithError(error);
             return;
           }
           SCDisplay *display = [self selectDisplayFromContent:content sourceId:sourceId];
@@ -360,38 +512,49 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
                                                     NSLocalizedDescriptionKey:
                                                         @"No matching display"
                                                   }];
-            onCompletion(noDisplay);
+            finishWithError(noDisplay);
             return;
           }
           SCContentFilter *filter =
               [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
           SCStreamConfiguration *configuration =
-              [self streamConfigurationForDisplay:display filter:filter fps:fps];
+              [self streamConfigurationForDisplay:display
+                                           filter:filter
+                                              fps:fps
+                                   targetLongEdge:targetLongEdge];
           [stream updateConfiguration:configuration
                    completionHandler:^(NSError *configurationError) {
                      if (configurationError != nil) {
-                       onCompletion(configurationError);
+                       finishWithError(configurationError);
                        return;
                      }
                      [stream updateContentFilter:filter
                                completionHandler:^(NSError *filterError) {
                                  if (filterError != nil) {
-                                   onCompletion(filterError);
+                                   finishWithError(filterError);
                                    return;
                                  }
-                                 // Frame delivery is serialized on captureQueue.
-                                 // Reset readiness only after both live updates
-                                 // complete, so a transition frame cannot be
-                                 // attributed to the target source prematurely.
                                  dispatch_async(self.captureQueue, ^{
+                                   if (generation != self.captureGeneration) {
+                                     return;
+                                   }
                                    self.sourceId = sourceId;
                                    self.emittedFirstFrame = NO;
                                    self.emittedColorDiagnostics = NO;
+                                   self.expectedFrameWidth = configuration.width;
+                                   self.expectedFrameHeight = configuration.height;
+                                   self.stableSwitchFrameCount = 0;
+                                   self.freshCanvasFrameCount = 2;
+                                   self.awaitingStableSwitchFrames = YES;
+                                   self.suppressingFramesForSwitch = NO;
+                                   [(VideoProcessingAdapter *)self.delegate
+                                       setPreferredFramesPerSecond:fps];
                                    onCompletion(nil);
                                  });
                                }];
                    }];
-        }];
+          }];
+    });
     return;
   }
 #endif
@@ -400,6 +563,86 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
                                           userInfo:@{
                                             NSLocalizedDescriptionKey:
                                                 @"In-place screen switching is unavailable"
+                                          }];
+  onCompletion(unavailable);
+}
+
+- (void)updateCaptureWithFPS:(NSInteger)fps
+              targetLongEdge:(NSInteger)targetLongEdge
+                onCompletion:(void (^)(NSError * _Nullable error))onCompletion {
+#if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
+  if (@available(macOS 13.0, *)) {
+    SCStream *stream = self.stream;
+    if (stream == nil) {
+      NSError *notRunning = [NSError errorWithDomain:@"FlutterScreenCaptureKit"
+                                                 code:-3
+                                             userInfo:@{
+                                               NSLocalizedDescriptionKey:
+                                                   @"ScreenCaptureKit stream is not running"
+                                             }];
+      onCompletion(notRunning);
+      return;
+    }
+    dispatch_async(self.captureQueue, ^{
+      self.suppressingFramesForSwitch = YES;
+      [SCShareableContent
+          getShareableContentWithCompletionHandler:^(SCShareableContent *content,
+                                                      NSError *error) {
+            if (error != nil) {
+              dispatch_async(self.captureQueue, ^{
+                self.suppressingFramesForSwitch = NO;
+                onCompletion(error);
+              });
+              return;
+            }
+            SCDisplay *display = [self selectDisplayFromContent:content
+                                                       sourceId:self.sourceId];
+            if (display == nil) {
+              NSError *noDisplay = [NSError errorWithDomain:@"FlutterScreenCaptureKit"
+                                                        code:-1
+                                                    userInfo:@{
+                                                      NSLocalizedDescriptionKey:
+                                                          @"No matching display"
+                                                    }];
+              dispatch_async(self.captureQueue, ^{
+                self.suppressingFramesForSwitch = NO;
+                onCompletion(noDisplay);
+              });
+              return;
+            }
+            SCContentFilter *filter =
+                [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+            SCStreamConfiguration *configuration =
+                [self streamConfigurationForDisplay:display
+                                             filter:filter
+                                                fps:fps
+                                     targetLongEdge:targetLongEdge];
+            [stream updateConfiguration:configuration
+                     completionHandler:^(NSError *configurationError) {
+                       dispatch_async(self.captureQueue, ^{
+                         if (configurationError == nil) {
+                           self.expectedFrameWidth = configuration.width;
+                           self.expectedFrameHeight = configuration.height;
+                           self.stableSwitchFrameCount = 0;
+                           self.freshCanvasFrameCount = 1;
+                           self.awaitingStableSwitchFrames = YES;
+                           [(VideoProcessingAdapter *)self.delegate
+                               setPreferredFramesPerSecond:fps];
+                         }
+                         self.suppressingFramesForSwitch = NO;
+                         onCompletion(configurationError);
+                       });
+                     }];
+          }];
+    });
+    return;
+  }
+#endif
+  NSError *unavailable = [NSError errorWithDomain:@"FlutterScreenCaptureKit"
+                                              code:-2
+                                          userInfo:@{
+                                            NSLocalizedDescriptionKey:
+                                                @"Capture reconfiguration is unavailable"
                                           }];
   onCompletion(unavailable);
 }
@@ -469,6 +712,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
       output == NULL) {
     return NULL;
   }
+  CDRFillVideoRangeBlack(output);
 
   NSMutableDictionary<CIImageOption, id> *options = [NSMutableDictionary dictionary];
   if (@available(macOS 11.0, *)) {
@@ -540,9 +784,41 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     return;
   }
 
+  NSDictionary<SCStreamFrameInfo, id> *frameAttachments = nil;
+  if (!CDRFrameIsComplete(sampleBuffer, &frameAttachments) ||
+      self.suppressingFramesForSwitch) {
+    return;
+  }
+
   CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
   if (pixelBuffer == nil) {
     return;
+  }
+
+  if (self.awaitingStableSwitchFrames) {
+    const size_t width = CVPixelBufferGetWidth(pixelBuffer);
+    const size_t height = CVPixelBufferGetHeight(pixelBuffer);
+    if ((self.expectedFrameWidth > 0 && width != self.expectedFrameWidth) ||
+        (self.expectedFrameHeight > 0 && height != self.expectedFrameHeight)) {
+      self.stableSwitchFrameCount = 0;
+      return;
+    }
+    self.stableSwitchFrameCount += 1;
+    if (self.stableSwitchFrameCount < 2) {
+      return;
+    }
+    self.awaitingStableSwitchFrames = NO;
+    NSLog(@"CrossDesktopRemote accepted display generation %lu after %lu complete frames (%zux%zu), metadata=%@",
+          (unsigned long)self.captureGeneration,
+          (unsigned long)self.stableSwitchFrameCount,
+          width,
+          height,
+          frameAttachments);
+  }
+
+  const BOOL needsFreshCanvas = self.freshCanvasFrameCount > 0;
+  if (needsFreshCanvas) {
+    self.freshCanvasFrameCount -= 1;
   }
 
   if (!self.emittedFirstFrame) {
@@ -568,7 +844,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
   }
   const BOOL needsNormalization = CDRNeedsSDRNormalization(pixelBuffer);
   const CFAbsoluteTime normalizationStartedAt = CFAbsoluteTimeGetCurrent();
-  CVPixelBufferRef normalizedPixelBuffer = needsNormalization
+  CVPixelBufferRef normalizedPixelBuffer = (needsNormalization || needsFreshCanvas)
       ? [self newNormalizedSDRPixelBufferFromPixelBuffer:pixelBuffer]
       : NULL;
   const double normalizationDurationMs =
@@ -585,15 +861,21 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     diagnostics[@"captureDynamicRange"] = normalizedPixelBuffer != NULL
         ? @"SDR (Core Image normalized)"
         : encoderDiagnostics[@"dynamicRange"] ?: @"Unknown";
-    diagnostics[@"normalization"] = !needsNormalization
+    diagnostics[@"normalization"] = !needsNormalization && !needsFreshCanvas
         ? @"Native SDR Rec.709 420v · zero-copy bypass"
+        : !needsNormalization && normalizedPixelBuffer != NULL
+            ? @"Fresh switch canvas · Rec.709 · Video Range NV12"
         : normalizedPixelBuffer != NULL
             ? @"Core Image GPU HDR→SDR · Rec.709 · Video Range NV12"
             : @"Normalization failed; original frame forwarded";
-    diagnostics[@"normalizationBypassed"] = @(!needsNormalization);
+    diagnostics[@"normalizationBypassed"] = @(!needsNormalization && !needsFreshCanvas);
     diagnostics[@"normalizationDurationMs"] = @(normalizationDurationMs);
     diagnostics[@"rawFrame"] = rawDiagnostics ?: @{};
     diagnostics[@"encoderInput"] = encoderDiagnostics;
+    NSMutableDictionary<NSString *, id> *frameGeometry =
+        [CDRFrameGeometryDiagnostics(frameAttachments, pixelBuffer) mutableCopy];
+    frameGeometry[@"captureGeneration"] = @(self.captureGeneration);
+    diagnostics[@"frameGeometry"] = frameGeometry;
     NSLog(@"CrossDesktopRemote capture color diagnostics: %@", diagnostics);
     [[NSNotificationCenter defaultCenter]
         postNotificationName:@"CrossDesktopRemoteCaptureColorDiagnostics"

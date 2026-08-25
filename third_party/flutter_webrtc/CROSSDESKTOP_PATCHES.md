@@ -24,8 +24,22 @@ CrossDesktopRemote-specific macOS changes:
   ScreenCaptureKit source is live before committing the WebRTC transaction;
 - expose in-place screen switching on the running track through
   `SCStream.updateConfiguration()` and `SCStream.updateContentFilter()`;
+- suppress frame forwarding while the live ScreenCaptureKit configuration and
+  filter are changing, then admit only consecutive `.complete` frames whose
+  dimensions match the requested target;
+- clear each switch canvas to video-range black before rendering the first
+  target frames, preventing stale IOSurface regions from leaking across
+  displays;
 - adapt the unchanged macOS video source to each new width, height, and frame
   rate without rebuilding the sender, changing SSRC, or renegotiating SDP.
+- expose capture-level target dimensions and frame-rate updates, so automatic
+  quality adaptation reduces ScreenCaptureKit/GPU/encoder work instead of only
+  scaling an already oversized RTP frame;
+- prefer VideoToolbox-backed H.264 on macOS and wrap the encoder with a
+  generation-based force-keyframe coordinator used by display-switch
+  transactions;
+- report ScreenCaptureKit `contentRect`, `contentScale`, `scaleFactor`, buffer
+  dimensions, and capture generation without logging screen pixels.
 
 CrossDesktopRemote-specific iOS renderer changes:
 

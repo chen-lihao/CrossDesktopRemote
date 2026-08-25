@@ -9,13 +9,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)startCaptureWithFPS:(NSInteger)fps
                    sourceId:(NSString* _Nullable)sourceId
+             targetLongEdge:(NSInteger)targetLongEdge
                   onStarted:(void (^ _Nonnull)(NSError * _Nullable error))onStarted;
 
 - (void)stopCaptureWithCompletion:(void (^ _Nonnull)(void))completion;
 
 - (void)switchCaptureToSourceId:(NSString* _Nonnull)sourceId
                             fps:(NSInteger)fps
+                 targetLongEdge:(NSInteger)targetLongEdge
                    onCompletion:(void (^ _Nonnull)(NSError * _Nullable error))onCompletion;
+
+- (void)updateCaptureWithFPS:(NSInteger)fps
+              targetLongEdge:(NSInteger)targetLongEdge
+                onCompletion:(void (^ _Nonnull)(NSError * _Nullable error))onCompletion;
 
 @end
 

@@ -409,6 +409,9 @@ class _DevicesPageState extends State<DevicesPage> {
                           RemoteDesktopPanel(
                             session: _session,
                             initialInputSettings: widget.settings.inputSettings,
+                            onKeyboardModeChanged: (mode) => unawaited(
+                              widget.settings.setKeyboardMode(mode),
+                            ),
                           ),
                         ],
                       ],

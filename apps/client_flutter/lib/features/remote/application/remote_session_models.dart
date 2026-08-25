@@ -133,6 +133,21 @@ class RemoteMediaDiagnostics {
     this.jitterBufferMsPerFrame,
     this.networkRoundTripMs,
     this.packetsLost,
+    this.packetLossPercent,
+    this.bitrateMbps,
+    this.availableOutgoingBitrateMbps,
+    this.framesDroppedDelta,
+    this.freezeCountDelta,
+    this.keyFramesEncoded,
+    this.keyFramesDecoded,
+    this.keyFramesEncodedDelta,
+    this.keyFramesDecodedDelta,
+    this.nackCountDelta,
+    this.pliCountDelta,
+    this.firCountDelta,
+    this.codec,
+    this.encoderImplementation,
+    this.decoderImplementation,
     this.qualityLimitationReason,
   });
 
@@ -142,6 +157,21 @@ class RemoteMediaDiagnostics {
   final double? jitterBufferMsPerFrame;
   final double? networkRoundTripMs;
   final int? packetsLost;
+  final double? packetLossPercent;
+  final double? bitrateMbps;
+  final double? availableOutgoingBitrateMbps;
+  final int? framesDroppedDelta;
+  final int? freezeCountDelta;
+  final int? keyFramesEncoded;
+  final int? keyFramesDecoded;
+  final int? keyFramesEncodedDelta;
+  final int? keyFramesDecodedDelta;
+  final int? nackCountDelta;
+  final int? pliCountDelta;
+  final int? firCountDelta;
+  final String? codec;
+  final String? encoderImplementation;
+  final String? decoderImplementation;
   final String? qualityLimitationReason;
 }
 
@@ -254,6 +284,53 @@ class RemoteFrameColorDiagnostics {
       lumaHistogram16.isEmpty ? '未采样' : lumaHistogram16.join(', ');
 }
 
+class RemoteCaptureFrameGeometry {
+  const RemoteCaptureFrameGeometry({
+    required this.bufferWidth,
+    required this.bufferHeight,
+    required this.contentRectX,
+    required this.contentRectY,
+    required this.contentRectWidth,
+    required this.contentRectHeight,
+    required this.contentScale,
+    required this.scaleFactor,
+    required this.captureGeneration,
+  });
+
+  factory RemoteCaptureFrameGeometry.fromMessage(Map<String, dynamic> message) {
+    return RemoteCaptureFrameGeometry(
+      bufferWidth: (message['bufferWidth'] as num?)?.toInt() ?? 0,
+      bufferHeight: (message['bufferHeight'] as num?)?.toInt() ?? 0,
+      contentRectX: (message['contentRectX'] as num?)?.toDouble() ?? 0,
+      contentRectY: (message['contentRectY'] as num?)?.toDouble() ?? 0,
+      contentRectWidth: (message['contentRectWidth'] as num?)?.toDouble() ?? 0,
+      contentRectHeight:
+          (message['contentRectHeight'] as num?)?.toDouble() ?? 0,
+      contentScale: (message['contentScale'] as num?)?.toDouble() ?? 0,
+      scaleFactor: (message['scaleFactor'] as num?)?.toDouble() ?? 0,
+      captureGeneration: (message['captureGeneration'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  final int bufferWidth;
+  final int bufferHeight;
+  final double contentRectX;
+  final double contentRectY;
+  final double contentRectWidth;
+  final double contentRectHeight;
+  final double contentScale;
+  final double scaleFactor;
+  final int captureGeneration;
+
+  String get label =>
+      'buffer $bufferWidth×$bufferHeight · '
+      'content ${contentRectWidth.toStringAsFixed(0)}×'
+      '${contentRectHeight.toStringAsFixed(0)} @ '
+      '${contentRectX.toStringAsFixed(0)},${contentRectY.toStringAsFixed(0)} · '
+      'contentScale ${contentScale.toStringAsFixed(2)} · '
+      'scaleFactor ${scaleFactor.toStringAsFixed(2)} · gen $captureGeneration';
+}
+
 class RemoteColorDiagnostics {
   const RemoteColorDiagnostics({
     required this.pixelFormat,
@@ -269,6 +346,7 @@ class RemoteColorDiagnostics {
     this.normalizationDurationMs,
     this.rawFrame,
     this.encoderInput,
+    this.frameGeometry,
   });
 
   factory RemoteColorDiagnostics.fromMessage(Map<String, dynamic> message) {
@@ -298,6 +376,7 @@ class RemoteColorDiagnostics {
           ?.toDouble(),
       rawFrame: _frameDiagnosticsFromValue(capture['rawFrame']),
       encoderInput: _frameDiagnosticsFromValue(capture['encoderInput']),
+      frameGeometry: _captureGeometryFromValue(capture['frameGeometry']),
       displays: displays,
     );
   }
@@ -314,6 +393,7 @@ class RemoteColorDiagnostics {
   final double? normalizationDurationMs;
   final RemoteFrameColorDiagnostics? rawFrame;
   final RemoteFrameColorDiagnostics? encoderInput;
+  final RemoteCaptureFrameGeometry? frameGeometry;
   final List<RemoteDisplayColorDiagnostics> displays;
 
   RemoteDisplayColorDiagnostics? forDisplay(String? displayId) {
@@ -331,14 +411,21 @@ RemoteFrameColorDiagnostics? _frameDiagnosticsFromValue(Object? value) {
   );
 }
 
+RemoteCaptureFrameGeometry? _captureGeometryFromValue(Object? value) {
+  if (value is! Map) return null;
+  return RemoteCaptureFrameGeometry.fromMessage(
+    value.map((key, item) => MapEntry(key.toString(), item)),
+  );
+}
+
 enum RemotePointerMode { direct, touchpad }
 
 enum RemoteViewFit { contain, cover }
 
 enum RemoteQualityProfile {
-  automatic('自动', 1920, 12 * 1000 * 1000, 60),
-  smooth('流畅 720p', 1280, 4 * 1000 * 1000, 60),
-  high('高清 1080p', 1920, 8 * 1000 * 1000, 60),
+  automatic('自动', 1920, 7 * 1000 * 1000, 30),
+  smooth('流畅 720p60', 1280, 5 * 1000 * 1000, 60),
+  high('高清 1080p30', 1920, 9 * 1000 * 1000, 30),
   ultra('超清 2K', 2560, 16 * 1000 * 1000, 30),
   original('原画', null, 35 * 1000 * 1000, 30);
 
