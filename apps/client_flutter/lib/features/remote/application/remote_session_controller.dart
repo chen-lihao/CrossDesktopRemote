@@ -426,6 +426,8 @@ class RemoteSessionController extends ChangeNotifier {
     required String phase,
     required String key,
     required List<String> modifiers,
+    int? physicalHidUsage,
+    bool repeat = false,
   }) {
     if (!canSendControl) {
       explainControlUnavailable();
@@ -440,6 +442,8 @@ class RemoteSessionController extends ChangeNotifier {
       'phase': phase,
       'key': key,
       'modifiers': modifiers,
+      'physicalHidUsage': ?physicalHidUsage,
+      if (repeat) 'repeat': true,
     });
   }
 

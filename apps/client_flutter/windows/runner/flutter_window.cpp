@@ -1,6 +1,9 @@
 #include "flutter_window.h"
 
+#include <flutter/standard_method_codec.h>
+
 #include <optional>
+#include <sstream>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -27,6 +30,47 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
+  window_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(),
+          "com.crossdesktopremote.cross_desktop_remote/window",
+          &flutter::StandardMethodCodec::GetInstance());
+  window_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+                 result) {
+        if (call.method_name() != "setFullScreen") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* arguments =
+            std::get_if<flutter::EncodableMap>(call.arguments());
+        if (arguments == nullptr) {
+          result->Error("invalid_arguments", "Expected an argument map");
+          return;
+        }
+        const auto enabled_entry =
+            arguments->find(flutter::EncodableValue("enabled"));
+        if (enabled_entry == arguments->end()) {
+          result->Error("invalid_arguments", "Missing enabled flag");
+          return;
+        }
+        const auto* enabled = std::get_if<bool>(&enabled_entry->second);
+        if (enabled == nullptr) {
+          result->Error("invalid_arguments", "Enabled flag must be boolean");
+          return;
+        }
+        if (!SetFullscreen(*enabled)) {
+          std::ostringstream details;
+          details << "Win32 error " << GetLastError();
+          result->Error("window_mode_failed",
+                        "Unable to change the Windows window mode",
+                        flutter::EncodableValue(details.str()));
+          return;
+        }
+        result->Success();
+      });
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
@@ -40,6 +84,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  window_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

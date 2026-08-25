@@ -50,6 +50,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   late RemoteSessionController _session;
   late LanDiscoveryService _discovery;
   late List<Widget> _pages;
+  bool _desktopRemoteFullScreen = false;
 
   @override
   void initState() {
@@ -83,6 +84,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         capabilities: _capabilities,
         onRoleChanged: _changeRole,
         settings: _settings,
+        onDesktopFullScreenChanged: _handleDesktopFullScreenChanged,
       ),
       SessionsPage(
         session: _session,
@@ -118,6 +120,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _session.setIdleQuality(_settings.defaultQuality);
   }
 
+  void _handleDesktopFullScreenChanged(bool enabled) {
+    if (!mounted || _desktopRemoteFullScreen == enabled) return;
+    setState(() => _desktopRemoteFullScreen = enabled);
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
@@ -140,29 +147,32 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             body: SafeArea(
               child: Row(
                 children: [
-                  NavigationRail(
-                    extended: constraints.maxWidth >= 1180,
-                    selectedIndex: _selectedIndex,
-                    onDestinationSelected: _select,
-                    leading: const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 20),
-                      child: Tooltip(
-                        message: 'CrossDesktopRemote',
-                        child: Icon(Icons.desktop_windows_outlined),
+                  if (!_desktopRemoteFullScreen) ...[
+                    NavigationRail(
+                      extended: constraints.maxWidth >= 1180,
+                      selectedIndex: _selectedIndex,
+                      onDestinationSelected: _select,
+                      leading: const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 20),
+                        child: Tooltip(
+                          message: 'CrossDesktopRemote',
+                          child: Icon(Icons.desktop_windows_outlined),
+                        ),
                       ),
+                      destinations: _destinations
+                          .map(
+                            (destination) => NavigationRailDestination(
+                              icon: destination.icon,
+                              selectedIcon: destination.selectedIcon,
+                              label: Text(destination.label),
+                            ),
+                          )
+                          .toList(growable: false),
                     ),
-                    destinations: _destinations
-                        .map(
-                          (destination) => NavigationRailDestination(
-                            icon: destination.icon,
-                            selectedIcon: destination.selectedIcon,
-                            label: Text(destination.label),
-                          ),
-                        )
-                        .toList(growable: false),
-                  ),
-                  const VerticalDivider(width: 1),
+                    const VerticalDivider(width: 1),
+                  ],
                   Expanded(
+                    key: const ValueKey('workspace'),
                     child: IndexedStack(
                       index: _selectedIndex,
                       children: _pages,
@@ -175,21 +185,25 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         }
 
         return Scaffold(
-          appBar: AppBar(
-            title: const Text(
-              'CrossDesktopRemote',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
+          appBar: _desktopRemoteFullScreen
+              ? null
+              : AppBar(
+                  title: const Text(
+                    'CrossDesktopRemote',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
           body: SafeArea(
             child: IndexedStack(index: _selectedIndex, children: _pages),
           ),
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: _selectedIndex,
-            onDestinationSelected: _select,
-            destinations: _destinations,
-          ),
+          bottomNavigationBar: _desktopRemoteFullScreen
+              ? null
+              : NavigationBar(
+                  selectedIndex: _selectedIndex,
+                  onDestinationSelected: _select,
+                  destinations: _destinations,
+                ),
         );
       },
     );

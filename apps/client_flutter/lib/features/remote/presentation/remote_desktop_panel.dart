@@ -9,6 +9,7 @@ import 'package:cross_desktop_remote/features/remote/presentation/remote_compose
 import 'package:cross_desktop_remote/features/remote/presentation/remote_desktop_geometry.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_display_adjustment.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/remote_keyboard_translator.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_pointer_event_coalescer.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_text_input_synchronizer.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_touch_gesture_controller.dart';
@@ -456,11 +457,15 @@ class RemoteDesktopPanel extends StatefulWidget {
     required this.session,
     this.initialInputSettings = const RemoteInputSettings(),
     this.onKeyboardModeChanged,
+    this.desktopFullScreen = false,
+    this.onDesktopFullScreenChanged,
   });
 
   final RemoteSessionController session;
   final RemoteInputSettings initialInputSettings;
   final ValueChanged<RemoteKeyboardMode>? onKeyboardModeChanged;
+  final bool desktopFullScreen;
+  final Future<bool> Function(bool enabled)? onDesktopFullScreenChanged;
 
   @override
   State<RemoteDesktopPanel> createState() => _RemoteDesktopPanelState();
@@ -488,6 +493,16 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
   }
 
   Future<void> _openFullScreen() async {
+    if (Platform.isWindows && widget.onDesktopFullScreenChanged != null) {
+      final changed = await widget.onDesktopFullScreenChanged!(true);
+      if (changed && mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _surfaceKey.currentState?.requestHardwareKeyboardFocus();
+        });
+        AppMessenger.show('已进入全屏，按 Esc 可退出');
+      }
+      return;
+    }
     setState(() => _rendererAttached = false);
     await Future<void>.delayed(Duration.zero);
     if (!mounted) return;
@@ -504,6 +519,16 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
     );
     if (mounted) {
       setState(() => _rendererAttached = true);
+      AppMessenger.show('已退出全屏');
+    }
+  }
+
+  Future<void> _closeDesktopFullScreen() async {
+    final changed = await widget.onDesktopFullScreenChanged?.call(false);
+    if (changed == true && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _surfaceKey.currentState?.requestHardwareKeyboardFocus();
+      });
       AppMessenger.show('已退出全屏');
     }
   }
@@ -570,6 +595,96 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
     widget.onKeyboardModeChanged?.call(mode);
   }
 
+  Widget _buildToolbar(
+    BuildContext context,
+    RemoteInputSettings inputSettings, {
+    required bool desktopFullScreen,
+  }) {
+    return ColoredBox(
+      color: desktopFullScreen
+          ? Colors.black.withValues(alpha: 0.9)
+          : Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: _RemoteToolbar(
+        session: widget.session,
+        pointerMode: inputSettings.pointerMode,
+        viewFit: _viewFit,
+        onPointerModeChanged: _setPointerMode,
+        onViewFitChanged: _setViewFit,
+        keyboardMode: inputSettings.keyboardMode,
+        onKeyboardModeSelected: _showKeyboard,
+        onHelp: () => _showGestureHelp(context, inputSettings.pointerMode),
+        onInputSettings: () => _showRemoteInputSettings(
+          context,
+          settings: _inputSettings,
+          session: widget.session,
+          onKeyboardModeChanged: _setKeyboardMode,
+        ),
+        onDisplayAdjustment: () => _showRemoteDisplayAdjustment(
+          context,
+          adjustment: _displayAdjustment,
+          session: widget.session,
+        ),
+        onFullScreen: desktopFullScreen
+            ? () => unawaited(_closeDesktopFullScreen())
+            : _openFullScreen,
+        foregroundColor: desktopFullScreen ? Colors.white : null,
+        isFullScreen: desktopFullScreen,
+      ),
+    );
+  }
+
+  Widget _buildRemoteSurface(
+    RemoteInputSettings inputSettings, {
+    required bool desktopFullScreen,
+  }) {
+    if (!_rendererAttached) {
+      return const ColoredBox(
+        color: Colors.black,
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    return _RemoteDesktopSurface(
+      key: _surfaceKey,
+      session: widget.session,
+      inputSettings: inputSettings,
+      displayAdjustment: _displayAdjustment,
+      viewFit: _viewFit,
+      preserveVideoViewportWhenKeyboardVisible: desktopFullScreen,
+      desktopFullScreen: desktopFullScreen,
+      onExitDesktopFullScreen: desktopFullScreen
+          ? () => unawaited(_closeDesktopFullScreen())
+          : null,
+      onKeyboardModeChanged: _setKeyboardMode,
+      onDragLockChanged: (value) {
+        _inputSettings.value = inputSettings.copyWith(dragLock: value);
+      },
+    );
+  }
+
+  Widget _buildControlWarning(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Row(
+        children: [
+          Icon(
+            Icons.info_outline,
+            color: Theme.of(context).colorScheme.tertiary,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              widget.session.controlError ?? '当前仅可观看，被控设备尚未允许鼠标和键盘输入。',
+            ),
+          ),
+          TextButton(
+            onPressed: widget.session.refreshRemoteStatus,
+            child: const Text('重新检查'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -580,85 +695,52 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
             .toDouble();
         return ValueListenableBuilder<RemoteInputSettings>(
           valueListenable: _inputSettings,
-          builder: (context, inputSettings, _) => Card(
-            clipBehavior: Clip.antiAlias,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                ColoredBox(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                  child: _RemoteToolbar(
-                    session: widget.session,
-                    pointerMode: inputSettings.pointerMode,
-                    viewFit: _viewFit,
-                    onPointerModeChanged: _setPointerMode,
-                    onViewFitChanged: _setViewFit,
-                    keyboardMode: inputSettings.keyboardMode,
-                    onKeyboardModeSelected: _showKeyboard,
-                    onHelp: () =>
-                        _showGestureHelp(context, inputSettings.pointerMode),
-                    onInputSettings: () => _showRemoteInputSettings(
+          builder: (context, inputSettings, _) {
+            if (widget.desktopFullScreen) {
+              return Material(
+                color: Colors.black,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _buildToolbar(
                       context,
-                      settings: _inputSettings,
-                      session: widget.session,
-                      onKeyboardModeChanged: _setKeyboardMode,
+                      inputSettings,
+                      desktopFullScreen: true,
                     ),
-                    onDisplayAdjustment: () => _showRemoteDisplayAdjustment(
-                      context,
-                      adjustment: _displayAdjustment,
-                      session: widget.session,
+                    Expanded(
+                      child: _buildRemoteSurface(
+                        inputSettings,
+                        desktopFullScreen: true,
+                      ),
                     ),
-                    onFullScreen: _openFullScreen,
+                  ],
+                ),
+              );
+            }
+            return Card(
+              clipBehavior: Clip.antiAlias,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildToolbar(
+                    context,
+                    inputSettings,
+                    desktopFullScreen: false,
                   ),
-                ),
-                SizedBox(
-                  height: viewportHeight,
-                  child: _rendererAttached
-                      ? _RemoteDesktopSurface(
-                          key: _surfaceKey,
-                          session: widget.session,
-                          inputSettings: inputSettings,
-                          displayAdjustment: _displayAdjustment,
-                          viewFit: _viewFit,
-                          onKeyboardModeChanged: _setKeyboardMode,
-                          onDragLockChanged: (value) {
-                            _inputSettings.value = inputSettings.copyWith(
-                              dragLock: value,
-                            );
-                          },
-                        )
-                      : const ColoredBox(
-                          color: Colors.black,
-                          child: Center(child: CircularProgressIndicator()),
-                        ),
-                ),
-                if (widget.session.controlError != null ||
-                    widget.session.accessibilityGranted != true)
-                  Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.info_outline,
-                          color: Theme.of(context).colorScheme.tertiary,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            widget.session.controlError ??
-                                '当前仅可观看，被控设备尚未允许鼠标和键盘输入。',
-                          ),
-                        ),
-                        TextButton(
-                          onPressed: widget.session.refreshRemoteStatus,
-                          child: const Text('重新检查'),
-                        ),
-                      ],
+                  SizedBox(
+                    height: viewportHeight,
+                    child: _buildRemoteSurface(
+                      inputSettings,
+                      desktopFullScreen: false,
                     ),
                   ),
-              ],
-            ),
-          ),
+                  if (widget.session.controlError != null ||
+                      widget.session.accessibilityGranted != true)
+                    _buildControlWarning(context),
+                ],
+              ),
+            );
+          },
         );
       },
     );
@@ -1146,6 +1228,8 @@ class _RemoteDesktopSurface extends StatefulWidget {
     required this.onKeyboardModeChanged,
     required this.onDragLockChanged,
     this.preserveVideoViewportWhenKeyboardVisible = false,
+    this.desktopFullScreen = false,
+    this.onExitDesktopFullScreen,
   });
 
   final RemoteSessionController session;
@@ -1155,6 +1239,8 @@ class _RemoteDesktopSurface extends StatefulWidget {
   final ValueChanged<RemoteKeyboardMode> onKeyboardModeChanged;
   final ValueChanged<bool> onDragLockChanged;
   final bool preserveVideoViewportWhenKeyboardVisible;
+  final bool desktopFullScreen;
+  final VoidCallback? onExitDesktopFullScreen;
 
   @override
   State<_RemoteDesktopSurface> createState() => _RemoteDesktopSurfaceState();
@@ -1166,6 +1252,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   final _textFocus = FocusNode(debugLabel: 'remote-soft-keyboard');
   final _textController = TextEditingController();
   final _textSynchronizer = RemoteTextInputSynchronizer();
+  final _desktopKeyboard = RemoteKeyboardTranslator();
   final RemoteImeInputAdapter _nativeIme = MethodChannelRemoteImeInputAdapter();
   final _pointerCoalescer = RemotePointerEventCoalescer();
   final Set<int> _ignoredPointers = {};
@@ -1201,6 +1288,13 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   Offset? _lastNormalizedPointer;
 
   RemoteSessionController get session => widget.session;
+
+  bool get _usesDesktopKeyboard =>
+      Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+
+  void requestHardwareKeyboardFocus() {
+    if (mounted) _hardwareFocus.requestFocus();
+  }
 
   @override
   void initState() {
@@ -1571,6 +1665,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_usesDesktopKeyboard && state != AppLifecycleState.resumed) {
+      _releaseDesktopKeys();
+    }
     if (_keyboardVisible &&
         const {
           AppLifecycleState.inactive,
@@ -1579,6 +1676,25 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
           AppLifecycleState.hidden,
         }.contains(state)) {
       _hideKeyboard();
+    }
+    if (_usesDesktopKeyboard &&
+        state == AppLifecycleState.resumed &&
+        widget.desktopFullScreen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        requestHardwareKeyboardFocus();
+      });
+    }
+  }
+
+  void _handleHardwareFocusChanged(bool focused) {
+    if (_usesDesktopKeyboard && !focused) {
+      _releaseDesktopKeys();
+    }
+  }
+
+  void _releaseDesktopKeys() {
+    for (final action in _desktopKeyboard.releaseAll()) {
+      _dispatchKeyboardAction(action);
     }
   }
 
@@ -1593,6 +1709,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     unawaited(_imeSubscription?.cancel());
     _dispatchGestureActions(_gestures.cancelAll(releaseDragLock: true));
     _flushPointerMotion();
+    _releaseDesktopKeys();
     if (_keyboardVisible && _activeKeyboardMode == RemoteKeyboardMode.system) {
       if (Platform.isIOS) {
         unawaited(_hideNativeIme());
@@ -1657,115 +1774,127 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
           return Focus(
             focusNode: _hardwareFocus,
             autofocus: true,
+            onFocusChange: _handleHardwareFocusChanged,
             onKeyEvent: _handleKeyEvent,
-            child: Stack(
-              fit: StackFit.expand,
-              clipBehavior: Clip.hardEdge,
-              children: [
-                const ColoredBox(color: Colors.black),
-                Positioned.fromRect(
-                  rect: transform.destinationRect,
-                  child: ValueListenableBuilder<RemoteDisplayAdjustment>(
-                    valueListenable: widget.displayAdjustment,
-                    builder: (context, adjustment, child) {
-                      if (adjustment.isIdentity) return child!;
-                      return ColorFiltered(
-                        colorFilter: ColorFilter.matrix(adjustment.colorMatrix),
-                        child: child!,
-                      );
-                    },
-                    child: RTCVideoView(
-                      session.remoteRenderer,
-                      key: const ValueKey('remoteVideoView'),
-                      // RemoteContentTransform is the single owner of
-                      // contain/cover layout and pointer mapping. The inner
-                      // WebRTC view only fills that committed destination
-                      // rectangle, preventing a second contain pass from
-                      // shrinking a recovered main-display frame.
-                      objectFit:
-                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                    ),
-                  ),
-                ),
-                Positioned.fill(
-                  child: Listener(
-                    behavior: HitTestBehavior.opaque,
-                    onPointerDown: (event) => _pointerDown(event, transform),
-                    onPointerMove: (event) => _pointerMove(event, transform),
-                    onPointerUp: (event) => _pointerUp(event, transform),
-                    onPointerCancel: (event) =>
-                        _pointerCancel(event, transform),
-                    onPointerHover: (event) => _pointerHover(event, transform),
-                    onPointerSignal: (event) =>
-                        _pointerSignal(event, transform),
-                    child: const SizedBox.expand(),
-                  ),
-                ),
-                if (widget.inputSettings.pointerMode ==
-                        RemotePointerMode.touchpad &&
-                    !_keyboardVisible)
-                  Positioned(
-                    right: 10,
-                    bottom: 10,
-                    child: SafeArea(
-                      top: false,
-                      left: false,
-                      child: _RemotePointerControlBar(
-                        dragLock: widget.inputSettings.dragLock,
-                        onLeftClick: () {
-                          if (widget.inputSettings.dragLock) {
-                            widget.onDragLockChanged(false);
-                          } else {
-                            _sendRelativeButtonClick('left');
-                          }
-                        },
-                        onRightClick: () => _sendRelativeButtonClick('right'),
-                        onDragLockChanged: widget.onDragLockChanged,
+            child: MouseRegion(
+              onEnter: (_) {
+                if (_usesDesktopKeyboard && !_textFocus.hasFocus) {
+                  _hardwareFocus.requestFocus();
+                }
+              },
+              child: Stack(
+                fit: StackFit.expand,
+                clipBehavior: Clip.hardEdge,
+                children: [
+                  const ColoredBox(color: Colors.black),
+                  Positioned.fromRect(
+                    rect: transform.destinationRect,
+                    child: ValueListenableBuilder<RemoteDisplayAdjustment>(
+                      valueListenable: widget.displayAdjustment,
+                      builder: (context, adjustment, child) {
+                        if (adjustment.isIdentity) return child!;
+                        return ColorFiltered(
+                          colorFilter: ColorFilter.matrix(
+                            adjustment.colorMatrix,
+                          ),
+                          child: child!,
+                        );
+                      },
+                      child: RTCVideoView(
+                        session.remoteRenderer,
+                        key: const ValueKey('remoteVideoView'),
+                        // RemoteContentTransform is the single owner of
+                        // contain/cover layout and pointer mapping. The inner
+                        // WebRTC view only fills that committed destination
+                        // rectangle, preventing a second contain pass from
+                        // shrinking a recovered main-display frame.
+                        objectFit:
+                            RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                       ),
                     ),
                   ),
-                if (_keyboardVisible &&
-                    _activeKeyboardMode == RemoteKeyboardMode.system)
-                  _buildSystemKeyboardBar(context),
-                if (_keyboardVisible &&
-                    _activeKeyboardMode == RemoteKeyboardMode.compact)
-                  Align(
-                    alignment: Alignment.bottomCenter,
-                    child: Transform.translate(
-                      offset: _compactKeyboardOffset,
-                      child: _CompactRemoteKeyboard(
-                        modifiers: _compactModifiers,
-                        onDragUpdate: (details) =>
-                            _moveCompactKeyboard(details, constraints),
-                        onModifierChanged: _toggleCompactModifier,
-                        onKey: _sendCompactKey,
-                        onSystemKeyboard: () =>
-                            _changeKeyboardMode(RemoteKeyboardMode.system),
-                        onClose: _hideKeyboard,
+                  Positioned.fill(
+                    child: Listener(
+                      behavior: HitTestBehavior.opaque,
+                      onPointerDown: (event) => _pointerDown(event, transform),
+                      onPointerMove: (event) => _pointerMove(event, transform),
+                      onPointerUp: (event) => _pointerUp(event, transform),
+                      onPointerCancel: (event) =>
+                          _pointerCancel(event, transform),
+                      onPointerHover: (event) =>
+                          _pointerHover(event, transform),
+                      onPointerSignal: (event) =>
+                          _pointerSignal(event, transform),
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                  if (widget.inputSettings.pointerMode ==
+                          RemotePointerMode.touchpad &&
+                      !_keyboardVisible)
+                    Positioned(
+                      right: 10,
+                      bottom: 10,
+                      child: SafeArea(
+                        top: false,
+                        left: false,
+                        child: _RemotePointerControlBar(
+                          dragLock: widget.inputSettings.dragLock,
+                          onLeftClick: () {
+                            if (widget.inputSettings.dragLock) {
+                              widget.onDragLockChanged(false);
+                            } else {
+                              _sendRelativeButtonClick('left');
+                            }
+                          },
+                          onRightClick: () => _sendRelativeButtonClick('right'),
+                          onDragLockChanged: widget.onDragLockChanged,
+                        ),
+                      ),
+                    ),
+                  if (_keyboardVisible &&
+                      _activeKeyboardMode == RemoteKeyboardMode.system)
+                    _buildSystemKeyboardBar(context),
+                  if (_keyboardVisible &&
+                      _activeKeyboardMode == RemoteKeyboardMode.compact)
+                    Align(
+                      alignment: Alignment.bottomCenter,
+                      child: Transform.translate(
+                        offset: _compactKeyboardOffset,
+                        child: _CompactRemoteKeyboard(
+                          modifiers: _compactModifiers,
+                          onDragUpdate: (details) =>
+                              _moveCompactKeyboard(details, constraints),
+                          onModifierChanged: _toggleCompactModifier,
+                          onKey: _sendCompactKey,
+                          onSystemKeyboard: () =>
+                              _changeKeyboardMode(RemoteKeyboardMode.system),
+                          onClose: _hideKeyboard,
+                        ),
+                      ),
+                    ),
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      ignoring:
+                          !session.displaySwitchPending &&
+                          !_switchOverlayVisible,
+                      child: AnimatedOpacity(
+                        opacity: _switchOverlayVisible ? 1 : 0,
+                        duration: const Duration(milliseconds: 120),
+                        curve: Curves.easeOut,
+                        child: _DisplaySwitchOverlay(
+                          displayName: session.displays
+                              .where(
+                                (item) => item.id == session.pendingDisplayId,
+                              )
+                              .firstOrNull
+                              ?.name,
+                          takingLonger: _switchOverlaySlow,
+                        ),
                       ),
                     ),
                   ),
-                Positioned.fill(
-                  child: IgnorePointer(
-                    ignoring:
-                        !session.displaySwitchPending && !_switchOverlayVisible,
-                    child: AnimatedOpacity(
-                      opacity: _switchOverlayVisible ? 1 : 0,
-                      duration: const Duration(milliseconds: 120),
-                      curve: Curves.easeOut,
-                      child: _DisplaySwitchOverlay(
-                        displayName: session.displays
-                            .where(
-                              (item) => item.id == session.pendingDisplayId,
-                            )
-                            .firstOrNull
-                            ?.name,
-                        takingLonger: _switchOverlaySlow,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+                ],
+              ),
             ),
           );
         },
@@ -2195,6 +2324,17 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
 
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (!session.canSendControl) return KeyEventResult.ignored;
+    if (_textFocus.hasFocus) {
+      // Let Flutter's TextInput client and the Windows/iOS IME own every key
+      // while text composition is active. Intercepting Backspace, arrows, or
+      // Enter here breaks candidate selection before a committed string exists.
+      return KeyEventResult.ignored;
+    }
+    if (widget.desktopFullScreen &&
+        event.logicalKey == LogicalKeyboardKey.escape) {
+      if (event is KeyDownEvent) widget.onExitDesktopFullScreen?.call();
+      return KeyEventResult.handled;
+    }
     final keyboard = HardwareKeyboard.instance;
     final modifiers = <String>[
       if (keyboard.isMetaPressed) 'command',
@@ -2202,7 +2342,16 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       if (keyboard.isAltPressed) 'option',
       if (keyboard.isShiftPressed) 'shift',
     ];
-    final keyName = _remoteKeyName(event.logicalKey);
+    if (_usesDesktopKeyboard) {
+      final actions = _desktopKeyboard.translate(event, modifiers: modifiers);
+      for (final action in actions) {
+        _dispatchKeyboardAction(action);
+      }
+      return actions.isEmpty ? KeyEventResult.ignored : KeyEventResult.handled;
+    }
+
+    // Keep the established mobile hardware-keyboard behavior unchanged.
+    final keyName = remoteKeyName(event.logicalKey);
     final shortcut =
         keyboard.isMetaPressed ||
         keyboard.isControlPressed ||
@@ -2224,6 +2373,22 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       }
     }
     return KeyEventResult.ignored;
+  }
+
+  void _dispatchKeyboardAction(RemoteKeyboardAction action) {
+    switch (action.type) {
+      case RemoteKeyboardActionType.key:
+        session.sendKey(
+          phase: action.phase!,
+          key: action.key!,
+          modifiers: action.modifiers,
+          physicalHidUsage: action.physicalHidUsage,
+          repeat: action.repeat,
+        );
+      case RemoteKeyboardActionType.text:
+        final text = action.text;
+        if (text != null && text.isNotEmpty) session.sendText(text);
+    }
   }
 
   void _textChanged() {
@@ -2306,56 +2471,6 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   void _sendSpecialKey(String key) {
     session.sendKey(phase: 'down', key: key, modifiers: const []);
     session.sendKey(phase: 'up', key: key, modifiers: const []);
-  }
-
-  String? _remoteKeyName(LogicalKeyboardKey key) {
-    final label = key.keyLabel;
-    if (label.length == 1 && RegExp('[A-Za-z]').hasMatch(label)) {
-      return 'Key${label.toUpperCase()}';
-    }
-    if (label.length == 1 && RegExp('[0-9]').hasMatch(label)) {
-      return 'Digit$label';
-    }
-    return <LogicalKeyboardKey, String>{
-      LogicalKeyboardKey.enter: 'Enter',
-      LogicalKeyboardKey.numpadEnter: 'Enter',
-      LogicalKeyboardKey.backspace: 'Backspace',
-      LogicalKeyboardKey.delete: 'Delete',
-      LogicalKeyboardKey.tab: 'Tab',
-      LogicalKeyboardKey.escape: 'Escape',
-      LogicalKeyboardKey.space: 'Space',
-      LogicalKeyboardKey.arrowLeft: 'ArrowLeft',
-      LogicalKeyboardKey.arrowRight: 'ArrowRight',
-      LogicalKeyboardKey.arrowUp: 'ArrowUp',
-      LogicalKeyboardKey.arrowDown: 'ArrowDown',
-      LogicalKeyboardKey.home: 'Home',
-      LogicalKeyboardKey.end: 'End',
-      LogicalKeyboardKey.pageUp: 'PageUp',
-      LogicalKeyboardKey.pageDown: 'PageDown',
-      LogicalKeyboardKey.f1: 'F1',
-      LogicalKeyboardKey.f2: 'F2',
-      LogicalKeyboardKey.f3: 'F3',
-      LogicalKeyboardKey.f4: 'F4',
-      LogicalKeyboardKey.f5: 'F5',
-      LogicalKeyboardKey.f6: 'F6',
-      LogicalKeyboardKey.f7: 'F7',
-      LogicalKeyboardKey.f8: 'F8',
-      LogicalKeyboardKey.f9: 'F9',
-      LogicalKeyboardKey.f10: 'F10',
-      LogicalKeyboardKey.f11: 'F11',
-      LogicalKeyboardKey.f12: 'F12',
-      LogicalKeyboardKey.minus: 'Minus',
-      LogicalKeyboardKey.equal: 'Equal',
-      LogicalKeyboardKey.bracketLeft: 'BracketLeft',
-      LogicalKeyboardKey.bracketRight: 'BracketRight',
-      LogicalKeyboardKey.backslash: 'Backslash',
-      LogicalKeyboardKey.semicolon: 'Semicolon',
-      LogicalKeyboardKey.quote: 'Quote',
-      LogicalKeyboardKey.comma: 'Comma',
-      LogicalKeyboardKey.period: 'Period',
-      LogicalKeyboardKey.slash: 'Slash',
-      LogicalKeyboardKey.backquote: 'Backquote',
-    }[key];
   }
 }
 

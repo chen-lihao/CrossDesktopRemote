@@ -293,7 +293,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter | 响应式壳层、真实会话/设置页面、会话元数据历史、Apple Bonjour、共享恢复、Active/Pending/Retired采集热切换、`contentRect`有界软门禁、四层显示几何、Mac规范画布、呈现/触控共用变换、Sender-only自动画质、原生`bool/0/1`协议兼容、双键盘、色彩/HDR/SCK诊断、媒体统计、手势和iOS原生IME；`analyze`、78个测试、6个Swift测试及macOS/iOS Debug build | 真机确认主屏/Sidecar比例与直接触控对齐、双流提交/回滚与资源释放、自动升降档、SDR/HDR、Sidecar实际清晰度、50次交叉切屏、两种键盘、IME、触控手感和P95延迟；Windows、Linux尚未构建 |
+| Flutter | 响应式壳层、真实会话/设置页面、会话元数据历史、Apple Bonjour、共享恢复、Active/Pending/Retired采集热切换、四层显示几何、Sender-only自动画质、双键盘、iOS原生IME；Windows控制端增加物理键状态机、IME分流和保留同一WebRTC Texture的原生无边框全屏；`analyze`和81项测试通过，macOS/iOS Debug构建通过 | Windows重新构建并验证物理键盘/微软拼音/30次全屏；iPad回归；再推进Windows被控端采集和输入注入 |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |
@@ -359,4 +359,4 @@ flutter build ios --simulator --debug
 
 ## 当前里程碑
 
-当前位于 **M1：iPad 控制 Mac 局域网纵向原型**。下一门禁是物理 iPad 与 Mac 完成 30 次主屏/Sidecar 往返切换，确认每次 Pending 预热、Active 提升、控制端确认与 Retired 释放均完成，且编码/解码关键帧计数递增、无旧内容面或横向残影；随后用稳定局域网和受控弱网验证自动档升降级、1080p30/60 P95、30 分钟资源稳定和断线恢复。通过后再推进 TURN 和 Windows GPU 性能原型。
+当前并行推进 **M1 Apple 稳定性验收** 与 **M1B Windows 控制端基线**。Windows 下一门禁是完成 Debug 原生构建，验证物理键盘、微软拼音和30次原生全屏往返，同时确认全屏前后会话、Renderer和Texture不重建；随后执行iPad回归。通过后再实现Windows被控端采集、输入注入和多显示器事务。
