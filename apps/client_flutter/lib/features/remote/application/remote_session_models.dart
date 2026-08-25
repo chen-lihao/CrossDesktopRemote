@@ -109,6 +109,15 @@ class RemoteVideoFrameSize {
         (height - other.height).abs() <= dimensionTolerance * 2;
   }
 
+  bool hasSameAspectRatio(
+    RemoteVideoFrameSize other, {
+    double relativeTolerance = 0.015,
+  }) {
+    if (!isValid || !other.isValid) return false;
+    final ratio = (width / height) / (other.width / other.height);
+    return (ratio - 1).abs() <= relativeTolerance;
+  }
+
   Map<String, dynamic> toMessage() => {'width': width, 'height': height};
 }
 
@@ -294,6 +303,14 @@ class RemoteCaptureFrameGeometry {
     required this.contentRectHeight,
     required this.contentScale,
     required this.scaleFactor,
+    required this.visiblePixelRectX,
+    required this.visiblePixelRectY,
+    required this.visiblePixelRectWidth,
+    required this.visiblePixelRectHeight,
+    required this.visibleWidthCoverage,
+    required this.visibleHeightCoverage,
+    required this.contentRectMetadataPresent,
+    required this.contentFillsBuffer,
     required this.captureGeneration,
   });
 
@@ -308,6 +325,21 @@ class RemoteCaptureFrameGeometry {
           (message['contentRectHeight'] as num?)?.toDouble() ?? 0,
       contentScale: (message['contentScale'] as num?)?.toDouble() ?? 0,
       scaleFactor: (message['scaleFactor'] as num?)?.toDouble() ?? 0,
+      visiblePixelRectX:
+          (message['visiblePixelRectX'] as num?)?.toDouble() ?? 0,
+      visiblePixelRectY:
+          (message['visiblePixelRectY'] as num?)?.toDouble() ?? 0,
+      visiblePixelRectWidth:
+          (message['visiblePixelRectWidth'] as num?)?.toDouble() ?? 0,
+      visiblePixelRectHeight:
+          (message['visiblePixelRectHeight'] as num?)?.toDouble() ?? 0,
+      visibleWidthCoverage:
+          (message['visibleWidthCoverage'] as num?)?.toDouble() ?? 0,
+      visibleHeightCoverage:
+          (message['visibleHeightCoverage'] as num?)?.toDouble() ?? 0,
+      contentRectMetadataPresent:
+          message['contentRectMetadataPresent'] as bool? ?? false,
+      contentFillsBuffer: message['contentFillsBuffer'] as bool? ?? false,
       captureGeneration: (message['captureGeneration'] as num?)?.toInt() ?? 0,
     );
   }
@@ -320,6 +352,14 @@ class RemoteCaptureFrameGeometry {
   final double contentRectHeight;
   final double contentScale;
   final double scaleFactor;
+  final double visiblePixelRectX;
+  final double visiblePixelRectY;
+  final double visiblePixelRectWidth;
+  final double visiblePixelRectHeight;
+  final double visibleWidthCoverage;
+  final double visibleHeightCoverage;
+  final bool contentRectMetadataPresent;
+  final bool contentFillsBuffer;
   final int captureGeneration;
 
   String get label =>
@@ -327,6 +367,13 @@ class RemoteCaptureFrameGeometry {
       'content ${contentRectWidth.toStringAsFixed(0)}×'
       '${contentRectHeight.toStringAsFixed(0)} @ '
       '${contentRectX.toStringAsFixed(0)},${contentRectY.toStringAsFixed(0)} · '
+      'visible ${visiblePixelRectWidth.toStringAsFixed(0)}×'
+      '${visiblePixelRectHeight.toStringAsFixed(0)} @ '
+      '${visiblePixelRectX.toStringAsFixed(0)},'
+      '${visiblePixelRectY.toStringAsFixed(0)} · '
+      'coverage ${(visibleWidthCoverage * 100).toStringAsFixed(1)}%×'
+      '${(visibleHeightCoverage * 100).toStringAsFixed(1)}% · '
+      '${contentFillsBuffer ? 'full' : 'normalized'} · '
       'contentScale ${contentScale.toStringAsFixed(2)} · '
       'scaleFactor ${scaleFactor.toStringAsFixed(2)} · gen $captureGeneration';
 }

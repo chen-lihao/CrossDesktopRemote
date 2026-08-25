@@ -10,6 +10,16 @@ CrossDesktopRemote-specific macOS changes:
   pixels from `SCContentFilter.contentRect * pointPixelScale` on macOS 14+;
 - request ScreenCaptureKit's best capture resolution for Retina and Sidecar,
   with a `CGDisplayPixelsWide/High` fallback on older macOS releases;
+- derive the active pixel region from ScreenCaptureKit `contentRect *
+  scaleFactor` metadata instead of assuming that the outer IOSurface is fully
+  occupied;
+- keep the zero-copy path when active content fills the buffer, otherwise crop
+  every valid metadata-defined region and aspect-fit it at the exact center of
+  the canonical full-frame NV12 canvas before encoding; codec alignment and
+  automatic quality rounding never invalidate an otherwise valid contentRect;
+- disable ScreenCaptureKit's extra aspect-preserving transform for full-display
+  capture on macOS 14+, because the target canvas already comes from the
+  selected display geometry;
 - preserve the raw ScreenCaptureKit metadata for diagnosis instead of
   relabelling samples;
 - pass native SDR/BT.709/video-range NV12 frames directly to WebRTC, and use
@@ -22,16 +32,41 @@ CrossDesktopRemote-specific macOS changes:
 - emit a privacy-safe first-frame notification containing only source ID and
   frame dimensions, so display switching can prove that the requested
   ScreenCaptureKit source is live before committing the WebRTC transaction;
-- expose in-place screen switching on the running track through
-  `SCStream.updateConfiguration()` and `SCStream.updateContentFilter()`;
-- suppress frame forwarding while the live ScreenCaptureKit configuration and
-  filter are changing, then admit only consecutive `.complete` frames whose
-  dimensions match the requested target;
+- switch displays with an Active/Pending/Retired ScreenCaptureKit transaction:
+  construct a target-bound `SCStream`, warm it for two complete post-barrier
+  frames whose buffer or visible content can be canonicalized to the target
+  aspect, promote it into the existing WebRTC source, and retain the untouched
+  previous stream until the controller commits or rolls back;
+- keep the RTC track, sender, transceiver, MID, SSRC, and data channels stable
+  while the short-lived capture streams overlap;
+- retain at most one encoder-ready frame for Active and Retired so rollback is
+  immediate even when a static desktop temporarily produces only idle frames;
+- reserve `SCStream.updateConfiguration()` for quality/FPS changes on the same
+  display; do not use `updateContentFilter()` for Sidecar/main-display changes,
+  because WindowServer can acknowledge it while continuing the old surface;
+- serialize format updates against display transactions and attach a separate
+  format epoch; asynchronous callbacks may update shared geometry only when
+  stream identity, source ID, capture generation, and format epoch still match;
+- return the applied source ID, capture generation, dimensions, and frame rate
+  from each in-place switch/format operation instead of a boolean-only result;
+- forward the active stream while a target stream warms, then admit only the
+  promoted stream and ignore retained rollback-stream callbacks;
+- reject queued pre-switch frames with a generation-local `displayTime`
+  barrier, while treating temporarily missing content metadata as a bounded
+  soft gate instead of a permanent switch failure;
+- aggregate privacy-safe frame-gate rejection counters for stale timestamps,
+  wrong buffer dimensions, missing metadata, aspect mismatch, and failed GPU
+  normalization;
+- include Pending complete/stable/stale/geometry counters, last raw dimensions,
+  expected canonical dimensions, and elapsed time in warm-up failures; use an
+  `SCStreamDelegate` error as an immediate failure and retain a 5-second maximum
+  Sidecar warm-up window;
 - clear each switch canvas to video-range black before rendering the first
   target frames, preventing stale IOSurface regions from leaking across
   displays;
-- adapt the unchanged macOS video source to each new width, height, and frame
-  rate without rebuilding the sender, changing SSRC, or renegotiating SDP.
+- preconfigure `RTCVideoSource` output width, height, and frame rate before
+  forwarding target frames, without rebuilding the sender, changing SSRC, or
+  renegotiating SDP;
 - expose capture-level target dimensions and frame-rate updates, so automatic
   quality adaptation reduces ScreenCaptureKit/GPU/encoder work instead of only
   scaling an already oversized RTP frame;

@@ -15,6 +15,12 @@
 - (void)switchDesktopCaptureSource:(nonnull NSDictionary*)argsMap
                             result:(nonnull FlutterResult)result;
 
+- (void)commitDesktopCaptureSource:(nonnull NSDictionary*)argsMap
+                            result:(nonnull FlutterResult)result;
+
+- (void)rollbackDesktopCaptureSource:(nonnull NSDictionary*)argsMap
+                              result:(nonnull FlutterResult)result;
+
 - (void)updateDesktopCaptureFormat:(nonnull NSDictionary*)argsMap
                             result:(nonnull FlutterResult)result;
 

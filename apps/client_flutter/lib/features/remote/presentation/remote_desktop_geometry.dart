@@ -1,5 +1,33 @@
 import 'package:flutter/painting.dart';
 
+Size resolveRemotePresentationSourceSize({
+  required Size rendererSize,
+  required Size fallbackSize,
+  Size? committedSize,
+  required bool geometryLocked,
+}) {
+  // A display-switch transaction explicitly commits the renderer geometry.
+  // Keep that snapshot authoritative until the next transaction so a stale or
+  // transitional native resize notification cannot change both the canvas and
+  // direct-touch mapping outside the switch overlay.
+  if (committedSize != null && !committedSize.isEmpty) {
+    return committedSize;
+  }
+  if (geometryLocked) return fallbackSize;
+  if (!rendererSize.isEmpty) return rendererSize;
+  return fallbackSize;
+}
+
+bool remoteAspectRatiosDiffer(
+  Size first,
+  Size second, {
+  double tolerance = 0.015,
+}) {
+  if (first.isEmpty || second.isEmpty) return false;
+  final ratio = first.aspectRatio / second.aspectRatio;
+  return (ratio - 1).abs() > tolerance;
+}
+
 class RemoteContentTransform {
   const RemoteContentTransform({
     required this.sourceSize,

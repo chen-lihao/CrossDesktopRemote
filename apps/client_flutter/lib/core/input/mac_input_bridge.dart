@@ -41,6 +41,16 @@ class MacCaptureFrameState {
     required this.sourceId,
     required this.width,
     required this.height,
+    required this.captureGeneration,
+    required this.gateStatus,
+    required this.rejectionReason,
+    required this.staleFrameCount,
+    required this.wrongSizeCount,
+    required this.missingContentMetadataCount,
+    required this.contentAspectMismatchCount,
+    required this.normalizationFailureCount,
+    required this.bufferWidth,
+    required this.bufferHeight,
   });
 
   factory MacCaptureFrameState.fromMap(Map<Object?, Object?> map) {
@@ -49,6 +59,19 @@ class MacCaptureFrameState {
       sourceId: map['sourceId'] as String? ?? '',
       width: (map['width'] as num?)?.toInt() ?? 0,
       height: (map['height'] as num?)?.toInt() ?? 0,
+      captureGeneration: (map['captureGeneration'] as num?)?.toInt() ?? 0,
+      gateStatus: map['gateStatus'] as String? ?? '',
+      rejectionReason: map['rejectionReason'] as String? ?? '',
+      staleFrameCount: (map['staleFrameCount'] as num?)?.toInt() ?? 0,
+      wrongSizeCount: (map['wrongSizeCount'] as num?)?.toInt() ?? 0,
+      missingContentMetadataCount:
+          (map['missingContentMetadataCount'] as num?)?.toInt() ?? 0,
+      contentAspectMismatchCount:
+          (map['contentAspectMismatchCount'] as num?)?.toInt() ?? 0,
+      normalizationFailureCount:
+          (map['normalizationFailureCount'] as num?)?.toInt() ?? 0,
+      bufferWidth: (map['bufferWidth'] as num?)?.toInt() ?? 0,
+      bufferHeight: (map['bufferHeight'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -56,6 +79,34 @@ class MacCaptureFrameState {
   final String sourceId;
   final int width;
   final int height;
+  final int captureGeneration;
+  final String gateStatus;
+  final String rejectionReason;
+  final int staleFrameCount;
+  final int wrongSizeCount;
+  final int missingContentMetadataCount;
+  final int contentAspectMismatchCount;
+  final int normalizationFailureCount;
+  final int bufferWidth;
+  final int bufferHeight;
+
+  bool isReadyAfter({required int sequence, required String targetSourceId}) {
+    return this.sequence > sequence &&
+        sourceId == targetSourceId &&
+        width > 0 &&
+        height > 0;
+  }
+
+  String get gateDiagnosticSummary {
+    final reason = rejectionReason.isEmpty ? 'unknown' : rejectionReason;
+    final geometry = bufferWidth > 0 && bufferHeight > 0
+        ? '，Buffer $bufferWidth×$bufferHeight'
+        : '';
+    return '$reason$geometry'
+        '，旧帧 $staleFrameCount、尺寸 $wrongSizeCount、缺少元数据 '
+        '$missingContentMetadataCount、宽高比 $contentAspectMismatchCount、规范化 '
+        '$normalizationFailureCount';
+  }
 }
 
 class MacInputBridge {

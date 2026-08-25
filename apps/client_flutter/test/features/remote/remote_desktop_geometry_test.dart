@@ -3,6 +3,74 @@ import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('locks the committed source geometry during display switching', () {
+    final size = resolveRemotePresentationSourceSize(
+      rendererSize: const Size(1311, 892),
+      fallbackSize: const Size(1311, 892),
+      committedSize: const Size(1920, 1080),
+      geometryLocked: true,
+    );
+
+    expect(size, const Size(1920, 1080));
+  });
+
+  test('keeps the explicitly committed target geometry authoritative', () {
+    final size = resolveRemotePresentationSourceSize(
+      rendererSize: const Size(1920, 1080),
+      fallbackSize: const Size(1920, 1080),
+      committedSize: const Size(1311, 892),
+      geometryLocked: false,
+    );
+
+    expect(size, const Size(1311, 892));
+  });
+
+  test(
+    'ignores an uncommitted renderer aspect change outside a transaction',
+    () {
+      final size = resolveRemotePresentationSourceSize(
+        rendererSize: const Size(1920, 832),
+        fallbackSize: const Size(1920, 1080),
+        committedSize: const Size(1920, 1080),
+        geometryLocked: false,
+      );
+
+      expect(size, const Size(1920, 1080));
+    },
+  );
+
+  test('recovered main display fills the expected iPad contain width', () {
+    final sourceSize = resolveRemotePresentationSourceSize(
+      rendererSize: const Size(1920, 832),
+      fallbackSize: const Size(1920, 1080),
+      committedSize: const Size(1920, 1080),
+      geometryLocked: false,
+    );
+    final transform = RemoteContentTransform.forViewport(
+      sourceSize: sourceSize,
+      viewportSize: const Size(1568, 1048),
+      fit: BoxFit.contain,
+    );
+
+    expect(transform.destinationRect.width, 1568);
+    expect(transform.destinationRect.height, closeTo(882, 0.001));
+    expect(
+      transform.normalize(transform.destinationRect.center),
+      const Offset(.5, .5),
+    );
+  });
+
+  test('detects material aspect ratio changes without reacting to scaling', () {
+    expect(
+      remoteAspectRatiosDiffer(const Size(1920, 1080), const Size(1280, 720)),
+      isFalse,
+    );
+    expect(
+      remoteAspectRatiosDiffer(const Size(1920, 1080), const Size(1311, 892)),
+      isTrue,
+    );
+  });
+
   test('contain excludes letterboxing from pointer coordinates', () {
     final transform = RemoteContentTransform.forViewport(
       sourceSize: const Size(1920, 1080),

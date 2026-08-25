@@ -1188,6 +1188,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   bool _switchOverlayVisible = false;
   bool _switchOverlaySlow = false;
   bool _lastDisplaySwitchPending = false;
+  bool _presentationGeometryLocked = false;
+  int _presentationSwitchToken = 0;
+  Size? _committedVideoSourceSize;
   int _compositionLength = 0;
   late RemoteKeyboardMode _activeKeyboardMode;
   Rect _systemKeyboardFrame = Rect.zero;
@@ -1205,6 +1208,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     WidgetsBinding.instance.addObserver(this);
     _activeKeyboardMode = widget.inputSettings.keyboardMode;
     _lastDisplaySwitchPending = session.displaySwitchPending;
+    _committedVideoSourceSize = _currentRendererSourceSize();
+    _presentationGeometryLocked = _lastDisplaySwitchPending;
     session.addListener(_handleDisplaySwitchState);
     _imeClientId = 'remote-surface-${identityHashCode(this)}';
     if (Platform.isIOS) {
@@ -1217,7 +1222,11 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       if (mounted) _updateGestureConfiguration();
     });
     if (_lastDisplaySwitchPending) {
-      _scheduleDisplaySwitchOverlay();
+      _presentationSwitchToken += 1;
+      _scheduleDisplaySwitchOverlay(
+        immediate: _pendingDisplayChangesAspectRatio(),
+        rebuild: false,
+      );
     }
   }
 
@@ -1305,28 +1314,42 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     if (pending == _lastDisplaySwitchPending) return;
     _lastDisplaySwitchPending = pending;
     if (pending) {
-      _scheduleDisplaySwitchOverlay();
+      final rendererSize = _currentRendererSourceSize();
+      if (rendererSize != null) _committedVideoSourceSize = rendererSize;
+      _presentationGeometryLocked = true;
+      _presentationSwitchToken += 1;
+      _scheduleDisplaySwitchOverlay(
+        immediate: _pendingDisplayChangesAspectRatio(),
+      );
       return;
     }
     _switchOverlayDelayTimer?.cancel();
     _switchOverlaySlowTimer?.cancel();
-    if (mounted && (_switchOverlayVisible || _switchOverlaySlow)) {
-      setState(() {
-        _switchOverlayVisible = false;
-        _switchOverlaySlow = false;
-      });
-    }
+    unawaited(_commitDisplaySwitchPresentation(_presentationSwitchToken));
   }
 
-  void _scheduleDisplaySwitchOverlay() {
+  void _scheduleDisplaySwitchOverlay({
+    required bool immediate,
+    bool rebuild = true,
+  }) {
     _switchOverlayDelayTimer?.cancel();
     _switchOverlaySlowTimer?.cancel();
-    _switchOverlayVisible = false;
-    _switchOverlaySlow = false;
-    _switchOverlayDelayTimer = Timer(const Duration(milliseconds: 120), () {
-      if (!mounted || !session.displaySwitchPending) return;
-      setState(() => _switchOverlayVisible = true);
-    });
+    void updateInitialState() {
+      _switchOverlayVisible = immediate;
+      _switchOverlaySlow = false;
+    }
+
+    if (rebuild && mounted) {
+      setState(updateInitialState);
+    } else {
+      updateInitialState();
+    }
+    if (!immediate) {
+      _switchOverlayDelayTimer = Timer(const Duration(milliseconds: 120), () {
+        if (!mounted || !session.displaySwitchPending) return;
+        setState(() => _switchOverlayVisible = true);
+      });
+    }
     _switchOverlaySlowTimer = Timer(const Duration(milliseconds: 800), () {
       if (!mounted || !session.displaySwitchPending) return;
       setState(() {
@@ -1334,6 +1357,67 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         _switchOverlaySlow = true;
       });
     });
+  }
+
+  Future<void> _commitDisplaySwitchPresentation(int token) async {
+    // The session controller clears displaySwitchPending only after the target
+    // key frame, RTP geometry, and platform renderer geometry are stable.
+    // Commit that already-validated geometry in one layout pass, then reveal
+    // it on the following Flutter frame.
+    if (!mounted ||
+        session.displaySwitchPending ||
+        token != _presentationSwitchToken) {
+      return;
+    }
+    final rendererSize = _currentRendererSourceSize();
+    final fallbackSize = _selectedDisplaySourceSize();
+    setState(() {
+      _committedVideoSourceSize = rendererSize ?? fallbackSize;
+      _presentationGeometryLocked = false;
+    });
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted ||
+        session.displaySwitchPending ||
+        token != _presentationSwitchToken) {
+      return;
+    }
+    if (_switchOverlayVisible || _switchOverlaySlow) {
+      setState(() {
+        _switchOverlayVisible = false;
+        _switchOverlaySlow = false;
+      });
+    }
+  }
+
+  Size? _currentRendererSourceSize() {
+    final renderer = session.remoteRenderer.value;
+    if (renderer.width <= 0 || renderer.height <= 0) return null;
+    return Size(renderer.width, renderer.height);
+  }
+
+  Size _selectedDisplaySourceSize() {
+    final display = session.selectedDisplay;
+    return Size(
+      (display?.captureWidth ?? 16).toDouble(),
+      (display?.captureHeight ?? 10).toDouble(),
+    );
+  }
+
+  bool _pendingDisplayChangesAspectRatio() {
+    RemoteDisplay? current;
+    RemoteDisplay? target;
+    for (final display in session.displays) {
+      if (display.id ==
+          (session.renderedDisplayId ?? session.selectedDisplayId)) {
+        current = display;
+      }
+      if (display.id == session.pendingDisplayId) target = display;
+    }
+    if (current == null || target == null) return true;
+    return remoteAspectRatiosDiffer(
+      Size(current.captureWidth.toDouble(), current.captureHeight.toDouble()),
+      Size(target.captureWidth.toDouble(), target.captureHeight.toDouble()),
+    );
   }
 
   void _changeKeyboardMode(RemoteKeyboardMode mode) {
@@ -1507,13 +1591,19 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       builder: (context, _) => LayoutBuilder(
         builder: (context, constraints) {
           final renderer = session.remoteRenderer.value;
-          final display = session.selectedDisplay;
-          final sourceSize = renderer.width > 0 && renderer.height > 0
-              ? Size(renderer.width, renderer.height)
-              : Size(
-                  (display?.captureWidth ?? 16).toDouble(),
-                  (display?.captureHeight ?? 10).toDouble(),
-                );
+          final rendererSize = Size(renderer.width, renderer.height);
+          final fallbackSize = _selectedDisplaySourceSize();
+          final sourceSize = resolveRemotePresentationSourceSize(
+            rendererSize: rendererSize,
+            fallbackSize: fallbackSize,
+            committedSize: _committedVideoSourceSize,
+            geometryLocked: _presentationGeometryLocked,
+          );
+          if (_committedVideoSourceSize == null &&
+              !_presentationGeometryLocked &&
+              !rendererSize.isEmpty) {
+            _committedVideoSourceSize = rendererSize;
+          }
           final boxFit = widget.viewFit == RemoteViewFit.contain
               ? BoxFit.contain
               : BoxFit.cover;
@@ -1550,9 +1640,13 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                     child: RTCVideoView(
                       session.remoteRenderer,
                       key: const ValueKey('remoteVideoView'),
-                      objectFit: widget.viewFit == RemoteViewFit.contain
-                          ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
-                          : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                      // RemoteContentTransform is the single owner of
+                      // contain/cover layout and pointer mapping. The inner
+                      // WebRTC view only fills that committed destination
+                      // rectangle, preventing a second contain pass from
+                      // shrinking a recovered main-display frame.
+                      objectFit:
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                     ),
                   ),
                 ),
@@ -1616,7 +1710,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                   ),
                 Positioned.fill(
                   child: IgnorePointer(
-                    ignoring: !_switchOverlayVisible,
+                    ignoring:
+                        !session.displaySwitchPending && !_switchOverlayVisible,
                     child: AnimatedOpacity(
                       opacity: _switchOverlayVisible ? 1 : 0,
                       duration: const Duration(milliseconds: 120),
@@ -2240,7 +2335,10 @@ class _DisplaySwitchOverlay extends StatelessWidget {
   Widget build(BuildContext context) {
     final target = displayName?.trim();
     return ColoredBox(
-      color: Colors.black.withValues(alpha: 0.78),
+      // Geometry is committed underneath this surface before fade-out. It must
+      // be fully opaque or users can still see the old and target aspect ratios
+      // resize through the transition.
+      color: Colors.black,
       child: Center(
         child: Semantics(
           liveRegion: true,

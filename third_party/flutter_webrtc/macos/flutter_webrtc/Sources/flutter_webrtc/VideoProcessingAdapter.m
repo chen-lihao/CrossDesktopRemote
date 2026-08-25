@@ -52,6 +52,22 @@
   os_unfair_lock_unlock(&_lock);
 }
 
+- (void)prepareOutputFormatWithWidth:(NSInteger)width
+                              height:(NSInteger)height
+                                 fps:(NSInteger)fps {
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+  os_unfair_lock_lock(&_lock);
+  _preferredFramesPerSecond = MAX(1, fps);
+  [_videoSource adaptOutputFormatToWidth:(int)width
+                                  height:(int)height
+                                     fps:(int)_preferredFramesPerSecond];
+  _adaptedWidth = (int)width;
+  _adaptedHeight = (int)height;
+  os_unfair_lock_unlock(&_lock);
+}
+
 - (void)capturer:(RTC_OBJC_TYPE(RTCVideoCapturer) *)capturer
     didCaptureVideoFrame:(RTC_OBJC_TYPE(RTCVideoFrame) *)frame {
   os_unfair_lock_lock(&_lock);

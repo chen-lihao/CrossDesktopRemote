@@ -128,6 +128,25 @@ void main() {
     );
   });
 
+  test('video geometry accepts adaptive resolutions only at target aspect', () {
+    const sidecar = RemoteVideoFrameSize(width: 1311, height: 892);
+
+    expect(
+      const RemoteVideoFrameSize(
+        width: 1280,
+        height: 870,
+      ).hasSameAspectRatio(sidecar),
+      isTrue,
+    );
+    expect(
+      const RemoteVideoFrameSize(
+        width: 1920,
+        height: 1080,
+      ).hasSameAspectRatio(sidecar),
+      isFalse,
+    );
+  });
+
   test('video geometry state safely decodes protocol values', () {
     expect(
       RemoteVideoGeometryState.fromWireValue('adapting'),
@@ -152,6 +171,25 @@ void main() {
         'normalization': 'Core Image GPU HDR→SDR',
         'normalizationBypassed': false,
         'normalizationDurationMs': 2.5,
+        'frameGeometry': {
+          'bufferWidth': 1920,
+          'bufferHeight': 1080,
+          'contentRectX': 80,
+          'contentRectY': 54,
+          'contentRectWidth': 800,
+          'contentRectHeight': 432,
+          'contentScale': 1,
+          'scaleFactor': 2,
+          'visiblePixelRectX': 160,
+          'visiblePixelRectY': 108,
+          'visiblePixelRectWidth': 1600,
+          'visiblePixelRectHeight': 864,
+          'visibleWidthCoverage': 0.833333,
+          'visibleHeightCoverage': 0.8,
+          'contentRectMetadataPresent': true,
+          'contentFillsBuffer': false,
+          'captureGeneration': 4,
+        },
         'rawFrame': {
           'stage': 'screen-capture-kit-raw',
           'width': 3024,
@@ -203,6 +241,10 @@ void main() {
     expect(diagnostics.rawFrame?.dimensions, '3024×1964');
     expect(diagnostics.rawFrame?.lumaHistogram16, hasLength(16));
     expect(diagnostics.encoderInput?.aboveNominalWhitePercent, 0);
+    expect(diagnostics.frameGeometry?.contentRectMetadataPresent, isTrue);
+    expect(diagnostics.frameGeometry?.contentFillsBuffer, isFalse);
+    expect(diagnostics.frameGeometry?.visiblePixelRectWidth, 1600);
+    expect(diagnostics.frameGeometry?.label, contains('83.3%×80.0%'));
     expect(diagnostics.forDisplay('2')?.hdrActive, isTrue);
   });
 }

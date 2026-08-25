@@ -7,13 +7,21 @@ import 'utils.dart';
 
 class DesktopCapturerSourceNative extends DesktopCapturerSource {
   DesktopCapturerSourceNative(
-      this._id, this._name, this._thumbnailSize, this._type);
+    this._id,
+    this._name,
+    this._thumbnailSize,
+    this._type,
+  );
   factory DesktopCapturerSourceNative.fromMap(Map<dynamic, dynamic> map) {
     var sourceType = (map['type'] as String) == 'window'
         ? SourceType.Window
         : SourceType.Screen;
-    var source = DesktopCapturerSourceNative(map['id'], map['name'],
-        ThumbnailSize.fromMap(map['thumbnailSize']), sourceType);
+    var source = DesktopCapturerSourceNative(
+      map['id'],
+      map['name'],
+      ThumbnailSize.fromMap(map['thumbnailSize']),
+      sourceType,
+    );
     if (map['thumbnail'] != null) {
       source.thumbnail = map['thumbnail'] as Uint8List;
     }
@@ -21,8 +29,9 @@ class DesktopCapturerSourceNative extends DesktopCapturerSource {
   }
 
   //ignore: close_sinks
-  final StreamController<String> _onNameChanged =
-      StreamController.broadcast(sync: true);
+  final StreamController<String> _onNameChanged = StreamController.broadcast(
+    sync: true,
+  );
 
   @override
   StreamController<String> get onNameChanged => _onNameChanged;
@@ -142,8 +151,10 @@ class DesktopCapturerNative extends DesktopCapturer {
   }
 
   @override
-  Future<List<DesktopCapturerSource>> getSources(
-      {required List<SourceType> types, ThumbnailSize? thumbnailSize}) async {
+  Future<List<DesktopCapturerSource>> getSources({
+    required List<SourceType> types,
+    ThumbnailSize? thumbnailSize,
+  }) async {
     _sources.clear();
     final response = await WebRTC.invokeMethod(
       'getDesktopSources',
@@ -177,7 +188,7 @@ class DesktopCapturerNative extends DesktopCapturer {
   }
 
   @override
-  Future<bool> switchSource({
+  Future<DesktopCaptureConfiguration> switchSource({
     required String trackId,
     required String sourceId,
     required int frameRate,
@@ -195,11 +206,47 @@ class DesktopCapturerNative extends DesktopCapturer {
     if (response == null) {
       throw Exception('switchDesktopCaptureSource returned null');
     }
+    return DesktopCaptureConfiguration.fromMap(response);
+  }
+
+  @override
+  Future<bool> commitSourceSwitch({
+    required String trackId,
+    required int captureGeneration,
+  }) async {
+    final response = await WebRTC.invokeMethod(
+      'commitDesktopCaptureSource',
+      <String, dynamic>{
+        'trackId': trackId,
+        'captureGeneration': captureGeneration,
+      },
+    );
+    if (response == null) {
+      throw Exception('commitDesktopCaptureSource returned null');
+    }
     return response['result'] as bool? ?? false;
   }
 
   @override
-  Future<bool> updateCaptureFormat({
+  Future<DesktopCaptureConfiguration> rollbackSourceSwitch({
+    required String trackId,
+    required int captureGeneration,
+  }) async {
+    final response = await WebRTC.invokeMethod(
+      'rollbackDesktopCaptureSource',
+      <String, dynamic>{
+        'trackId': trackId,
+        'captureGeneration': captureGeneration,
+      },
+    );
+    if (response == null) {
+      throw Exception('rollbackDesktopCaptureSource returned null');
+    }
+    return DesktopCaptureConfiguration.fromMap(response);
+  }
+
+  @override
+  Future<DesktopCaptureConfiguration> updateCaptureFormat({
     required String trackId,
     required int frameRate,
     int? targetLongEdge,
@@ -215,7 +262,7 @@ class DesktopCapturerNative extends DesktopCapturer {
     if (response == null) {
       throw Exception('updateDesktopCaptureFormat returned null');
     }
-    return response['result'] as bool? ?? false;
+    return DesktopCaptureConfiguration.fromMap(response);
   }
 
   @override
@@ -237,8 +284,8 @@ class DesktopCapturerNative extends DesktopCapturer {
         'sourceId': source.id,
         'thumbnailSize': {
           'width': source.thumbnailSize.width,
-          'height': source.thumbnailSize.height
-        }
+          'height': source.thumbnailSize.height,
+        },
       },
     );
     if (response == null || !response is Uint8List?) {

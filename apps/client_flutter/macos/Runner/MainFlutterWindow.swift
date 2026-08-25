@@ -25,8 +25,10 @@ class MainFlutterWindow: NSWindow {
   private var captureColorDiagnostics: [String: Any] = [:]
   private var colorDiagnosticsObserver: NSObjectProtocol?
   private var captureFirstFrameObserver: NSObjectProtocol?
+  private var captureFrameGateObserver: NSObjectProtocol?
   private var captureFrameSequence = 0
   private var captureFrameState: [String: Any] = [:]
+  private var captureFrameGateState: [String: Any] = [:]
   private var grayscaleTestPanel: NSPanel?
 
   override func awakeFromNib() {
@@ -54,6 +56,13 @@ class MainFlutterWindow: NSWindow {
       var state = notification.userInfo as? [String: Any] ?? [:]
       state["sequence"] = self.captureFrameSequence
       self.captureFrameState = state
+    }
+    captureFrameGateObserver = NotificationCenter.default.addObserver(
+      forName: Notification.Name("CrossDesktopRemoteCaptureFrameGate"),
+      object: nil,
+      queue: .main
+    ) { [weak self] notification in
+      self?.captureFrameGateState = notification.userInfo as? [String: Any] ?? [:]
     }
     registerInputChannel(binaryMessenger: flutterViewController.engine.binaryMessenger)
     lanDiscoveryBridge = AppleLanDiscoveryBridge(
@@ -86,7 +95,10 @@ class MainFlutterWindow: NSWindow {
       case "getColorDiagnostics":
         result(self.getColorDiagnostics())
       case "getCaptureFrameState":
-        result(self.captureFrameState.merging(["sequence": self.captureFrameSequence]) { current, _ in current })
+        let state = self.captureFrameState
+          .merging(self.captureFrameGateState) { _, gateValue in gateValue }
+          .merging(["sequence": self.captureFrameSequence]) { current, _ in current }
+        result(state)
       case "showGrayscaleTestPattern":
         self.showGrayscaleTestPattern()
         result(nil)
@@ -112,6 +124,9 @@ class MainFlutterWindow: NSWindow {
     }
     if let captureFirstFrameObserver {
       NotificationCenter.default.removeObserver(captureFirstFrameObserver)
+    }
+    if let captureFrameGateObserver {
+      NotificationCenter.default.removeObserver(captureFrameGateObserver)
     }
   }
 

@@ -17,4 +17,8 @@
 
 - (void)setPreferredFramesPerSecond:(NSInteger)fps;
 
+- (void)prepareOutputFormatWithWidth:(NSInteger)width
+                              height:(NSInteger)height
+                                 fps:(NSInteger)fps;
+
 @end

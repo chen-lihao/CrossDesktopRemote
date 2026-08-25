@@ -611,6 +611,12 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
   } else if ([@"switchDesktopCaptureSource" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     [self switchDesktopCaptureSource:argsMap result:result];
+  } else if ([@"commitDesktopCaptureSource" isEqualToString:call.method]) {
+    NSDictionary* argsMap = call.arguments;
+    [self commitDesktopCaptureSource:argsMap result:result];
+  } else if ([@"rollbackDesktopCaptureSource" isEqualToString:call.method]) {
+    NSDictionary* argsMap = call.arguments;
+    [self rollbackDesktopCaptureSource:argsMap result:result];
   } else if ([@"updateDesktopCaptureFormat" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     [self updateDesktopCaptureFormat:argsMap result:result];

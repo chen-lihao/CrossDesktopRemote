@@ -7,6 +7,7 @@ import 'package:cross_desktop_remote/core/input/mac_input_bridge.dart';
 import 'package:cross_desktop_remote/core/input/remote_text_chunks.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_client.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
+import 'package:cross_desktop_remote/features/remote/application/remote_display_switch_geometry.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_input_sequence_guard.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_media_stats.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_quality_adaptation.dart';
@@ -46,6 +47,8 @@ class _HostDisplaySwitchTransaction {
     required this.previousStream,
     required this.targetStream,
     required this.switchedInPlace,
+    required this.trackId,
+    required this.captureGeneration,
   });
 
   final int generation;
@@ -54,7 +57,37 @@ class _HostDisplaySwitchTransaction {
   final MediaStream previousStream;
   final MediaStream targetStream;
   final bool switchedInPlace;
+  final String? trackId;
+  final int captureGeneration;
   Timer? timeout;
+}
+
+class _DisplaySwitchFailure implements Exception {
+  const _DisplaySwitchFailure({
+    required this.code,
+    required this.stage,
+    required this.message,
+  });
+
+  final String code;
+  final String stage;
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+class _CaptureFrameWaitResult {
+  const _CaptureFrameWaitResult({required this.ready, this.lastState});
+
+  final bool ready;
+  final MacCaptureFrameState? lastState;
+
+  String get diagnosticSuffix {
+    final state = lastState;
+    if (state == null || state.rejectionReason.isEmpty) return '';
+    return '（采集门禁：${state.gateDiagnosticSummary}）';
+  }
 }
 
 class RemoteSessionController extends ChangeNotifier {
@@ -96,6 +129,7 @@ class RemoteSessionController extends ChangeNotifier {
   Timer? _displaySwitchRequestTimer;
   Timer? _connectionRecoveryTimer;
   Timer? _mediaStatsTimer;
+  Timer? _adaptiveCaptureResizeTimer;
   final List<RTCIceCandidate> _pendingCandidates = [];
   bool _remoteDescriptionSet = false;
   bool _rendererReady = false;
@@ -109,6 +143,8 @@ class RemoteSessionController extends ChangeNotifier {
   bool _hostDisplaySwitchInProgress = false;
   bool _samplingMediaStats = false;
   bool _adaptiveQualityUpdateInProgress = false;
+  Completer<void>? _adaptiveQualityUpdateCompleter;
+  Completer<void>? _captureFormatUpdateCompleter;
   bool _screenCaptureGranted = false;
   bool? _accessibilityGranted;
   int _inputSequence = 0;
@@ -128,6 +164,7 @@ class RemoteSessionController extends ChangeNotifier {
   String? _controlError;
   String? _error;
   DateTime? _lastControlUnavailableNotice;
+  DateTime? _automaticQualitySuppressedUntil;
   RemoteQualityProfile _selectedQuality;
   int? _actualVideoWidth;
   int? _actualVideoHeight;
@@ -143,6 +180,8 @@ class RemoteSessionController extends ChangeNotifier {
   RemoteMediaDiagnostics? _mediaDiagnostics;
   int? _captureTargetLongEdge;
   int? _captureTargetFrameRate;
+  String? _captureTargetSourceId;
+  RemoteAdaptiveVideoTier? _pendingAdaptiveCaptureTier;
   String _statusMessage = '尚未连接';
   RemoteSessionState _state = RemoteSessionState.idle;
   _HostDisplaySwitchTransaction? _hostDisplaySwitchTransaction;
@@ -460,7 +499,7 @@ class RemoteSessionController extends ChangeNotifier {
     int generation,
   ) async {
     _RtcVideoProgress? baseline;
-    for (var attempt = 0; attempt < 5; attempt += 1) {
+    for (var attempt = 0; attempt < 20; attempt += 1) {
       try {
         baseline = await _readRtcVideoProgress('inbound-rtp');
       } catch (_) {
@@ -587,6 +626,10 @@ class RemoteSessionController extends ChangeNotifier {
     }
     if (_controlChannel?.state != RTCDataChannelState.RTCDataChannelOpen) {
       _emitNotice('视频控制通道尚未就绪', level: RemoteNoticeLevel.warning);
+      return;
+    }
+    if (_displaySwitchPending) {
+      _emitNotice('显示器切换完成后再调整清晰度', level: RemoteNoticeLevel.warning);
       return;
     }
     _qualityPending = true;
@@ -771,7 +814,8 @@ class RemoteSessionController extends ChangeNotifier {
       if (role == RemoteRole.host &&
           _selectedQuality == RemoteQualityProfile.automatic &&
           !_hostDisplaySwitchInProgress &&
-          !_adaptiveQualityUpdateInProgress) {
+          !_adaptiveQualityUpdateInProgress &&
+          !_automaticQualityIsSuppressed) {
         final next = _qualityAdaptation.observe(diagnostics);
         if (next != null) {
           unawaited(_applyAdaptiveVideoTarget(next));
@@ -791,18 +835,100 @@ class RemoteSessionController extends ChangeNotifier {
       return;
     }
     _adaptiveQualityUpdateInProgress = true;
+    final completion = Completer<void>();
+    _adaptiveQualityUpdateCompleter = completion;
     try {
       await _applyVideoQuality(
         RemoteQualityProfile.automatic,
         reportFailure: false,
+        configureCapture: false,
       );
       _qualityAdaptation.confirmLastChange();
+      _scheduleAdaptiveCaptureResize(tier);
       _emitNotice('网络质量变化，已自动调整为 ${tier.label}');
     } catch (error) {
       _qualityAdaptation.rollbackLastChange();
       _emitNotice('自动画质调整暂未生效：$error', level: RemoteNoticeLevel.warning);
     } finally {
       _adaptiveQualityUpdateInProgress = false;
+      if (!completion.isCompleted) completion.complete();
+      if (identical(_adaptiveQualityUpdateCompleter, completion)) {
+        _adaptiveQualityUpdateCompleter = null;
+      }
+    }
+  }
+
+  bool get _automaticQualityIsSuppressed {
+    final until = _automaticQualitySuppressedUntil;
+    return until != null && DateTime.now().isBefore(until);
+  }
+
+  void _scheduleAdaptiveCaptureResize(RemoteAdaptiveVideoTier tier) {
+    _adaptiveCaptureResizeTimer?.cancel();
+    _pendingAdaptiveCaptureTier = tier;
+    _adaptiveCaptureResizeTimer = Timer(const Duration(seconds: 10), () {
+      unawaited(_applyScheduledAdaptiveCaptureResize(tier));
+    });
+  }
+
+  void _cancelAdaptiveCaptureResize() {
+    _adaptiveCaptureResizeTimer?.cancel();
+    _adaptiveCaptureResizeTimer = null;
+    _pendingAdaptiveCaptureTier = null;
+  }
+
+  Future<void> _applyScheduledAdaptiveCaptureResize(
+    RemoteAdaptiveVideoTier tier,
+  ) async {
+    if (_closing ||
+        _selectedQuality != RemoteQualityProfile.automatic ||
+        _qualityAdaptation.tier != tier ||
+        _pendingAdaptiveCaptureTier != tier ||
+        _hostDisplaySwitchInProgress ||
+        _adaptiveQualityUpdateInProgress) {
+      return;
+    }
+    _adaptiveCaptureResizeTimer = null;
+    _pendingAdaptiveCaptureTier = null;
+    _adaptiveQualityUpdateInProgress = true;
+    final completion = Completer<void>();
+    _adaptiveQualityUpdateCompleter = completion;
+    try {
+      await _applyVideoQuality(
+        RemoteQualityProfile.automatic,
+        reportFailure: false,
+        publishState: false,
+      );
+      _publishQualityState();
+    } catch (error) {
+      _emitNotice('采集分辨率将在网络稳定后重试：$error', level: RemoteNoticeLevel.warning);
+    } finally {
+      _adaptiveQualityUpdateInProgress = false;
+      if (!completion.isCompleted) completion.complete();
+      if (identical(_adaptiveQualityUpdateCompleter, completion)) {
+        _adaptiveQualityUpdateCompleter = null;
+      }
+    }
+  }
+
+  Future<void> _waitForCaptureMutationsToSettle() async {
+    final pending = <Future<void>>[];
+    final adaptiveUpdate = _adaptiveQualityUpdateCompleter;
+    if (adaptiveUpdate != null) pending.add(adaptiveUpdate.future);
+    final captureUpdate = _captureFormatUpdateCompleter;
+    if (captureUpdate != null) pending.add(captureUpdate.future);
+    if (pending.isEmpty) return;
+    await Future.wait(pending).timeout(const Duration(seconds: 8));
+  }
+
+  void _completeDisplaySwitchCoordination() {
+    _hostDisplaySwitchInProgress = false;
+    _automaticQualitySuppressedUntil = DateTime.now().add(
+      const Duration(seconds: 5),
+    );
+    _mediaStatsAccumulator.reset();
+    if (!_closing && _selectedQuality == RemoteQualityProfile.automatic) {
+      _scheduleAdaptiveCaptureResize(_qualityAdaptation.tier);
     }
   }
 
@@ -952,6 +1078,14 @@ class RemoteSessionController extends ChangeNotifier {
       case 'refresh-displays':
         await _refreshHostDisplays();
       case 'set-quality':
+        if (_hostDisplaySwitchInProgress) {
+          _sendControl({
+            'type': 'quality-error',
+            'version': 2,
+            'message': '显示器切换期间暂不调整清晰度',
+          });
+          return;
+        }
         await _applyVideoQuality(
           RemoteQualityProfile.fromWireValue(message['profile'] as String?),
         );
@@ -1033,6 +1167,10 @@ class RemoteSessionController extends ChangeNotifier {
       case 'display-switch-error':
         final generation = (message['generation'] as num?)?.toInt() ?? 0;
         if (generation == 0 || generation >= _displaySwitchGeneration) {
+          final recoveryGeometry = _expectedVideoFrameSize;
+          if (_displaySwitchPending && recoveryGeometry?.isValid == true) {
+            await _waitForRendererGeometry(recoveryGeometry!);
+          }
           _displaySwitchRequestTimer?.cancel();
           _displaySwitchPending = false;
           _pendingDisplayId = null;
@@ -1041,8 +1179,20 @@ class RemoteSessionController extends ChangeNotifier {
           _displaySwitchInboundKeyFramesBaseline = null;
           _videoGeometryState = RemoteVideoGeometryState.stable;
           notifyListeners();
+          final stage = message['stage'] as String?;
+          final stageLabel = switch (stage) {
+            'captureConfigured' => '配置采集画面',
+            'sourceFramesStable' => '等待采集画面',
+            'encoderGeometryReady' => '初始化编码器',
+            'targetKeyFrameEncoded' => '校准编码尺寸',
+            'targetKeyFrameDecoded' => '等待目标关键帧',
+            'rendererGeometryStable' => '校准显示尺寸',
+            _ => null,
+          };
           _emitNotice(
-            message['message'] as String? ?? '远程显示器切换失败',
+            stageLabel == null
+                ? message['message'] as String? ?? '远程显示器切换失败'
+                : '$stageLabel失败：${message['message'] as String? ?? '请重试'}',
             level: RemoteNoticeLevel.error,
           );
         }
@@ -1151,12 +1301,10 @@ class RemoteSessionController extends ChangeNotifier {
     final inboundProgress = await _waitForInboundVideoProgress(
       afterFrames: _displaySwitchInboundFramesBaseline,
       afterKeyFrames: _displaySwitchInboundKeyFramesBaseline,
+      targetGeometry: expected,
     );
     if (generation > 0 && generation < _displaySwitchGeneration) return;
 
-    _displaySwitchRequestTimer?.cancel();
-    _displaySwitchPending = false;
-    _pendingDisplayId = null;
     if (inboundProgress == null) {
       _displaySwitchInboundFramesBaseline = null;
       _displaySwitchInboundKeyFramesBaseline = null;
@@ -1167,20 +1315,41 @@ class RemoteSessionController extends ChangeNotifier {
         'version': 2,
         'displayId': displayId,
         'generation': generation,
-        'message': '未收到目标显示器的稳定视频帧',
+        'code': 'DECODER_GEOMETRY_TIMEOUT',
+        'stage': 'targetKeyFrameDecoded',
+        'message': '未收到符合目标显示器宽高比的解码关键帧',
       });
-      _emitNotice(
-        '显示器切换失败：未收到新的解码视频帧，已请求恢复原画面',
-        level: RemoteNoticeLevel.error,
-      );
+      _emitNotice('目标关键帧尺寸未稳定，正在恢复原画面', level: RemoteNoticeLevel.warning);
       return;
     }
 
+    final rendererGeometry = await _waitForRendererGeometry(expected);
+    if (generation > 0 && generation < _displaySwitchGeneration) return;
+    if (rendererGeometry == null) {
+      _displaySwitchInboundFramesBaseline = null;
+      _displaySwitchInboundKeyFramesBaseline = null;
+      _displaySwitchBaselineGeneration = null;
+      notifyListeners();
+      _sendControl({
+        'type': 'display-switch-rejected',
+        'version': 2,
+        'displayId': displayId,
+        'generation': generation,
+        'code': 'RENDERER_GEOMETRY_TIMEOUT',
+        'stage': 'rendererGeometryStable',
+        'message': '目标显示器已解码，但渲染尺寸尚未稳定',
+      });
+      _emitNotice('目标画面尺寸尚未稳定，正在恢复原画面', level: RemoteNoticeLevel.warning);
+      return;
+    }
+
+    _displaySwitchRequestTimer?.cancel();
+    _displaySwitchPending = false;
+    _pendingDisplayId = null;
+
     _selectedDisplayId = displayId;
     _renderedDisplayId = displayId;
-    _inboundVideoFrameSize = inboundProgress.size.isValid
-        ? inboundProgress.size
-        : _inboundVideoFrameSize;
+    _inboundVideoFrameSize = rendererGeometry;
     final senderMismatch = message['geometryMismatch'] == true;
     _videoGeometryState =
         senderMismatch ||
@@ -1208,10 +1377,11 @@ class RemoteSessionController extends ChangeNotifier {
   Future<_RtcVideoProgress?> _waitForInboundVideoProgress({
     int? afterFrames,
     int? afterKeyFrames,
+    required RemoteVideoFrameSize targetGeometry,
   }) async {
     _RtcVideoProgress? latest;
-    var stableSamples = 0;
-    for (var attempt = 0; attempt < 20; attempt += 1) {
+    final geometryGate = RemoteVideoGeometryGate(target: targetGeometry);
+    for (var attempt = 0; attempt < 30; attempt += 1) {
       _RtcVideoProgress? progress;
       try {
         progress = await _readRtcVideoProgress('inbound-rtp');
@@ -1222,15 +1392,15 @@ class RemoteSessionController extends ChangeNotifier {
       if (latest?.size.isValid == true) {
         _inboundVideoFrameSize = latest!.size;
       }
-      if (_videoFramesAdvanced(progress, afterFrames: afterFrames) &&
-          _videoKeyFramesAdvanced(progress, afterKeyFrames: afterKeyFrames)) {
-        stableSamples += 1;
-      } else {
-        stableSamples = 0;
-      }
-      // A decoded key frame proves the decoder no longer references the
-      // previously selected display. Geometry remains a quality diagnostic.
-      if (stableSamples >= 2) {
+      if (geometryGate.observe(
+        size: progress?.size,
+        frames: progress?.frames,
+        mediaAdvanced: _videoFramesAdvanced(progress, afterFrames: afterFrames),
+        keyFrameAdvanced: _videoKeyFramesAdvanced(
+          progress,
+          afterKeyFrames: afterKeyFrames,
+        ),
+      )) {
         notifyListeners();
         return latest;
       }
@@ -1238,6 +1408,53 @@ class RemoteSessionController extends ChangeNotifier {
     }
     notifyListeners();
     return null;
+  }
+
+  Future<RemoteVideoFrameSize?> _waitForRendererGeometry(
+    RemoteVideoFrameSize targetGeometry,
+  ) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 2));
+    while (!_closing && DateTime.now().isBefore(deadline)) {
+      final before = _currentRendererFrameSize();
+      if (_videoGeometryMatchesTarget(before, targetGeometry)) {
+        await _waitForRendererUpdate(const Duration(milliseconds: 60));
+        final after = _currentRendererFrameSize();
+        if (_sameVideoSize(before, after) &&
+            _videoGeometryMatchesTarget(after, targetGeometry)) {
+          return after;
+        }
+      } else {
+        await _waitForRendererUpdate(const Duration(milliseconds: 120));
+      }
+    }
+    return null;
+  }
+
+  RemoteVideoFrameSize? _currentRendererFrameSize() {
+    final value = remoteRenderer.value;
+    final width = value.width.round();
+    final height = value.height.round();
+    if (width <= 0 || height <= 0) return null;
+    return RemoteVideoFrameSize(width: width, height: height);
+  }
+
+  Future<bool> _waitForRendererUpdate(Duration timeout) async {
+    final completer = Completer<bool>();
+    late final Timer timer;
+    void listener() {
+      if (!completer.isCompleted) completer.complete(true);
+    }
+
+    remoteRenderer.addListener(listener);
+    timer = Timer(timeout, () {
+      if (!completer.isCompleted) completer.complete(false);
+    });
+    try {
+      return await completer.future;
+    } finally {
+      timer.cancel();
+      remoteRenderer.removeListener(listener);
+    }
   }
 
   void _sendControl(Map<String, dynamic> message) {
@@ -1328,9 +1545,15 @@ class RemoteSessionController extends ChangeNotifier {
     RemoteQualityProfile profile, {
     bool reportFailure = true,
     bool publishState = true,
+    bool forceCaptureConfiguration = false,
+    bool configureCapture = true,
+    bool captureAlreadyConfigured = false,
     RemoteDisplay? display,
   }) async {
     try {
+      if (profile != RemoteQualityProfile.automatic) {
+        _cancelAdaptiveCaptureResize();
+      }
       final sender = _videoSender;
       if (sender == null) {
         throw StateError('视频发送器尚未就绪');
@@ -1345,7 +1568,11 @@ class RemoteSessionController extends ChangeNotifier {
       );
       final qualityDisplay = display ?? selectedDisplay;
       final desiredScale = target.scaleFor(qualityDisplay);
-      final captureConfigured = await _ensureCaptureTarget(target);
+      final captureConfiguration = configureCapture
+          ? await _ensureCaptureTarget(target, force: forceCaptureConfiguration)
+          : null;
+      final captureConfigured =
+          captureAlreadyConfigured || captureConfiguration?.applied == true;
       final parameters = sender.parameters;
       parameters.degradationPreference =
           profile == RemoteQualityProfile.automatic
@@ -1357,7 +1584,9 @@ class RemoteSessionController extends ChangeNotifier {
       if (encodings == null || encodings.isEmpty) {
         throw StateError('当前视频编码器不支持动态画质切换');
       }
-      final senderScale = captureConfigured ? 1.0 : desiredScale;
+      final senderScale = captureConfigured
+          ? 1.0
+          : _senderScaleForCurrentCapture(target, qualityDisplay);
       for (final encoding in encodings) {
         encoding
           ..maxBitrate = target.maxBitrate
@@ -1369,7 +1598,12 @@ class RemoteSessionController extends ChangeNotifier {
         throw StateError('视频编码器拒绝了新的画质参数');
       }
       _selectedQuality = profile;
-      _updateExpectedVideoSize(desiredScale, display: qualityDisplay);
+      _updateExpectedVideoSize(
+        captureConfigured
+            ? desiredScale
+            : _effectiveScaleForCurrentCapture(target, qualityDisplay),
+        display: qualityDisplay,
+      );
       if (publishState) _publishQualityState();
       notifyListeners();
     } catch (error) {
@@ -1383,28 +1617,118 @@ class RemoteSessionController extends ChangeNotifier {
     }
   }
 
-  Future<bool> _ensureCaptureTarget(RemoteVideoTarget target) async {
-    if (role != RemoteRole.host || !Platform.isMacOS) return false;
-    if (_captureTargetLongEdge == target.targetLongEdge &&
-        _captureTargetFrameRate == target.maxFramerate) {
-      return true;
+  double _senderScaleForCurrentCapture(
+    RemoteVideoTarget target,
+    RemoteDisplay? display,
+  ) {
+    if (display == null) return 1;
+    final sourceLongEdge = math.max(
+      display.captureWidth,
+      display.captureHeight,
+    );
+    if (sourceLongEdge <= 0) return 1;
+    final configuredLongEdge = _captureTargetSourceId == display.id
+        ? _captureTargetLongEdge
+        : null;
+    final capturedLongEdge = math.min(
+      sourceLongEdge,
+      configuredLongEdge ?? sourceLongEdge,
+    );
+    final outputLongEdge = math.min(
+      capturedLongEdge,
+      target.targetLongEdge ?? sourceLongEdge,
+    );
+    if (outputLongEdge <= 0) return 1;
+    return math.max(1, capturedLongEdge / outputLongEdge).toDouble();
+  }
+
+  double _effectiveScaleForCurrentCapture(
+    RemoteVideoTarget target,
+    RemoteDisplay? display,
+  ) {
+    if (display == null) return 1;
+    final sourceLongEdge = math.max(
+      display.captureWidth,
+      display.captureHeight,
+    );
+    if (sourceLongEdge <= 0) return 1;
+    final configuredLongEdge = _captureTargetSourceId == display.id
+        ? _captureTargetLongEdge
+        : null;
+    final outputLongEdge = math.min(
+      math.min(sourceLongEdge, configuredLongEdge ?? sourceLongEdge),
+      target.targetLongEdge ?? sourceLongEdge,
+    );
+    if (outputLongEdge <= 0) return 1;
+    return math.max(1, sourceLongEdge / outputLongEdge).toDouble();
+  }
+
+  Future<DesktopCaptureConfiguration?> _ensureCaptureTarget(
+    RemoteVideoTarget target, {
+    bool force = false,
+  }) async {
+    if (role != RemoteRole.host || !Platform.isMacOS) return null;
+    if (_hostDisplaySwitchInProgress) {
+      throw StateError('显示器切换期间不能重配采集尺寸');
+    }
+    final previousUpdate = _captureFormatUpdateCompleter;
+    if (previousUpdate != null) {
+      await previousUpdate.future;
+    }
+    if (_hostDisplaySwitchInProgress) {
+      throw StateError('显示器切换期间不能重配采集尺寸');
+    }
+    final sourceId = _selectedDisplayId;
+    if (!force &&
+        _captureTargetLongEdge == target.targetLongEdge &&
+        _captureTargetFrameRate == target.maxFramerate &&
+        _captureTargetSourceId == sourceId) {
+      return const DesktopCaptureConfiguration(applied: true);
     }
     final trackId = _localStream?.getVideoTracks().firstOrNull?.id;
-    if (trackId == null || trackId.isEmpty) return false;
-    final configured = await desktopCapturer.updateCaptureFormat(
-      trackId: trackId,
-      targetLongEdge: target.targetLongEdge,
-      frameRate: target.maxFramerate,
-    );
-    if (!configured) return false;
-    _captureTargetLongEdge = target.targetLongEdge;
-    _captureTargetFrameRate = target.maxFramerate;
+    if (trackId == null || trackId.isEmpty) return null;
+    final completion = Completer<void>();
+    _captureFormatUpdateCompleter = completion;
     try {
-      await desktopCapturer.requestKeyFrame();
-    } catch (_) {
-      // Sender parameters still provide a safe fallback on unsupported forks.
+      MacCaptureFrameState? captureBaseline;
+      try {
+        captureBaseline = await _inputBridge.getCaptureFrameState();
+      } catch (_) {
+        // Readiness diagnostics are unavailable in unit tests and old runners.
+      }
+      final configured = await desktopCapturer.updateCaptureFormat(
+        trackId: trackId,
+        targetLongEdge: target.targetLongEdge,
+        frameRate: target.maxFramerate,
+      );
+      if (!configured.applied) return configured;
+      _captureTargetLongEdge = target.targetLongEdge;
+      _captureTargetFrameRate = target.maxFramerate;
+      _captureTargetSourceId = configured.sourceId ?? sourceId;
+      if (captureBaseline != null && sourceId != null) {
+        final captureWait = await _waitForCaptureFirstFrame(
+          sourceId: sourceId,
+          afterSequence: captureBaseline.sequence,
+        );
+        if (!captureWait.ready) {
+          _emitNotice(
+            '采集尺寸已更新，但稳定帧确认超时${captureWait.diagnosticSuffix}',
+            level: RemoteNoticeLevel.warning,
+          );
+        }
+      }
+      try {
+        await desktopCapturer.requestKeyFrame();
+      } catch (_) {
+        // Sender parameters still provide a safe fallback on unsupported forks.
+      }
+      return configured;
+    } finally {
+      if (!completion.isCompleted) completion.complete();
+      if (identical(_captureFormatUpdateCompleter, completion)) {
+        _captureFormatUpdateCompleter = null;
+      }
     }
-    return true;
   }
 
   void _updateExpectedVideoSize(double scale, {RemoteDisplay? display}) {
@@ -1486,6 +1810,26 @@ class RemoteSessionController extends ChangeNotifier {
       frames: frames,
       keyFrames: keyFrames,
     );
+  }
+
+  Future<_RtcVideoProgress?> _waitForRtcKeyFrameStats(
+    String statType, {
+    int attempts = 20,
+  }) async {
+    for (var attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        final progress = await _readRtcVideoProgress(statType);
+        if (progress?.frames != null && progress?.keyFrames != null) {
+          return progress;
+        }
+      } catch (_) {
+        // WebRTC stats may not expose the active RTP report immediately after
+        // a track starts or changes format. Wait for the report, not a fixed
+        // post-switch delay.
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    return null;
   }
 
   Future<RemoteVideoFrameSize?> _waitForOutboundVideoFrameSize(
@@ -1684,38 +2028,45 @@ class RemoteSessionController extends ChangeNotifier {
     });
     _captureTargetLongEdge = target.targetLongEdge;
     _captureTargetFrameRate = target.maxFramerate;
+    _captureTargetSourceId = source.id;
     return stream;
   }
 
-  Future<bool> _waitForCaptureFirstFrame({
+  Future<_CaptureFrameWaitResult> _waitForCaptureFirstFrame({
     required String sourceId,
     required int afterSequence,
+    int attempts = 30,
   }) async {
-    for (var attempt = 0; attempt < 30; attempt += 1) {
+    MacCaptureFrameState? lastState;
+    for (var attempt = 0; attempt < attempts; attempt += 1) {
       try {
         final state = await _inputBridge.getCaptureFrameState();
-        if (state.sequence > afterSequence &&
-            state.sourceId == sourceId &&
-            state.width > 0 &&
-            state.height > 0) {
-          return true;
+        lastState = state;
+        if (state.isReadyAfter(
+          sequence: afterSequence,
+          targetSourceId: sourceId,
+        )) {
+          return _CaptureFrameWaitResult(ready: true, lastState: state);
         }
       } catch (_) {
         // A missing native readiness signal must not be mistaken for success.
       }
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
-    return false;
+    return _CaptureFrameWaitResult(ready: false, lastState: lastState);
   }
 
   Future<_RtcVideoProgress?> _waitForOutboundVideoProgress({
     int? afterFrames,
     int? afterKeyFrames,
     bool requireKeyFrame = false,
+    RemoteVideoFrameSize? targetGeometry,
   }) async {
     _RtcVideoProgress? latest;
-    var stableSamples = 0;
-    for (var attempt = 0; attempt < 20; attempt += 1) {
+    final geometryGate = targetGeometry == null
+        ? null
+        : RemoteVideoGeometryGate(target: targetGeometry);
+    for (var attempt = 0; attempt < 24; attempt += 1) {
       try {
         latest = await _readRtcVideoProgress('outbound-rtp') ?? latest;
       } catch (_) {
@@ -1724,13 +2075,20 @@ class RemoteSessionController extends ChangeNotifier {
       final keyFrameReady =
           !requireKeyFrame ||
           _videoKeyFramesAdvanced(latest, afterKeyFrames: afterKeyFrames);
-      if (_videoFramesAdvanced(latest, afterFrames: afterFrames) &&
-          keyFrameReady) {
-        stableSamples += 1;
-      } else {
-        stableSamples = 0;
+      final mediaAdvanced = _videoFramesAdvanced(
+        latest,
+        afterFrames: afterFrames,
+      );
+      if (geometryGate == null) {
+        if (mediaAdvanced && keyFrameReady) return latest;
+      } else if (geometryGate.observe(
+        size: latest?.size,
+        frames: latest?.frames,
+        mediaAdvanced: mediaAdvanced,
+        keyFrameAdvanced: keyFrameReady,
+      )) {
+        return latest;
       }
-      if (stableSamples >= 2) return latest;
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     return null;
@@ -1759,20 +2117,30 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<_RtcVideoProgress?> _requestAndWaitForOutboundKeyFrame(
-    _RtcVideoProgress? baseline,
-  ) async {
+    _RtcVideoProgress? baseline, {
+    required RemoteVideoFrameSize targetGeometry,
+    Future<void> Function()? repairGeometry,
+  }) async {
     if (baseline?.keyFrames == null) {
       throw StateError('编码器关键帧统计尚未就绪');
     }
+    var attemptBaseline = baseline!;
     for (var request = 0; request < 2; request += 1) {
+      if (request > 0 && repairGeometry != null) {
+        await repairGeometry();
+        attemptBaseline =
+            await _waitForRtcKeyFrameStats('outbound-rtp', attempts: 10) ??
+            attemptBaseline;
+      }
       final requested = await desktopCapturer.requestKeyFrame();
       if (!requested) {
         throw StateError('当前编码器不支持主动关键帧请求');
       }
       final ready = await _waitForOutboundVideoProgress(
-        afterFrames: baseline?.frames,
-        afterKeyFrames: baseline?.keyFrames,
+        afterFrames: attemptBaseline.frames,
+        afterKeyFrames: attemptBaseline.keyFrames,
         requireKeyFrame: true,
+        targetGeometry: targetGeometry,
       );
       if (ready != null) return ready;
       if (request == 0) {
@@ -1786,6 +2154,24 @@ class RemoteSessionController extends ChangeNotifier {
     final expected = _expectedVideoFrameSize;
     return expected == null ||
         (actual?.isValid == true && actual!.approximatelyMatches(expected));
+  }
+
+  bool _videoGeometryMatchesTarget(
+    RemoteVideoFrameSize? actual,
+    RemoteVideoFrameSize? target,
+  ) {
+    if (target == null || !target.isValid) return actual?.isValid == true;
+    return actual?.hasSameAspectRatio(target) == true;
+  }
+
+  bool _sameVideoSize(
+    RemoteVideoFrameSize? first,
+    RemoteVideoFrameSize? second,
+  ) {
+    return first != null &&
+        second != null &&
+        first.width == second.width &&
+        first.height == second.height;
   }
 
   void _observeVideoGeometry({
@@ -1920,6 +2306,8 @@ class RemoteSessionController extends ChangeNotifier {
     }
 
     _hostDisplaySwitchInProgress = true;
+    _cancelAdaptiveCaptureResize();
+    _mediaStatsAccumulator.reset();
     _geometryObservationToken += 1;
     _videoGeometryState = RemoteVideoGeometryState.adapting;
     _sendControl({
@@ -1937,7 +2325,18 @@ class RemoteSessionController extends ChangeNotifier {
     MediaStream? replacementStream;
     var replacementAttached = false;
     var switchedInPlace = false;
+    DesktopCaptureConfiguration? captureConfiguration;
     try {
+      try {
+        await _waitForCaptureMutationsToSettle();
+      } on TimeoutException {
+        throw const _DisplaySwitchFailure(
+          code: 'CAPTURE_TRANSACTION_BUSY',
+          stage: 'targetStreamWarmup',
+          message: '上一项采集配置尚未完成，请稍后重试',
+        );
+      }
+      final switchTarget = activeVideoTarget;
       if (previousStream == null || previousTrack == null) {
         throw StateError('当前显示器视频轨道不可用');
       }
@@ -1953,19 +2352,28 @@ class RemoteSessionController extends ChangeNotifier {
       }
 
       try {
-        switchedInPlace = await desktopCapturer.switchSource(
+        captureConfiguration = await desktopCapturer.switchSource(
           trackId: previousTrackId,
           sourceId: displayId,
-          frameRate: activeVideoTarget.maxFramerate,
-          targetLongEdge: activeVideoTarget.targetLongEdge,
+          frameRate: switchTarget.maxFramerate,
+          targetLongEdge: switchTarget.targetLongEdge,
         );
+        switchedInPlace = captureConfiguration.applied;
         if (switchedInPlace) {
-          _captureTargetLongEdge = activeVideoTarget.targetLongEdge;
-          _captureTargetFrameRate = activeVideoTarget.maxFramerate;
+          _captureTargetLongEdge = switchTarget.targetLongEdge;
+          _captureTargetFrameRate = switchTarget.maxFramerate;
+          _captureTargetSourceId = displayId;
         }
       } catch (error) {
+        if (Platform.isMacOS) {
+          throw _DisplaySwitchFailure(
+            code: 'CAPTURE_PREPARE_FAILED',
+            stage: 'targetStreamWarmup',
+            message: '目标显示器采集流预热失败：$error',
+          );
+        }
         _emitNotice(
-          '原地切屏暂不可用，正在使用兼容切换：$error',
+          '当前平台不支持采集流热切换，正在使用兼容切换：$error',
           level: RemoteNoticeLevel.warning,
         );
       }
@@ -1976,31 +2384,47 @@ class RemoteSessionController extends ChangeNotifier {
         if (replacementTrack == null) {
           throw StateError('新显示器未返回视频轨道');
         }
-        final captureReady = await _waitForCaptureFirstFrame(
+        final captureWait = await _waitForCaptureFirstFrame(
           sourceId: displayId,
           afterSequence: captureBaseline.sequence,
         );
-        if (!captureReady) {
-          throw TimeoutException('目标显示器未产生有效采集帧');
+        if (!captureWait.ready) {
+          throw _DisplaySwitchFailure(
+            code: 'CAPTURE_FRAME_TIMEOUT',
+            stage: 'sourceFramesStable',
+            message: '目标显示器未产生连续稳定的采集帧${captureWait.diagnosticSuffix}',
+          );
         }
-        outboundBaseline = await _readRtcVideoProgress('outbound-rtp');
+        outboundBaseline = await _waitForRtcKeyFrameStats('outbound-rtp');
         // Keep the negotiated transceiver, MID, SSRC and data channels stable.
         // This compatibility path replaces only the track and never rebuilds
         // the PeerConnection or renegotiates SDP.
         await sender.replaceTrack(replacementTrack);
         replacementAttached = true;
       } else {
-        // The native operation completes after the running SCStream has
-        // accepted its new filter/configuration and before the first target
-        // frame readiness event is published.
-        outboundBaseline = await _readRtcVideoProgress('outbound-rtp');
-        final captureReady = await _waitForCaptureFirstFrame(
+        // A separately constructed target SCStream has already produced two
+        // complete target-sized frames. The previous stream remains warm
+        // until the controller acknowledges the rendered target key frame.
+        outboundBaseline = await _waitForRtcKeyFrameStats('outbound-rtp');
+        final captureWait = await _waitForCaptureFirstFrame(
           sourceId: displayId,
           afterSequence: captureBaseline.sequence,
+          attempts: 12,
         );
-        if (!captureReady) {
-          throw TimeoutException('目标显示器未产生有效采集帧');
+        if (!captureWait.ready) {
+          throw _DisplaySwitchFailure(
+            code: 'CAPTURE_FRAME_TIMEOUT',
+            stage: 'sourceFramesStable',
+            message: '目标显示器未产生连续稳定帧${captureWait.diagnosticSuffix}',
+          );
         }
+      }
+      if (outboundBaseline == null) {
+        throw const _DisplaySwitchFailure(
+          code: 'ENCODER_STATS_UNAVAILABLE',
+          stage: 'encoderGeometryReady',
+          message: '编码器统计尚未准备完成',
+        );
       }
       _outboundVideoFrameSize = null;
 
@@ -2009,6 +2433,8 @@ class RemoteSessionController extends ChangeNotifier {
           _selectedQuality,
           reportFailure: false,
           publishState: false,
+          configureCapture: false,
+          captureAlreadyConfigured: true,
           display: targetDisplay,
         );
       } catch (error) {
@@ -2022,11 +2448,40 @@ class RemoteSessionController extends ChangeNotifier {
         );
       }
 
+      final configuredGeometry = captureConfiguration?.hasValidGeometry == true
+          ? RemoteVideoFrameSize(
+              width: captureConfiguration!.width,
+              height: captureConfiguration.height,
+            )
+          : null;
+      final targetGeometry = configuredGeometry ?? _expectedVideoFrameSize;
+      if (targetGeometry == null || !targetGeometry.isValid) {
+        throw const _DisplaySwitchFailure(
+          code: 'CAPTURE_GEOMETRY_UNAVAILABLE',
+          stage: 'captureConfigured',
+          message: '目标显示器没有返回有效的采集尺寸',
+        );
+      }
       final outboundReady = await _requestAndWaitForOutboundKeyFrame(
         outboundBaseline,
+        targetGeometry: targetGeometry,
+        repairGeometry: () async {
+          await _applyVideoQuality(
+            _selectedQuality,
+            reportFailure: false,
+            publishState: false,
+            configureCapture: false,
+            captureAlreadyConfigured: true,
+            display: targetDisplay,
+          );
+        },
       );
       if (outboundReady == null) {
-        throw TimeoutException('编码器未输出目标显示器关键帧');
+        throw const _DisplaySwitchFailure(
+          code: 'ENCODER_GEOMETRY_TIMEOUT',
+          stage: 'targetKeyFrameEncoded',
+          message: '编码器未输出符合目标显示器宽高比的关键帧',
+        );
       }
       _outboundVideoFrameSize = outboundReady.size;
       _videoGeometryState =
@@ -2042,13 +2497,21 @@ class RemoteSessionController extends ChangeNotifier {
         previousStream: previousStream,
         targetStream: _localStream!,
         switchedInPlace: switchedInPlace,
+        trackId: switchedInPlace ? previousTrackId : null,
+        captureGeneration: switchedInPlace
+            ? captureConfiguration?.captureGeneration ?? 0
+            : 0,
       );
       _hostDisplaySwitchTransaction = transaction;
       if (!switchedInPlace) replacementStream = null;
       _publishQualityState();
-      await _publishDisplaySelected(displayId, generation: generation);
+      await _publishDisplaySelected(
+        displayId,
+        generation: generation,
+        captureConfiguration: captureConfiguration,
+      );
       _publishDisplayList();
-      transaction.timeout = Timer(const Duration(seconds: 5), () {
+      transaction.timeout = Timer(const Duration(seconds: 8), () {
         unawaited(
           _rollbackHostDisplaySwitch(
             generation: generation,
@@ -2073,20 +2536,33 @@ class RemoteSessionController extends ChangeNotifier {
       Object? rollbackError;
       if (switchedInPlace &&
           previousTrack != null &&
-          previousDisplayId != null) {
+          previousDisplayId != null &&
+          captureConfiguration != null) {
         try {
           final rollbackBaseline = await _inputBridge.getCaptureFrameState();
-          final restored = await desktopCapturer.switchSource(
+          try {
+            // Arm VideoToolbox before the cached old frame is re-injected so
+            // a completely static desktop can still recover with a key frame.
+            await desktopCapturer.requestKeyFrame();
+          } catch (_) {
+            // The cached frame still restores capture progress on forks that
+            // do not expose an explicit key-frame request.
+          }
+          final restored = await desktopCapturer.rollbackSourceSwitch(
             trackId: previousTrack.id!,
-            sourceId: previousDisplayId,
-            frameRate: activeVideoTarget.maxFramerate,
-            targetLongEdge: activeVideoTarget.targetLongEdge,
+            captureGeneration: captureConfiguration.captureGeneration,
           );
-          if (!restored ||
-              !await _waitForCaptureFirstFrame(
-                sourceId: previousDisplayId,
-                afterSequence: rollbackBaseline.sequence,
-              )) {
+          if (!restored.applied) {
+            throw StateError('原显示器采集配置未恢复');
+          }
+          _captureTargetSourceId = previousDisplayId;
+          _captureTargetLongEdge = activeVideoTarget.targetLongEdge;
+          _captureTargetFrameRate = activeVideoTarget.maxFramerate;
+          final rollbackWait = await _waitForCaptureFirstFrame(
+            sourceId: previousDisplayId,
+            afterSequence: rollbackBaseline.sequence,
+          );
+          if (!rollbackWait.ready) {
             throw StateError('原显示器未恢复有效采集帧');
           }
           if (previousDisplay != null) {
@@ -2094,6 +2570,8 @@ class RemoteSessionController extends ChangeNotifier {
               _selectedQuality,
               reportFailure: false,
               publishState: false,
+              configureCapture: false,
+              captureAlreadyConfigured: true,
               display: previousDisplay,
             );
           }
@@ -2108,6 +2586,8 @@ class RemoteSessionController extends ChangeNotifier {
               _selectedQuality,
               reportFailure: false,
               publishState: false,
+              configureCapture: false,
+              captureAlreadyConfigured: true,
               display: previousDisplay,
             );
           }
@@ -2121,9 +2601,14 @@ class RemoteSessionController extends ChangeNotifier {
         } catch (_) {
           // Rollback remains usable on platforms without the fork extension.
         }
+        _publishQualityState();
+        _publishDisplayList();
       }
+      final failure = error is _DisplaySwitchFailure ? error : null;
       _sendDisplaySwitchError(
         generation: generation,
+        code: failure?.code ?? 'DISPLAY_SWITCH_FAILED',
+        stage: failure?.stage ?? 'unknown',
         message: rollbackError == null
             ? '切换显示器失败：$error'
             : '切换显示器失败：$error；恢复原显示器失败：$rollbackError',
@@ -2139,7 +2624,7 @@ class RemoteSessionController extends ChangeNotifier {
         // A failed replacement capture is detached from the sender already.
       }
       if (_hostDisplaySwitchTransaction == null) {
-        _hostDisplaySwitchInProgress = false;
+        _completeDisplaySwitchCoordination();
       }
       notifyListeners();
     }
@@ -2156,12 +2641,30 @@ class RemoteSessionController extends ChangeNotifier {
       return;
     }
     transaction.timeout?.cancel();
-    _hostDisplaySwitchTransaction = null;
-    _hostDisplaySwitchInProgress = false;
-    if (!transaction.switchedInPlace) {
-      await _disposeMediaStream(transaction.previousStream);
+    try {
+      if (transaction.switchedInPlace) {
+        final trackId = transaction.trackId;
+        if (trackId == null || transaction.captureGeneration <= 0) {
+          throw StateError('采集流提交信息不完整');
+        }
+        final committed = await desktopCapturer.commitSourceSwitch(
+          trackId: trackId,
+          captureGeneration: transaction.captureGeneration,
+        );
+        if (!committed) throw StateError('采集流提交被拒绝');
+      } else {
+        await _disposeMediaStream(transaction.previousStream);
+      }
+    } catch (error) {
+      _emitNotice(
+        '目标显示器已生效，但旧采集流释放失败：$error',
+        level: RemoteNoticeLevel.warning,
+      );
+    } finally {
+      _hostDisplaySwitchTransaction = null;
+      _completeDisplaySwitchCoordination();
+      notifyListeners();
     }
-    notifyListeners();
   }
 
   Future<void> _rollbackHostDisplaySwitch({
@@ -2184,21 +2687,32 @@ class RemoteSessionController extends ChangeNotifier {
           throw StateError('原显示器标识已经不可用');
         }
         final captureBaseline = await _inputBridge.getCaptureFrameState();
-        final activeTrackId = activeTrack.id;
-        if (activeTrackId == null || activeTrackId.isEmpty) {
+        try {
+          await desktopCapturer.requestKeyFrame();
+        } catch (_) {
+          // Rollback can continue on platforms without this fork extension.
+        }
+        final activeTrackId = transaction.trackId ?? activeTrack.id;
+        if (activeTrackId == null ||
+            activeTrackId.isEmpty ||
+            transaction.captureGeneration <= 0) {
           throw StateError('当前显示器视频轨道缺少标识');
         }
-        final restored = await desktopCapturer.switchSource(
+        final restored = await desktopCapturer.rollbackSourceSwitch(
           trackId: activeTrackId,
-          sourceId: previousDisplayId,
-          frameRate: activeVideoTarget.maxFramerate,
-          targetLongEdge: activeVideoTarget.targetLongEdge,
+          captureGeneration: transaction.captureGeneration,
         );
-        if (!restored ||
-            !await _waitForCaptureFirstFrame(
-              sourceId: previousDisplayId,
-              afterSequence: captureBaseline.sequence,
-            )) {
+        if (!restored.applied) {
+          throw StateError('原显示器采集配置未恢复');
+        }
+        _captureTargetSourceId = previousDisplayId;
+        _captureTargetLongEdge = activeVideoTarget.targetLongEdge;
+        _captureTargetFrameRate = activeVideoTarget.maxFramerate;
+        final rollbackWait = await _waitForCaptureFirstFrame(
+          sourceId: previousDisplayId,
+          afterSequence: captureBaseline.sequence,
+        );
+        if (!rollbackWait.ready) {
           throw StateError('原显示器未恢复有效采集帧');
         }
       } else {
@@ -2225,6 +2739,8 @@ class RemoteSessionController extends ChangeNotifier {
           _selectedQuality,
           reportFailure: false,
           publishState: false,
+          configureCapture: false,
+          captureAlreadyConfigured: true,
           display: previousDisplay,
         );
       }
@@ -2243,7 +2759,7 @@ class RemoteSessionController extends ChangeNotifier {
       if (!transaction.switchedInPlace) {
         await _disposeMediaStream(transaction.targetStream);
       }
-      _hostDisplaySwitchInProgress = false;
+      _completeDisplaySwitchCoordination();
       notifyListeners();
     }
     if (notifyController) {
@@ -2265,6 +2781,7 @@ class RemoteSessionController extends ChangeNotifier {
   Future<void> _publishDisplaySelected(
     String displayId, {
     required int generation,
+    DesktopCaptureConfiguration? captureConfiguration,
   }) async {
     final expected = _expectedVideoFrameSize;
     RemoteVideoFrameSize? outbound = _outboundVideoFrameSize;
@@ -2281,6 +2798,12 @@ class RemoteSessionController extends ChangeNotifier {
       'version': 2,
       'displayId': displayId,
       'generation': generation,
+      if (captureConfiguration != null) ...{
+        'captureGeneration': captureConfiguration.captureGeneration,
+        'captureWidth': captureConfiguration.width,
+        'captureHeight': captureConfiguration.height,
+        'captureFrameRate': captureConfiguration.frameRate,
+      },
       if (expected != null) ...expected.toMessage(),
       if (outbound != null) ...{
         'outboundWidth': outbound.width,
@@ -2297,11 +2820,15 @@ class RemoteSessionController extends ChangeNotifier {
   void _sendDisplaySwitchError({
     required int generation,
     required String message,
+    String code = 'DISPLAY_SWITCH_FAILED',
+    String stage = 'unknown',
   }) {
     _sendControl({
       'type': 'display-switch-error',
       'version': 2,
       'generation': generation,
+      'code': code,
+      'stage': stage,
       'message': message,
     });
   }
@@ -2406,6 +2933,8 @@ class RemoteSessionController extends ChangeNotifier {
     _displaySwitchRequestTimer = null;
     _mediaStatsTimer?.cancel();
     _mediaStatsTimer = null;
+    _adaptiveCaptureResizeTimer?.cancel();
+    _adaptiveCaptureResizeTimer = null;
     await _displayAddedSubscription?.cancel();
     _displayAddedSubscription = null;
     await _displayRemovedSubscription?.cancel();
@@ -2457,6 +2986,18 @@ class RemoteSessionController extends ChangeNotifier {
     _hostDisplaySwitchInProgress = false;
     _samplingMediaStats = false;
     _adaptiveQualityUpdateInProgress = false;
+    final adaptiveCompletion = _adaptiveQualityUpdateCompleter;
+    if (adaptiveCompletion != null && !adaptiveCompletion.isCompleted) {
+      adaptiveCompletion.complete();
+    }
+    _adaptiveQualityUpdateCompleter = null;
+    final captureCompletion = _captureFormatUpdateCompleter;
+    if (captureCompletion != null && !captureCompletion.isCompleted) {
+      captureCompletion.complete();
+    }
+    _captureFormatUpdateCompleter = null;
+    _automaticQualitySuppressedUntil = null;
+    _pendingAdaptiveCaptureTier = null;
     _connectionEstablished = false;
     _displaySwitchGeneration = 0;
     _geometryObservationToken += 1;
@@ -2477,6 +3018,7 @@ class RemoteSessionController extends ChangeNotifier {
     _videoGeometryState = RemoteVideoGeometryState.stable;
     _captureTargetLongEdge = null;
     _captureTargetFrameRate = null;
+    _captureTargetSourceId = null;
     _closing = false;
   }
 

@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 iPad→Mac 局域网原型进行中。** 基本连接、画面和远程输入已经用户验证；Apple 媒体链已具备三阶段色彩诊断、Mac GPU HDR→SDR 和 iPad BT.709 渲染。主屏与 Sidecar 在同一个 `SCStream`、RTC Track 和 Sender 上原地切换；切屏事务要求 Mac 编码器和 iPad 解码器都产生本次请求之后的新关键帧才提交，并使用不透明的事件驱动遮罩隔离旧 Texture。自动画质按区间丢包、RTT、可用带宽、掉帧和冻结次数带滞回升降档，目标尺寸直接下发到 ScreenCaptureKit。全屏系统键盘覆盖在稳定视频画布上，另提供可拖动的快捷小键盘。Flutter `analyze`、63 个测试及 macOS/iOS Debug 构建通过；关键帧事务、自动画质、实际清晰度、色彩、连续切屏和延迟仍需物理双设备复验。
+> 当前状态：**M0 工程基线已完成，M1 iPad→Mac 局域网原型进行中。** 基本连接、画面和远程输入已经用户验证；Apple 媒体链已具备三阶段色彩诊断、Mac GPU HDR→SDR 和 iPad BT.709 渲染。主屏与 Sidecar 使用 Active/Pending/Retired 采集事务：新建目标 `SCStream` 并预热两帧后接管现有 RTC Track/Source，旧流保留到 iPad 确认后释放，失败则直接回滚；RTC Track、Sender、MID/SSRC 和 DataChannel 始终不变。有效区域内缩时 Mac 在 GPU 上裁剪并铺满规范画布，iPad 由唯一呈现几何同时驱动画面与直接触控。Flutter `analyze`、73 个测试及 macOS/iOS Debug 构建通过；往返切屏、自动画质、实际清晰度、色彩和延迟仍需物理双设备复验。
 
 ## 项目定位
 
@@ -234,11 +234,15 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 - 全局 Message 使用安全区下方、屏幕高度约 17% 的 Overlay，不再占据底部操作区域。
 - 远程工具栏“显示调整与色彩诊断”提供自动、标准 SDR、柔和高光和自定义亮度/对比度/饱和度；设置按远程设备和显示器独立保存。
 - 色彩诊断分别显示 ScreenCaptureKit 原始帧、WebRTC 编码器输入、iPad 解码输出和 Texture 输入的像素格式、Range、色彩附件、Y 值范围与 16 桶灰阶直方图；只传输统计，不传输屏幕像素。
-- 多显示器切换使用带序号的双端提交事务：macOS 13+ 在同一个 `SCStream` 上调用 `updateConfiguration()` 和 `updateContentFilter()`，并保持 RTC Track、Sender、MID、SSRC 和 DataChannel 不变；Mac 先确认目标 ScreenCaptureKit 首帧及本次请求后的 `keyFramesEncoded` 增长，iPad 再确认 `keyFramesDecoded` 增长，之后才更新名称和输入目标。关键帧请求最多重试一次，统计不支持时安全中止而不误提交旧帧；旧系统才使用 `replaceTrack()` 兼容路径。
-- ScreenCaptureKit 切屏更新期间暂停转发；更新完成后只接收状态为 `.complete`、尺寸匹配且连续稳定的目标帧，并在新 NV12 画布上先填充 Video-Range 黑色再渲染。iPad 在 120ms 内保留原画面，超过 120ms 才用不透明遮罩隔离旧 Texture，超过 800ms 显示等待状态，目标解码帧到达后立即以 120ms 淡出，不使用固定等待时间。遮罩不直接定时清空 Texture，避免误删已提前解码的目标静态帧。
+- 多显示器切换使用带序号的媒体几何事务：macOS 13+ 保持当前 Active `SCStream` 输出，同时创建绑定目标显示器的 Pending `SCStream`；Pending 连续输出两帧 `.complete`、晚于本次 `displayTime` 屏障且可规范化为目标宽高比后才提升为 Active，原 Active 进入 Retired。iPad 完成关键帧解码和 Texture 几何提交后发送确认，Mac 才停止 Retired；任何中间失败都恢复未被重配置的 Retired。整个过程保持 RTC Track、Sender、MID、SSRC 和 DataChannel 不变；旧系统才使用 `replaceTrack()` 兼容路径。
+- 显示器切换不再调用 `updateContentFilter()`；物理验证表明 WindowServer 可能成功回调但持续输出旧 Sidecar 内容面。同一显示器的清晰度/FPS 调整仍使用 `updateConfiguration()`。目标屏宽高比不同时 iPad 立即遮罩；同宽高比切换才在前 120ms 保留原画面，超过 800ms 显示等待状态，目标解码帧和画布几何提交后以 120ms 淡出。
+- ScreenCaptureKit 的外层 IOSurface 尺寸不能代表真实画面已经铺满：Mac 同时解析 `contentRect × scaleFactor` 得到有效像素区域。只要元数据区域合法，就以其裁剪真实画面，再按比例缩放并居中合成到目标 Rec.709 NV12 画布；编码目标的偶数取整不再使有效区域失去信任。正常满帧仍保持零拷贝，无法完成必要规范化的帧不进入编码器。
+- 切屏采集门禁以候选流创建时的 `mach_absolute_time` 对比帧 `displayTime`，拒绝排队旧帧；Pending 以流身份、generation、连续完整帧和可规范化目标宽高比判断就绪，不再要求 SCK 原始 Buffer 与编码尺寸逐像素相等。最长预热 5 秒，SCK 提前报错则立即失败；错误附带完整帧、稳定帧、旧帧、几何拒绝、最后尺寸和目标尺寸计数。
+- iPad 的画布几何与解码器尺寸分离提交：切屏开始时锁定上一幅稳定 `sourceSize/contentRect`；目标屏宽高比不同时立即显示完全不透明遮罩，同宽高比快速切换才保留 120ms 延迟；目标关键帧完成后等待 Texture 尺寸通知，原子替换几何，下一 Flutter 帧再淡出遮罩。切屏期间输入被阻止，避免旧坐标变换作用到目标屏。
+- iPad 只保留一个呈现变换：外层画布负责 `contain/cover`、居中、裁剪和指针归一化，内层 RTC Texture 只铺满该矩形；已提交的目标显示器尺寸优先于解码器过渡尺寸，避免 Sidecar 返回主屏后再次 `contain` 产生大面积黑边。
 - 显示器协议分别携带逻辑尺寸、采集像素尺寸和点像素比例：远程输入继续使用逻辑坐标，视频画质与 WebRTC 适配使用实际像素。macOS 14+ 通过 `SCContentFilter.contentRect × pointPixelScale` 采集，旧系统回退到 `CGDisplayPixelsWide/High`，避免把 Sidecar 的逻辑尺寸放大成模糊视频。
-- 自动画质默认从 1080p30/7 Mbps 开始，以 1 秒区间统计观察丢包、RTT、可用出站带宽、编码耗时、掉帧、冻结和拥塞原因；连续 2 个坏样本降档，连续 10 个好样本且至少稳定 15 秒才升档。档位依次为 1080p60、1080p30、720p60、720p30，切换失败会回滚；手动画质不被自动策略覆盖。
-- 画质目标先通过项目内插件更新 ScreenCaptureKit 的采集尺寸和帧率，再更新 RTP Sender 的码率/帧率；不支持原生更新的平台才使用 Sender 缩放。macOS 优先使用 VideoToolbox H.264，减少软件编码引起的卡顿。
+- 自动画质默认从 1080p30/7 Mbps 开始，以 1 秒区间统计观察丢包、RTT、可用出站带宽、编码耗时、掉帧、冻结和拥塞原因；连续 2 个坏样本降档，连续 10 个好样本且至少稳定 15 秒才升档。档位依次为 1080p60、1080p30、720p60、720p30，切换失败会回滚；手动画质不被自动策略覆盖。显示器事务期间冻结自动档，事务结束后 5 秒内的切屏抖动不参与档位判断。
+- 自动档采用两阶段调整：RTP Sender 的码率、帧率和必要缩放立即生效；目标档位连续稳定 10 秒后才合并执行一次 `SCStream.updateConfiguration()`，降低反复重配 SCK 的概率。显示器切换开始前会等待在途格式更新结束，并固定整个事务使用的采集档位；原生回调还需匹配 stream、sourceId、capture generation 和 format epoch，过期回调不能覆盖当前几何。macOS 优先使用 VideoToolbox H.264。
 - 会话诊断展示区间码率/丢包、带宽、掉帧/冻结、关键帧、NACK/PLI/FIR、codec 和编解码器实现；色彩诊断同时记录 SCK `contentRect`、scale 与 PixelBuffer 尺寸，用于区分源画面残留、编码参考帧污染和接收端渲染问题。
 - iPad 全屏采用“工具栏 + 稳定视频画布”的结构；软键盘和快捷小键盘覆盖在画布上，不再改变视频尺寸与指针变换。视频显示与指针归一化复用同一个变换，输入只绑定已经真实渲染的显示器；Mac 绝对坐标限制在最后一个有效逻辑像素，避免视觉偏移、串屏和边缘越界。
 - Java 信令对失败连接采用两级限流：同一来源与连接码 5 次/分钟，来源跨连接码 20 次/分钟。旧码达到邀请级限流后可改用新的正确连接码，轮换随机码仍会触发来源级保护；关闭原因携带作用域和剩余等待秒数。
@@ -289,7 +293,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter | 响应式壳层、真实会话/设置页面、会话元数据历史、Apple Bonjour、共享恢复、瞬时断线宽限、单 `SCStream` 关键帧双端提交切屏、事件驱动遮罩、稳定全屏画布、系统/快捷双键盘、色彩/HDR/SCK 几何诊断、Sidecar/Retina 实际像素采集、带滞回自动画质、区间媒体统计、手势和 iOS 原生 IME；`analyze`、63 个测试、6 个 Swift 测试及 macOS/iOS Debug build | 强制关键帧计数、自动升降档、SDR 灰阶、HDR A/B、Sidecar 实际清晰度/居中、30 次连续切屏、两种键盘、IME 候选/退格、触控手感和 P95 延迟需物理双设备复验；Windows、Linux 尚未构建 |
+| Flutter | 响应式壳层、真实会话/设置页面、会话元数据历史、Apple Bonjour、共享恢复、瞬时断线宽限、Active/Pending/Retired 采集热切换、SCK 有效内容区域规范化、单一呈现/触控几何、原子画布几何与事件驱动遮罩、稳定全屏画布、系统/快捷双键盘、色彩/HDR/SCK 几何诊断、Sidecar/Retina 实际像素采集、带滞回自动画质、区间媒体统计、手势和 iOS 原生 IME；`analyze`、73 个测试、6 个 Swift 测试及 macOS/iOS Debug build | 真机确认主屏有效区域铺满且直接触控对齐、双流提交/回滚与资源释放、画布无抖动、自动升降档、SDR 灰阶、HDR A/B、Sidecar 实际清晰度/居中、30 次连续切屏、两种键盘、IME 候选/退格、触控手感和 P95 延迟；Windows、Linux 尚未构建 |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |
@@ -355,4 +359,4 @@ flutter build ios --simulator --debug
 
 ## 当前里程碑
 
-当前位于 **M1：iPad 控制 Mac 局域网纵向原型**。下一门禁是物理 iPad 与 Mac 完成 30 次主屏/Sidecar 往返切换，确认每次编码/解码关键帧计数递增且无横向残影；随后用稳定局域网和受控弱网验证自动档升降级、1080p30/60 P95、30 分钟资源稳定和断线恢复。通过后再推进 TURN 和 Windows GPU 性能原型。
+当前位于 **M1：iPad 控制 Mac 局域网纵向原型**。下一门禁是物理 iPad 与 Mac 完成 30 次主屏/Sidecar 往返切换，确认每次 Pending 预热、Active 提升、控制端确认与 Retired 释放均完成，且编码/解码关键帧计数递增、无旧内容面或横向残影；随后用稳定局域网和受控弱网验证自动档升降级、1080p30/60 P95、30 分钟资源稳定和断线恢复。通过后再推进 TURN 和 Windows GPU 性能原型。

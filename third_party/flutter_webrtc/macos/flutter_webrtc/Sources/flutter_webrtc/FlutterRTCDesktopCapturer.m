@@ -248,17 +248,87 @@ NSArray<RTCDesktopSource*>* _captureSources;
   [capturer switchCaptureToSourceId:sourceId
                                 fps:fps
                      targetLongEdge:MAX((NSInteger)0, targetLongEdge.integerValue)
-                       onCompletion:^(NSError * _Nullable error) {
+                       onCompletion:^(NSDictionary<NSString *, id> * _Nullable configuration,
+                                      NSError * _Nullable error) {
                          dispatch_async(dispatch_get_main_queue(), ^{
                            if (error != nil) {
                              result([FlutterError errorWithCode:@"CAPTURE_SWITCH_FAILED"
                                                         message:error.localizedDescription
                                                         details:nil]);
                            } else {
-                             result(@{@"result" : @YES});
+                             result(configuration ?: @{@"result" : @NO});
                            }
                          });
                        }];
+#else
+  result(@{@"result" : @NO, @"reason" : @"unsupported platform"});
+#endif
+}
+
+- (void)commitDesktopCaptureSource:(NSDictionary*)argsMap result:(FlutterResult)result {
+#if TARGET_OS_OSX
+  NSString *trackId = argsMap[@"trackId"];
+  NSNumber *captureGeneration = argsMap[@"captureGeneration"];
+  if (trackId.length == 0 || captureGeneration == nil) {
+    result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                               message:@"trackId and captureGeneration are required"
+                               details:nil]);
+    return;
+  }
+  FlutterScreenCaptureKitCapturer *capturer = self.screenCaptureKitCapturers[trackId];
+  if (capturer == nil) {
+    result([FlutterError errorWithCode:@"CAPTURE_COMMIT_FAILED"
+                               message:@"running capturer cannot commit the switch"
+                               details:nil]);
+    return;
+  }
+  [capturer commitCaptureSwitchGeneration:captureGeneration.unsignedIntegerValue
+                              onCompletion:^(NSError * _Nullable error) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (error != nil) {
+        result([FlutterError errorWithCode:@"CAPTURE_COMMIT_FAILED"
+                                   message:error.localizedDescription
+                                   details:nil]);
+      } else {
+        result(@{@"result" : @YES});
+      }
+    });
+  }];
+#else
+  result(@{@"result" : @NO, @"reason" : @"unsupported platform"});
+#endif
+}
+
+- (void)rollbackDesktopCaptureSource:(NSDictionary*)argsMap result:(FlutterResult)result {
+#if TARGET_OS_OSX
+  NSString *trackId = argsMap[@"trackId"];
+  NSNumber *captureGeneration = argsMap[@"captureGeneration"];
+  if (trackId.length == 0 || captureGeneration == nil) {
+    result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                               message:@"trackId and captureGeneration are required"
+                               details:nil]);
+    return;
+  }
+  FlutterScreenCaptureKitCapturer *capturer = self.screenCaptureKitCapturers[trackId];
+  if (capturer == nil) {
+    result([FlutterError errorWithCode:@"CAPTURE_ROLLBACK_FAILED"
+                               message:@"running capturer cannot roll back the switch"
+                               details:nil]);
+    return;
+  }
+  [capturer rollbackCaptureSwitchGeneration:captureGeneration.unsignedIntegerValue
+                                onCompletion:^(NSDictionary<NSString *, id> * _Nullable configuration,
+                                               NSError * _Nullable error) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (error != nil) {
+        result([FlutterError errorWithCode:@"CAPTURE_ROLLBACK_FAILED"
+                                   message:error.localizedDescription
+                                   details:nil]);
+      } else {
+        result(configuration ?: @{@"result" : @NO});
+      }
+    });
+  }];
 #else
   result(@{@"result" : @NO, @"reason" : @"unsupported platform"});
 #endif
@@ -283,14 +353,15 @@ NSArray<RTCDesktopSource*>* _captureSources;
   const NSInteger fps = MAX((NSInteger)1, frameRate.integerValue ?: 30);
   [capturer updateCaptureWithFPS:fps
                   targetLongEdge:MAX((NSInteger)0, targetLongEdge.integerValue)
-                    onCompletion:^(NSError * _Nullable error) {
+                    onCompletion:^(NSDictionary<NSString *, id> * _Nullable configuration,
+                                   NSError * _Nullable error) {
                       dispatch_async(dispatch_get_main_queue(), ^{
                         if (error != nil) {
                           result([FlutterError errorWithCode:@"CAPTURE_FORMAT_FAILED"
                                                      message:error.localizedDescription
                                                      details:nil]);
                         } else {
-                          result(@{@"result" : @YES});
+                          result(configuration ?: @{@"result" : @NO});
                         }
                       });
                     }];

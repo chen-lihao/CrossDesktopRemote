@@ -24,6 +24,40 @@ class ThumbnailSize {
   Map<String, int> toMap() => {'width': width, 'height': height};
 }
 
+class DesktopCaptureConfiguration {
+  const DesktopCaptureConfiguration({
+    required this.applied,
+    this.sourceId,
+    this.captureGeneration = 0,
+    this.width = 0,
+    this.height = 0,
+    this.frameRate = 0,
+    this.reason,
+  });
+
+  factory DesktopCaptureConfiguration.fromMap(Map<dynamic, dynamic> map) {
+    return DesktopCaptureConfiguration(
+      applied: map['result'] as bool? ?? false,
+      sourceId: map['sourceId'] as String?,
+      captureGeneration: (map['captureGeneration'] as num?)?.toInt() ?? 0,
+      width: (map['width'] as num?)?.toInt() ?? 0,
+      height: (map['height'] as num?)?.toInt() ?? 0,
+      frameRate: (map['frameRate'] as num?)?.toInt() ?? 0,
+      reason: map['reason'] as String?,
+    );
+  }
+
+  final bool applied;
+  final String? sourceId;
+  final int captureGeneration;
+  final int width;
+  final int height;
+  final int frameRate;
+  final String? reason;
+
+  bool get hasValidGeometry => width > 0 && height > 0;
+}
+
 abstract class DesktopCapturerSource {
   /// The identifier of a window or screen that can be used as a
   /// chromeMediaSourceId constraint when calling
@@ -71,15 +105,29 @@ abstract class DesktopCapturer {
   /// Switches an active desktop video track to another screen without
   /// replacing the WebRTC track. Platforms that cannot update the running
   /// capturer return false so callers can use their compatibility fallback.
-  Future<bool> switchSource({
+  Future<DesktopCaptureConfiguration> switchSource({
     required String trackId,
     required String sourceId,
     required int frameRate,
     int? targetLongEdge,
   });
 
+  /// Permanently releases the previous warm capture stream after the
+  /// controller has decoded and rendered the target display generation.
+  Future<bool> commitSourceSwitch({
+    required String trackId,
+    required int captureGeneration,
+  });
+
+  /// Restores the untouched previous capture stream when target media is not
+  /// acknowledged. This does not replace the WebRTC track or sender.
+  Future<DesktopCaptureConfiguration> rollbackSourceSwitch({
+    required String trackId,
+    required int captureGeneration,
+  });
+
   /// Reconfigures the running desktop capturer without replacing its track.
-  Future<bool> updateCaptureFormat({
+  Future<DesktopCaptureConfiguration> updateCaptureFormat({
     required String trackId,
     required int frameRate,
     int? targetLongEdge,
