@@ -185,6 +185,10 @@ void WindowsLanDiscoveryBridge::HandleMethodCall(
     StopPublishing(std::move(result));
     return;
   }
+  if (call.method_name() == "getDiagnostics") {
+    GetDiagnostics(std::move(result));
+    return;
+  }
   if (call.method_name() != "publishHost") {
     result->NotImplemented();
     return;
@@ -214,6 +218,10 @@ void WindowsLanDiscoveryBridge::StartBrowsing(
   const DNS_STATUS status =
       DnsServiceBrowse(&context->request, &context->cancel);
   if (status != DNS_REQUEST_PENDING) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      last_error_ = DnsError(status);
+    }
     delete context;
     result->Error("dns_sd_browse_failed", DnsError(status));
     return;
@@ -222,8 +230,27 @@ void WindowsLanDiscoveryBridge::StartBrowsing(
     std::lock_guard<std::mutex> lock(mutex_);
     browse_contexts_.push_back(context);
     current_browser_ = context;
+    last_error_.clear();
   }
   result->Success();
+}
+
+void WindowsLanDiscoveryBridge::GetDiagnostics(
+    std::unique_ptr<FlutterResult> result) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  result->Success(EncodableValue(EncodableMap{
+      {EncodableValue("browsing"),
+       EncodableValue(current_browser_ != nullptr)},
+      {EncodableValue("publishing"),
+       EncodableValue(registration_ != nullptr &&
+                      registration_->operation ==
+                          RegistrationOperation::kRegistered)},
+      {EncodableValue("discoveredCount"),
+       EncodableValue(static_cast<int32_t>(devices_.size()))},
+      {EncodableValue("resolvingCount"),
+       EncodableValue(static_cast<int32_t>(resolving_names_.size()))},
+      {EncodableValue("lastError"), EncodableValue(last_error_)},
+  }));
 }
 
 void WindowsLanDiscoveryBridge::StopBrowsing(
@@ -425,6 +452,7 @@ void WindowsLanDiscoveryBridge::StartResolve(
       DnsServiceResolve(&context->request, &context->cancel);
   if (status != DNS_REQUEST_PENDING) {
     std::lock_guard<std::mutex> lock(mutex_);
+    last_error_ = DnsError(status);
     resolve_contexts_.erase(std::remove(resolve_contexts_.begin(),
                                         resolve_contexts_.end(), context),
                             resolve_contexts_.end());
@@ -468,6 +496,9 @@ void WindowsLanDiscoveryBridge::OnResolveResult(
       devices_[device.id] = std::move(device);
       PostUpdate();
     }
+  } else if (status != ERROR_CANCELLED) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_error_ = DnsError(status);
   }
   if (instance != nullptr) {
     DnsServiceFreeInstance(instance);
@@ -560,7 +591,11 @@ void WindowsLanDiscoveryBridge::CompleteRegistrationOperation() {
   }
   if (operation == RegistrationOperation::kRegistering &&
       status == ERROR_SUCCESS) {
-    context->operation = RegistrationOperation::kRegistered;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      context->operation = RegistrationOperation::kRegistered;
+      last_error_.clear();
+    }
     if (pending != nullptr) {
       pending->Success();
     }
@@ -582,6 +617,10 @@ void WindowsLanDiscoveryBridge::CompleteRegistrationOperation() {
                        ? "dns_sd_deregister_failed"
                        : "dns_sd_register_failed",
                    DnsError(status));
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_error_ = DnsError(status);
   }
   if (operation == RegistrationOperation::kRegistering) {
     registration_ = nullptr;

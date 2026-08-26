@@ -251,6 +251,8 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 - 断开和Runner退出时统一释放合成按键与鼠标按钮，避免远端异常退出后出现粘键。
 - UIPI限制普通权限进程控制管理员/UAC安全桌面；应用会提示限制，不通过长期管理员运行规避。
 - Windows默认仍以控制端启动；用户需要主动切换到“共享本机”。Runner 已使用 Windows 10+ DNS Service Discovery API 发布和浏览`_cdrremote._tcp.local`。发现对象是正在等待连接的被控设备，不是独立信令服务器目录；设备 TXT 会声明双方应使用的信令地址，用户点击设备后显式采用，且永久保留手动地址后备。多显示器事务仍待单屏实机闭环后启用。
+- macOS和Windows桌面端无论当前选择控制还是共享角色，局域网浏览都会持续运行；共享端进入“上线等待连接”后同时发布自身。列表按设备ID排除本机并去重，Windows空列表会显示浏览/发布/解析状态和最近DNS-SD错误，便于区分应用未启动、Windows专用网络/防火墙和网络禁用mDNS三类情况。
+- “上线等待连接”只注册信令和局域网服务，不启动屏幕采集。连接码可从空闲页面直接生成，等待期间可手动或按租约自动轮换；连接成功后当前单次码锁定，断开后自动生成新码，避免中途改码破坏活动会话路由。
 
 构建和物理检查步骤见 [Windows 被控端首轮验收](./docs/Windows被控端验收.md)。
 
@@ -265,6 +267,8 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 - 切屏采集门禁以候选流创建时的 `mach_absolute_time` 对比帧 `displayTime`，拒绝排队旧帧；流身份、generation、可用 PixelBuffer 和目标输出尺寸是硬条件。`contentRect` 缺失或比例异常只记诊断并立即使用完整规范 Buffer，不再等待第二帧或固定 450ms；最长预热 5 秒，SCK 提前报错则立即失败。
 - iPad 的画布几何与解码器尺寸分离提交：切屏开始时锁定上一幅稳定 `sourceSize/contentRect`；目标屏宽高比不同时立即显示完全不透明遮罩，同宽高比快速切换才保留 120ms 延迟；本次请求后的首个新解码帧到达后原子提交协议几何，Texture 尺寸、关键帧计数和宽高比只用于后台诊断，不再否决正常媒体。切屏期间输入被阻止，避免旧坐标变换作用到目标屏。
 - iPad 只保留一个呈现变换：外层画布负责 `contain/cover`、居中、裁剪和指针归一化，内层 RTC Texture 只铺满该矩形；已提交的目标显示器尺寸优先于解码器过渡尺寸，避免 Sidecar 返回主屏后再次 `contain` 产生大面积黑边。
+- Windows控制端直接渲染`RTCVideoRenderer`提供的原生`Texture`，由同一个`RemoteContentTransform`同时决定画面裁剪/居中和指针归一化；不再让`RTCVideoView`内部执行第二次contain/cover。该分支不改变macOS和iPad已经验收的Apple渲染路径。
+- 远程工具栏刷新按钮用于原地修复当前会话：被控端释放残留按键/鼠标、复查输入权限、同步显示器和画质并请求新关键帧，桌面控制端只重绑现有纹理；WebSocket、PeerConnection、Track、Sender和DataChannel均保持。显示器列表刷新作为显示器菜单中的独立操作保留。
 - 显示器协议分别携带逻辑尺寸、采集像素尺寸和点像素比例：远程输入继续使用逻辑坐标，视频画质与 WebRTC 适配使用实际像素。macOS 14+ 通过 `SCContentFilter.contentRect × pointPixelScale` 采集，旧系统回退到 `CGDisplayPixelsWide/High`，避免把 Sidecar 的逻辑尺寸放大成模糊视频。
 - 自动画质默认从 1080p30/7 Mbps 开始，以 1 秒区间统计观察丢包、RTT、可用出站带宽、编码耗时、掉帧、冻结和拥塞原因；连续 2 个坏样本降档，连续 10 个好样本且至少稳定 15 秒才升档。档位依次为 1080p60、1080p30、720p60、720p30，切换失败会回滚；手动画质不被自动策略覆盖。显示器事务期间冻结自动档，事务结束后 5 秒内的切屏抖动不参与档位判断。
 - Apple 会话继续固定 ScreenCaptureKit 的 1920 长边/60 FPS 采集上限；Windows 单屏原型将固定采集上限提升至 2560 长边/60 FPS。桌面控制端新增 1080p60、2K60 和原画60 手动档位，自动与手动画质仍只调整 RTP Sender 的码率、帧率和分辨率缩放。高负载手动档暂不显示在移动端，避免改变已稳定的 iPad 路径；120 FPS 在采集、硬编、解码和高刷呈现全链路实测前不开放。切屏期间的画质请求继续延后合并执行，macOS 不动态调用 `SCStream.updateConfiguration()`。
@@ -318,7 +322,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；`HostPlatformAdapter`已接入Windows能力握手、显示器/DPI枚举、主屏采集和`SendInput`鼠标/扫描码/Unicode输入；Windows DNS-SD注册/浏览已接入；`analyze`零告警、108项测试通过且1项按设计跳过 | Windows MSVC原生构建、Mac→Windows单屏/拼音/DNS-SD实机验收；随后实现Windows多显示器事务 |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；`HostPlatformAdapter`已接入Windows能力握手、显示器/DPI枚举、主屏采集和`SendInput`鼠标/扫描码/Unicode输入；桌面DNS-SD双工浏览/发布与Windows诊断、Windows单一Texture几何和原地会话修复已编码；`analyze`零告警、112项测试通过且1项按设计跳过 | Windows MSVC原生构建、Windows→Mac副屏几何/修复、Mac→Windows单屏/拼音/DNS-SD实机验收；随后实现Windows多显示器事务 |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |
@@ -385,4 +389,4 @@ flutter build ios --simulator --debug
 
 ## 当前里程碑
 
-当前并行推进 **M1 Apple 稳定性验收** 与 **M1B Windows 双向原型**。Windows控制端链路已进入真机回归；被控端首轮单主屏、桌面端直接IME和Windows DNS-SD代码已完成。下一门禁是在Windows上完成MSVC Debug构建，并验证Mac→Windows的画面、九宫格指针、系统拼音直输、局域网互相发现、断线释放和30分钟稳定性。单屏闭环通过后，再实现Windows多显示器`replaceTrack()`事务。
+当前并行推进 **M1 Apple 稳定性验收** 与 **M1B Windows 双向原型**。Windows控制端链路已进入真机回归；被控端首轮单主屏、桌面端直接IME、桌面双工DNS-SD、Windows单一Texture几何和原地会话修复代码已完成。下一门禁是在Windows上完成MSVC Debug构建，并验证Windows→Mac副屏画面/九宫格、Mac→Windows单屏/拼音、局域网互相发现、会话修复、断线释放和30分钟稳定性。单屏闭环通过后，再实现Windows多显示器`replaceTrack()`事务。

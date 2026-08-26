@@ -101,3 +101,40 @@ class RemoteContentTransform {
     );
   }
 }
+
+/// Layout for painting the complete decoder texture behind a clipped viewport
+/// so [visibleSourceRect] is the only visible portion. This prevents the
+/// Windows Flutter texture from applying a second, renderer-owned aspect fit
+/// after [RemoteContentTransform] has already committed display geometry.
+class RemoteTextureCropLayout {
+  const RemoteTextureCropLayout({required this.fullTextureRect});
+
+  factory RemoteTextureCropLayout.forViewport({
+    required Size encodedSize,
+    required Rect visibleSourceRect,
+    required Size viewportSize,
+  }) {
+    if (encodedSize.isEmpty ||
+        visibleSourceRect.isEmpty ||
+        viewportSize.isEmpty) {
+      return const RemoteTextureCropLayout(fullTextureRect: Rect.zero);
+    }
+    final encodedBounds = Offset.zero & encodedSize;
+    final visible = visibleSourceRect.intersect(encodedBounds);
+    if (visible.isEmpty) {
+      return const RemoteTextureCropLayout(fullTextureRect: Rect.zero);
+    }
+    final scaleX = viewportSize.width / visible.width;
+    final scaleY = viewportSize.height / visible.height;
+    return RemoteTextureCropLayout(
+      fullTextureRect: Rect.fromLTWH(
+        -visible.left * scaleX,
+        -visible.top * scaleY,
+        encodedSize.width * scaleX,
+        encodedSize.height * scaleY,
+      ),
+    );
+  }
+
+  final Rect fullTextureRect;
+}

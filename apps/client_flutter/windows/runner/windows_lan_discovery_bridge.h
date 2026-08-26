@@ -64,6 +64,8 @@ class WindowsLanDiscoveryBridge {
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
   void StopPublishing(
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void GetDiagnostics(
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   static void WINAPI BrowseCallback(DWORD status, void* query_context,
                                     PDNS_RECORD records);
@@ -106,6 +108,7 @@ class WindowsLanDiscoveryBridge {
   bool registration_completion_pending_ = false;
   std::atomic<bool> shutting_down_{false};
   std::atomic<uint64_t> browse_generation_{0};
+  std::string last_error_;
 };
 
 #endif  // RUNNER_WINDOWS_LAN_DISCOVERY_BRIDGE_H_

@@ -1031,7 +1031,14 @@ class _RemoteToolbar extends StatelessWidget {
                             session.displays.isNotEmpty &&
                             !session.displaySwitchPending,
                         tooltip: '切换显示器',
-                        onSelected: session.selectDisplay,
+                        onSelected: (value) {
+                          if (value == '__refresh_displays__') {
+                            session.refreshRemoteDisplays();
+                            AppMessenger.show('正在刷新远程显示器列表');
+                            return;
+                          }
+                          session.selectDisplay(value);
+                        },
                         itemBuilder: (context) => [
                           for (final display in session.displays)
                             PopupMenuItem(
@@ -1048,6 +1055,16 @@ class _RemoteToolbar extends StatelessWidget {
                                 subtitle: Text(display.resolutionLabel),
                               ),
                             ),
+                          const PopupMenuDivider(),
+                          const PopupMenuItem(
+                            value: '__refresh_displays__',
+                            child: ListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.refresh),
+                              title: Text('刷新显示器列表'),
+                            ),
+                          ),
                         ],
                         child: Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -1301,12 +1318,18 @@ class _RemoteToolbar extends StatelessWidget {
                         ),
                       ),
                       IconButton(
-                        tooltip: '刷新显示器列表',
-                        onPressed: () {
-                          session.refreshRemoteDisplays();
-                          AppMessenger.show('正在刷新远程显示器列表');
-                        },
-                        icon: const Icon(Icons.refresh),
+                        tooltip: '修复当前画面与控制',
+                        onPressed: session.sessionRepairPending
+                            ? null
+                            : () => unawaited(session.repairRemoteSession()),
+                        icon: session.sessionRepairPending
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.refresh),
                       ),
                       IconButton(
                         tooltip: isFullScreen ? '退出全屏' : '进入全屏',
@@ -2003,17 +2026,21 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                           child: child!,
                         );
                       },
-                      child: RTCVideoView(
-                        session.remoteRenderer,
-                        key: const ValueKey('remoteVideoView'),
-                        // RemoteContentTransform is the single owner of
-                        // contain/cover layout and pointer mapping. The inner
-                        // WebRTC view only fills that committed destination
-                        // rectangle, preventing a second contain pass from
-                        // shrinking a recovered main-display frame.
-                        objectFit:
-                            RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                      ),
+                      child: Platform.isWindows
+                          ? _WindowsRemoteVideoTexture(
+                              renderer: session.remoteRenderer,
+                              encodedSize: transform.sourceSize,
+                              visibleSourceRect: transform.sourceRect,
+                            )
+                          : RTCVideoView(
+                              session.remoteRenderer,
+                              key: const ValueKey('remoteVideoView'),
+                              // Apple keeps the physically verified native
+                              // video path. Windows bypasses this inner fit so
+                              // rendering and pointer input share one geometry.
+                              objectFit: RTCVideoViewObjectFit
+                                  .RTCVideoViewObjectFitCover,
+                            ),
                     ),
                   ),
                   Positioned.fill(
@@ -2033,6 +2060,37 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                   ),
                   if (_desktopDirectImeAvailable)
                     _buildDesktopImeProxy(constraints),
+                  if (session.sessionRepairPending)
+                    const Positioned.fill(
+                      child: AbsorbPointer(
+                        child: ColoredBox(
+                          color: Color(0x66000000),
+                          child: Center(
+                            child: Card(
+                              child: Padding(
+                                padding: EdgeInsets.symmetric(
+                                  horizontal: 20,
+                                  vertical: 14,
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    SizedBox.square(
+                                      dimension: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    ),
+                                    SizedBox(width: 12),
+                                    Text('正在修复当前画面与控制状态'),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   if (widget.inputSettings.pointerMode ==
                           RemotePointerMode.touchpad &&
                       !_keyboardVisible)
@@ -2833,6 +2891,52 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   void _sendSpecialKey(String key) {
     session.sendKey(phase: 'down', key: key, modifiers: const []);
     session.sendKey(phase: 'up', key: key, modifiers: const []);
+  }
+}
+
+class _WindowsRemoteVideoTexture extends StatelessWidget {
+  const _WindowsRemoteVideoTexture({
+    required this.renderer,
+    required this.encodedSize,
+    required this.visibleSourceRect,
+  });
+
+  final RTCVideoRenderer renderer;
+  final Size encodedSize;
+  final Rect visibleSourceRect;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final viewportSize = Size(constraints.maxWidth, constraints.maxHeight);
+        final layout = RemoteTextureCropLayout.forViewport(
+          encodedSize: encodedSize,
+          visibleSourceRect: visibleSourceRect,
+          viewportSize: viewportSize,
+        );
+        final textureId = renderer.textureId;
+        if (!renderer.renderVideo ||
+            textureId == null ||
+            layout.fullTextureRect.isEmpty) {
+          return const ColoredBox(color: Colors.black);
+        }
+        return ClipRect(
+          child: Stack(
+            clipBehavior: Clip.hardEdge,
+            children: [
+              Positioned.fromRect(
+                rect: layout.fullTextureRect,
+                child: Texture(
+                  textureId: textureId,
+                  filterQuality: FilterQuality.medium,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 }
 

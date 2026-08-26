@@ -19,7 +19,7 @@ git status --short --branch
 rg --files
 ```
 
-仓库当前已完成 M0 工程基线，并进入 M1 Apple 与 M1B Windows 双向原型。开发态连接码已有 5 分钟 TTL、单次消费、每来源限流和客户端租约倒计时/自动轮换，验证后自动建立 WebRTC；Apple 链路的动态画布、输入、采集事务、色彩和自动画质已编码。Windows/macOS控制端已接入桌面直接IME；Windows被控端首轮已实现版本化原生握手、单主屏采集、显示器/DPI枚举、`SendInput`鼠标/扫描码/Unicode输入以及Windows DNS-SD发布/浏览，但新增原生代码仍待Windows + MSVC构建和Mac→Windows实机验证。Windows多显示器、UAC安全桌面和无人值守尚未开放。不得把Mac上的Dart/Apple构建通过表述为Windows原生能力已验收，也不得声称完整远控或生产安全已经完成。
+仓库当前已完成 M0 工程基线，并进入 M1 Apple 与 M1B Windows 双向原型。开发态连接码已有 5 分钟 TTL、单次消费、每来源限流和客户端租约倒计时/自动轮换，验证后自动建立 WebRTC；设备上线等待只建立信令和 DNS-SD 发布，不提前采集屏幕。Apple 链路的动态画布、输入、采集事务、色彩和自动画质已编码。Windows/macOS控制端已接入桌面直接IME；Windows被控端首轮已实现版本化原生握手、单主屏采集、显示器/DPI枚举、`SendInput`鼠标/扫描码/Unicode输入以及Windows DNS-SD双工发布/浏览和诊断；Windows控制Mac使用独立原生Texture几何，避免RTC视图二次缩放，并提供不重建会话的画面/控制修复。但新增Windows原生代码仍待Windows + MSVC构建和Mac→Windows实机验证。Windows多显示器、UAC安全桌面和无人值守尚未开放。不得把Mac上的Dart/Apple构建通过表述为Windows原生能力已验收，也不得声称完整远控或生产安全已经完成。
 
 ## 2. 固定技术决策
 

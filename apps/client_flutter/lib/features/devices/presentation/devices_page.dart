@@ -56,6 +56,7 @@ class _DevicesPageState extends State<DevicesPage> {
   StreamSubscription<RemoteNotice>? _noticeSubscription;
   List<LanAddress>? _localAddresses;
   List<DiscoveredDevice> _discoveredDevices = const [];
+  LanDiscoveryDiagnostics? _lanDiscoveryDiagnostics;
   String? _addressError;
   String? _discoveryError;
   bool _isBrowsing = false;
@@ -85,25 +86,28 @@ class _DevicesPageState extends State<DevicesPage> {
     unawaited(_session.initialize());
     if (_role == RemoteRole.host) {
       unawaited(_findLocalAddresses());
-    } else {
-      _discoverySubscription = widget.discoveryService.devices.listen(
-        (devices) {
-          if (mounted) {
-            setState(() {
-              _discoveredDevices = devices;
-              _discoveryError = null;
-            });
-          }
-        },
-        onError: (Object error) {
-          if (mounted) {
-            setState(() => _discoveryError = '附近设备发现失败：$error');
-          }
-        },
-      );
-      if (widget.settings.lanDiscoveryEnabled) {
-        unawaited(_startBrowsing());
-      }
+    }
+    _discoverySubscription = widget.discoveryService.devices.listen(
+      (devices) {
+        if (mounted) {
+          setState(() {
+            _discoveredDevices = visibleLanDevices(
+              devices: devices,
+              localDeviceId: Platform.localHostname,
+            );
+            _discoveryError = null;
+          });
+          unawaited(_refreshDiscoveryDiagnostics());
+        }
+      },
+      onError: (Object error) {
+        if (mounted) {
+          setState(() => _discoveryError = '附近设备发现失败：$error');
+        }
+      },
+    );
+    if (widget.settings.lanDiscoveryEnabled) {
+      unawaited(_startBrowsing());
     }
   }
 
@@ -116,10 +120,6 @@ class _DevicesPageState extends State<DevicesPage> {
           offset: widget.settings.signalingServerUrl.length,
         ),
       );
-    }
-    if (_role != RemoteRole.controller) {
-      if (mounted) setState(() {});
-      return;
     }
     if (widget.settings.lanDiscoveryEnabled) {
       unawaited(_startBrowsing());
@@ -141,6 +141,7 @@ class _DevicesPageState extends State<DevicesPage> {
         setState(() {
           _discoveredDevices = const [];
           _isBrowsing = false;
+          _lanDiscoveryDiagnostics = null;
         });
       }
     }
@@ -192,7 +193,35 @@ class _DevicesPageState extends State<DevicesPage> {
       if (mounted) {
         setState(() => _isBrowsing = false);
       }
+      await _refreshDiscoveryDiagnostics();
     }
+  }
+
+  Future<void> _refreshDiscoveryDiagnostics() async {
+    if (!mounted || !widget.discoveryService.isSupported) return;
+    LanDiscoveryDiagnostics diagnostics;
+    if (Platform.isWindows) {
+      try {
+        diagnostics = await widget.discoveryService.getDiagnostics();
+      } catch (error) {
+        diagnostics = LanDiscoveryDiagnostics(
+          browsing: _discoveryActive,
+          publishing: _isPublishing,
+          discoveredCount: _discoveredDevices.length,
+          resolvingCount: 0,
+          lastError: '读取发现状态失败：$error',
+        );
+      }
+    } else {
+      diagnostics = LanDiscoveryDiagnostics(
+        browsing: _discoveryActive,
+        publishing: _isPublishing,
+        discoveredCount: _discoveredDevices.length,
+        resolvingCount: 0,
+        lastError: _discoveryError ?? '',
+      );
+    }
+    if (mounted) setState(() => _lanDiscoveryDiagnostics = diagnostics);
   }
 
   Future<void> _refreshDiscovery() async {
@@ -207,6 +236,7 @@ class _DevicesPageState extends State<DevicesPage> {
       setState(() => _discoveredDevices = const []);
     }
     await _startBrowsing();
+    await _refreshDiscoveryDiagnostics();
     if (_discoveryError == null) {
       AppMessenger.show('附近设备列表已刷新', level: AppMessageLevel.success);
     }
@@ -339,7 +369,6 @@ class _DevicesPageState extends State<DevicesPage> {
   void _reconcileInvitationLease() {
     final expiresAt = _session.hostInvitationExpiresAt;
     if (_session.state == RemoteSessionState.waitingForPeer &&
-        _hostSharing.sharingRequested &&
         expiresAt != null) {
       _invitationLease.arm(expiresAt);
     } else if (!_invitationLease.rotationPending) {
@@ -350,7 +379,6 @@ class _DevicesPageState extends State<DevicesPage> {
   Future<void> _rotateHostInvitation() async {
     if (!mounted ||
         _role != RemoteRole.host ||
-        !_hostSharing.sharingRequested ||
         _session.state != RemoteSessionState.waitingForPeer) {
       return;
     }
@@ -423,7 +451,8 @@ class _DevicesPageState extends State<DevicesPage> {
       );
       _isPublishing = true;
       _discoveryError = null;
-      AppMessenger.show('本机已发布到局域网', level: AppMessageLevel.success);
+      await _refreshDiscoveryDiagnostics();
+      AppMessenger.show('本机已上线并发布到局域网', level: AppMessageLevel.success);
     } catch (error) {
       _discoveryError = '发布局域网设备失败：$error';
       AppMessenger.show(_discoveryError!, level: AppMessageLevel.error);
@@ -447,6 +476,7 @@ class _DevicesPageState extends State<DevicesPage> {
     } finally {
       _isPublishing = false;
       _publicationBusy = false;
+      await _refreshDiscoveryDiagnostics();
       if (mounted) {
         setState(() {});
       }
@@ -579,7 +609,7 @@ class _DevicesPageState extends State<DevicesPage> {
                         const SizedBox(height: 8),
                         Text(
                           _role == RemoteRole.host
-                              ? '创建五分钟有效的一次性连接码，控制端验证成功后自动共享。'
+                              ? '设备上线后生成五分钟有效的一次性连接码；验证成功后才开始采集和控制。'
                               : '选择附近设备，或输入远程设备地址和六位连接码。',
                           style: Theme.of(context).textTheme.bodyLarge,
                         ),
@@ -606,6 +636,10 @@ class _DevicesPageState extends State<DevicesPage> {
                           addressError: _addressError,
                           discoveredDevices: _discoveredDevices,
                           discoveryError: _discoveryError,
+                          discoveryEmptyHint: lanDiscoveryEmptyHint(
+                            platform: Platform.operatingSystem,
+                          ),
+                          discoveryDiagnostics: _lanDiscoveryDiagnostics,
                           isBrowsing: _isBrowsing,
                           isPublishing: _isPublishing,
                           hostSharingRequested: _hostSharing.sharingRequested,
@@ -672,6 +706,8 @@ class _ConnectionCard extends StatelessWidget {
     required this.addressError,
     required this.discoveredDevices,
     required this.discoveryError,
+    required this.discoveryEmptyHint,
+    required this.discoveryDiagnostics,
     required this.isBrowsing,
     required this.isPublishing,
     required this.hostSharingRequested,
@@ -699,6 +735,8 @@ class _ConnectionCard extends StatelessWidget {
   final String? addressError;
   final List<DiscoveredDevice> discoveredDevices;
   final String? discoveryError;
+  final String discoveryEmptyHint;
+  final LanDiscoveryDiagnostics? discoveryDiagnostics;
   final bool isBrowsing;
   final bool isPublishing;
   final bool hostSharingRequested;
@@ -764,7 +802,7 @@ class _ConnectionCard extends StatelessWidget {
       children: [
         Text('连接凭证', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 6),
-        const Text('正确连接码验证后会自动建立远程会话。'),
+        const Text('上线只建立信令等待，不会采集屏幕；连接码验证成功后才建立远程会话。'),
         const SizedBox(height: 18),
         _HostRoomCodeDisplay(code: roomController.text),
         const SizedBox(height: 8),
@@ -775,8 +813,7 @@ class _ConnectionCard extends StatelessWidget {
               key: const ValueKey('refreshRoomCodeButton'),
               onPressed: invitationRefreshing
                   ? null
-                  : hostSharingRequested &&
-                        session.state == RemoteSessionState.waitingForPeer
+                  : session.state == RemoteSessionState.waitingForPeer
                   ? onRefreshRoomCode
                   : !_isActive
                   ? onConnect
@@ -836,7 +873,11 @@ class _ConnectionCard extends StatelessWidget {
       children: [
         Text('网络与发现', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 6),
-        Text(isPublishing ? '本机已发布，控制端可以自动发现。' : '开始共享后自动发布到局域网。'),
+        Text(isPublishing ? '本机已上线；发布与附近设备浏览同时运行。' : '上线等待连接后自动发布到局域网。'),
+        if (discoveredDevices.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text('同时发现 ${discoveredDevices.length} 台其他设备。'),
+        ],
         const SizedBox(height: 18),
         _LanAddressList(
           addresses: localAddresses,
@@ -850,6 +891,10 @@ class _ConnectionCard extends StatelessWidget {
             discoveryError!,
             style: TextStyle(color: Theme.of(context).colorScheme.error),
           ),
+        ],
+        if (settings.showAdvancedNetwork && discoveryDiagnostics != null) ...[
+          const SizedBox(height: 8),
+          Text('发现诊断：${discoveryDiagnostics!.label}'),
         ],
         if (settings.showAdvancedNetwork) ...[
           const SizedBox(height: 8),
@@ -885,6 +930,8 @@ class _ConnectionCard extends StatelessWidget {
           _NearbyDevices(
             devices: discoveredDevices,
             error: discoveryError,
+            emptyHint: discoveryEmptyHint,
+            diagnostics: discoveryDiagnostics,
             isBrowsing: isBrowsing,
             enabled: !_isActive,
             currentServerUrl: serverController.text.trim(),
@@ -1014,7 +1061,7 @@ class _ConnectionCard extends StatelessWidget {
                   ? Icons.stop_circle_outlined
                   : Icons.link_off,
             ),
-            label: Text(role == RemoteRole.host ? '停止共享' : '断开'),
+            label: Text(role == RemoteRole.host ? '停止等待连接' : '断开'),
           )
         else
           FilledButton.icon(
@@ -1024,7 +1071,7 @@ class _ConnectionCard extends StatelessWidget {
                   ? Icons.sensors
                   : Icons.desktop_windows_outlined,
             ),
-            label: Text(role == RemoteRole.host ? '开始共享' : '连接远程设备'),
+            label: Text(role == RemoteRole.host ? '上线等待连接' : '连接远程设备'),
           ),
       ],
     );
@@ -1171,6 +1218,8 @@ class _NearbyDevices extends StatelessWidget {
   const _NearbyDevices({
     required this.devices,
     required this.error,
+    required this.emptyHint,
+    required this.diagnostics,
     required this.isBrowsing,
     required this.enabled,
     required this.currentServerUrl,
@@ -1180,6 +1229,8 @@ class _NearbyDevices extends StatelessWidget {
 
   final List<DiscoveredDevice> devices;
   final String? error;
+  final String emptyHint;
+  final LanDiscoveryDiagnostics? diagnostics;
   final bool isBrowsing;
   final bool enabled;
   final String currentServerUrl;
@@ -1224,7 +1275,19 @@ class _NearbyDevices extends StatelessWidget {
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               )
             else if (devices.isEmpty)
-              const Text('正在搜索；也可继续使用下方手动地址。')
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(emptyHint),
+                  if (diagnostics case final value?) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      value.label,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ],
+              )
             else
               for (final device in devices)
                 ListTile(

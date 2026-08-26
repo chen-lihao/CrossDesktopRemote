@@ -65,6 +65,54 @@ void main() {
     );
   });
 
+  test('desktop duplex discovery filters self and interface duplicates', () {
+    const self = DiscoveredDevice(
+      id: 'mac-mini',
+      name: 'Mac mini',
+      host: 'mac-mini.local',
+      port: 8080,
+      path: '/ws/signaling',
+      version: '2',
+      capabilities: 'screen',
+    );
+    const windows = DiscoveredDevice(
+      id: 'windows-pc',
+      name: 'Windows PC',
+      host: 'windows-pc.local',
+      port: 8080,
+      path: '/ws/signaling',
+      version: '2',
+      capabilities: 'screen',
+    );
+
+    final visible = visibleLanDevices(
+      devices: const [windows, self, windows],
+      localDeviceId: 'MAC-MINI',
+    );
+
+    expect(visible, [windows]);
+  });
+
+  test('Windows empty discovery state provides an actionable hint', () {
+    expect(lanDiscoveryEmptyHint(platform: 'windows'), contains('专用网络'));
+    expect(lanDiscoveryEmptyHint(platform: 'macos'), contains('mDNS'));
+  });
+
+  test('decodes native DNS-SD diagnostics without dynamic type casts', () {
+    final diagnostics = LanDiscoveryDiagnostics.fromMap({
+      'browsing': true,
+      'publishing': true,
+      'discoveredCount': 2,
+      'resolvingCount': 1,
+      'lastError': '',
+    });
+
+    expect(diagnostics.browsing, isTrue);
+    expect(diagnostics.publishing, isTrue);
+    expect(diagnostics.discoveredCount, 2);
+    expect(diagnostics.label, contains('解析中 1 项'));
+  });
+
   group('selected device signaling endpoint', () {
     final device = DiscoveredDevice.fromMap({
       'id': 'windows-host',

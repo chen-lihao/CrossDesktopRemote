@@ -152,6 +152,7 @@ class RemoteSessionController extends ChangeNotifier {
   bool _inputConfirmed = false;
   bool _qualityPending = false;
   bool _displaySwitchPending = false;
+  bool _sessionRepairPending = false;
   bool _hostDisplaySwitchInProgress = false;
   bool _samplingMediaStats = false;
   bool _adaptiveQualityUpdateInProgress = false;
@@ -181,6 +182,8 @@ class RemoteSessionController extends ChangeNotifier {
   String? _hostInvitationLeaseId;
   bool _supportsInvitationRotation = false;
   Completer<void>? _invitationRotationCompleter;
+  Completer<Map<String, dynamic>>? _sessionRepairCompleter;
+  String? _sessionRepairRequestId;
   RemoteQualityProfile _selectedQuality;
   RemoteQualityProfile? _queuedQualityProfile;
   int? _actualVideoWidth;
@@ -215,6 +218,7 @@ class RemoteSessionController extends ChangeNotifier {
   RemoteQualityProfile get selectedQuality => _selectedQuality;
   bool get qualityPending => _qualityPending;
   bool get displaySwitchPending => _displaySwitchPending;
+  bool get sessionRepairPending => _sessionRepairPending;
   String? get pendingDisplayId => _pendingDisplayId;
   RemoteVideoFrameSize? get expectedVideoFrameSize => _expectedVideoFrameSize;
   RemoteVideoFrameSize? get outboundVideoFrameSize => _outboundVideoFrameSize;
@@ -710,6 +714,91 @@ class RemoteSessionController extends ChangeNotifier {
     }
   }
 
+  /// Repairs presentation and input state without rebuilding the signaling or
+  /// PeerConnection. The host requests a fresh key frame and republishes its
+  /// authoritative state; desktop controllers then rebind the native texture.
+  Future<void> repairRemoteSession() async {
+    if (role != RemoteRole.controller || _sessionRepairPending) return;
+    if (_controlChannel?.state != RTCDataChannelState.RTCDataChannelOpen) {
+      _emitNotice('控制通道尚未就绪，无法修复当前画面', level: RemoteNoticeLevel.warning);
+      return;
+    }
+    if (_displaySwitchPending) {
+      _emitNotice('显示器切换完成后才能修复当前画面', level: RemoteNoticeLevel.warning);
+      return;
+    }
+
+    _sessionRepairPending = true;
+    _controlError = null;
+    final requestId = DateTime.now().microsecondsSinceEpoch.toString();
+    _sessionRepairRequestId = requestId;
+    final completion = Completer<Map<String, dynamic>>();
+    _sessionRepairCompleter = completion;
+    int? baselineFrames;
+    try {
+      baselineFrames = (await _readRtcVideoProgress('inbound-rtp'))?.frames;
+    } catch (_) {
+      // Stats are best-effort; the host acknowledgement remains authoritative.
+    }
+    notifyListeners();
+    _sendControl({
+      'type': 'repair-session',
+      'version': 2,
+      'requestId': requestId,
+    });
+    _emitNotice('正在修复当前画面和控制状态');
+
+    try {
+      final response = await completion.future.timeout(
+        const Duration(seconds: 3),
+      );
+      if (response['ok'] != true) {
+        throw StateError(response['message'] as String? ?? '被控端无法执行修复');
+      }
+      // Reattach the existing stream before waiting for the fresh key frame.
+      // This rebuilds only the desktop texture sink and preserves signaling,
+      // the PeerConnection, sender and DataChannels.
+      if (Platform.isWindows || Platform.isMacOS) {
+        await _rebindRemoteRenderer();
+      }
+      final progress = await _waitForInboundVideoProgress(
+        afterFrames: baselineFrames,
+        attempts: 20,
+      );
+      _inputConfirmed = false;
+      if (progress == null) {
+        _emitNotice(
+          '状态已重新同步，但暂未确认新视频帧；桌面静止时可先移动窗口检查',
+          level: RemoteNoticeLevel.warning,
+        );
+      } else {
+        _emitNotice('当前画面和控制状态已修复', level: RemoteNoticeLevel.success);
+      }
+    } on TimeoutException catch (error) {
+      _emitNotice(
+        '修复超时：${error.message ?? '请检查网络后重试'}',
+        level: RemoteNoticeLevel.warning,
+      );
+    } catch (error) {
+      _emitNotice('修复当前画面失败：$error', level: RemoteNoticeLevel.error);
+    } finally {
+      if (identical(_sessionRepairCompleter, completion)) {
+        _sessionRepairCompleter = null;
+        _sessionRepairRequestId = null;
+      }
+      _sessionRepairPending = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _rebindRemoteRenderer() async {
+    final stream = remoteRenderer.srcObject;
+    if (stream == null) return;
+    await remoteRenderer.setSrcObject(stream: null);
+    await Future<void>.delayed(Duration.zero);
+    await remoteRenderer.setSrcObject(stream: stream);
+  }
+
   void refreshColorDiagnostics() {
     if (role == RemoteRole.controller) {
       _sendControl({'type': 'refresh-color-diagnostics', 'version': 2});
@@ -1079,6 +1168,8 @@ class RemoteSessionController extends ChangeNotifier {
         notifyListeners();
       case 'refresh-displays':
         await _refreshHostDisplays();
+      case 'repair-session':
+        await _repairHostSession(message);
       case 'set-quality':
         if (_hostDisplaySwitchInProgress) {
           _sendControl({
@@ -1259,6 +1350,14 @@ class RemoteSessionController extends ChangeNotifier {
           message['message'] as String? ?? '读取被控设备色彩诊断失败',
           level: RemoteNoticeLevel.warning,
         );
+      case 'repair-session-ack':
+        final requestId = message['requestId'] as String?;
+        final completion = _sessionRepairCompleter;
+        if (requestId == _sessionRepairRequestId &&
+            completion != null &&
+            !completion.isCompleted) {
+          completion.complete(message);
+        }
       case 'input-ack':
         final sentAtMicros = (message['echoedSentAtUnixMicros'] as num?)
             ?.toInt();
@@ -1381,11 +1480,59 @@ class RemoteSessionController extends ChangeNotifier {
     _flushQueuedQualityRequest();
   }
 
+  Future<void> _repairHostSession(Map<String, dynamic> message) async {
+    final requestId = message['requestId'] as String? ?? '';
+    if (_hostDisplaySwitchInProgress) {
+      _sendControl({
+        'type': 'repair-session-ack',
+        'version': 2,
+        'requestId': requestId,
+        'ok': false,
+        'message': '显示器切换期间不能修复当前画面',
+      });
+      return;
+    }
+    try {
+      await _releaseHostPointerButtons();
+      final permission = await _hostPlatform.checkPermissions();
+      _accessibilityGranted = permission.inputGranted;
+      _controlError = permission.inputGranted ? null : permission.limitation;
+      await _refreshHostDisplays();
+      var keyFrameRequested = false;
+      try {
+        keyFrameRequested = await desktopCapturer.requestKeyFrame();
+      } catch (_) {
+        // Some platform capturers cannot explicitly request a key frame. The
+        // state refresh and controller texture rebind still remain useful.
+      }
+      _publishHostState();
+      _publishQualityState();
+      _publishDisplayList();
+      _sendControl({
+        'type': 'repair-session-ack',
+        'version': 2,
+        'requestId': requestId,
+        'ok': true,
+        'keyFrameRequested': keyFrameRequested,
+      });
+      notifyListeners();
+    } catch (error) {
+      _sendControl({
+        'type': 'repair-session-ack',
+        'version': 2,
+        'requestId': requestId,
+        'ok': false,
+        'message': error.toString(),
+      });
+    }
+  }
+
   Future<_RtcVideoProgress?> _waitForInboundVideoProgress({
     int? afterFrames,
+    int attempts = 30,
   }) async {
     _RtcVideoProgress? latest;
-    for (var attempt = 0; attempt < 30; attempt += 1) {
+    for (var attempt = 0; attempt < attempts; attempt += 1) {
       _RtcVideoProgress? progress;
       try {
         progress = await _readRtcVideoProgress('inbound-rtp');
@@ -2812,6 +2959,12 @@ class RemoteSessionController extends ChangeNotifier {
     if (rotation != null && !rotation.isCompleted) {
       rotation.completeError(StateError('信令连接已断开'));
     }
+    final repair = _sessionRepairCompleter;
+    _sessionRepairCompleter = null;
+    _sessionRepairRequestId = null;
+    if (repair != null && !repair.isCompleted) {
+      repair.completeError(StateError('信令连接已断开'));
+    }
     if (!_closing) {
       final reasonParts = reason?.split(':') ?? const <String>[];
       final reasonCode = reasonParts.firstOrNull;
@@ -2918,6 +3071,7 @@ class RemoteSessionController extends ChangeNotifier {
     _qualityPending = false;
     _queuedQualityProfile = null;
     _displaySwitchPending = false;
+    _sessionRepairPending = false;
     _hostDisplaySwitchInProgress = false;
     _samplingMediaStats = false;
     _adaptiveQualityUpdateInProgress = false;

@@ -5,6 +5,40 @@ import 'package:flutter/services.dart';
 
 const lanDiscoveryServiceType = '_cdrremote._tcp';
 
+class LanDiscoveryDiagnostics {
+  const LanDiscoveryDiagnostics({
+    required this.browsing,
+    required this.publishing,
+    required this.discoveredCount,
+    required this.resolvingCount,
+    this.lastError = '',
+  });
+
+  factory LanDiscoveryDiagnostics.fromMap(Map<Object?, Object?> value) {
+    return LanDiscoveryDiagnostics(
+      browsing: value['browsing'] == true,
+      publishing: value['publishing'] == true,
+      discoveredCount: (value['discoveredCount'] as num?)?.toInt() ?? 0,
+      resolvingCount: (value['resolvingCount'] as num?)?.toInt() ?? 0,
+      lastError: value['lastError']?.toString() ?? '',
+    );
+  }
+
+  final bool browsing;
+  final bool publishing;
+  final int discoveredCount;
+  final int resolvingCount;
+  final String lastError;
+
+  String get label => [
+    browsing ? '浏览运行中' : '浏览未启动',
+    publishing ? '发布运行中' : '未发布',
+    '已解析 $discoveredCount 台',
+    if (resolvingCount > 0) '解析中 $resolvingCount 项',
+    if (lastError.isNotEmpty) lastError,
+  ].join(' · ');
+}
+
 class HostAdvertisement {
   const HostAdvertisement({
     required this.deviceId,
@@ -147,6 +181,34 @@ class DiscoveredDevice {
       : Uri(scheme: 'ws', host: host, port: port, path: path).toString();
 }
 
+/// Desktop hosts browse and publish concurrently. Keep their own DNS-SD
+/// advertisement out of the nearby-device list and normalize duplicates that
+/// may arrive through multiple active network interfaces.
+List<DiscoveredDevice> visibleLanDevices({
+  required Iterable<DiscoveredDevice> devices,
+  required String localDeviceId,
+}) {
+  final normalizedLocalId = localDeviceId.trim().toLowerCase();
+  final byId = <String, DiscoveredDevice>{};
+  for (final device in devices) {
+    final normalizedId = device.id.trim().toLowerCase();
+    if (normalizedLocalId.isNotEmpty && normalizedId == normalizedLocalId) {
+      continue;
+    }
+    byId[normalizedId] = device;
+  }
+  final result = byId.values.toList(growable: false);
+  result.sort((left, right) => left.name.compareTo(right.name));
+  return result;
+}
+
+String lanDiscoveryEmptyHint({required String platform}) {
+  if (platform.toLowerCase() == 'windows') {
+    return '正在搜索；若持续为空，请确认当前网络为“专用网络”，并允许应用通过 Windows 防火墙。';
+  }
+  return '正在搜索；若网络禁用 mDNS/组播，可继续使用下方手动信令地址。';
+}
+
 abstract interface class LanDiscoveryService {
   bool get isSupported;
 
@@ -159,6 +221,8 @@ abstract interface class LanDiscoveryService {
   Future<void> publishHost(HostAdvertisement host);
 
   Future<void> stopPublishing();
+
+  Future<LanDiscoveryDiagnostics> getDiagnostics();
 
   Future<void> dispose();
 }
@@ -225,6 +289,32 @@ class MethodChannelLanDiscoveryService implements LanDiscoveryService {
       _methodChannel.invokeMethod<void>('stopPublishing');
 
   @override
+  Future<LanDiscoveryDiagnostics> getDiagnostics() async {
+    if (!Platform.isWindows) {
+      return const LanDiscoveryDiagnostics(
+        browsing: true,
+        publishing: false,
+        discoveredCount: 0,
+        resolvingCount: 0,
+      );
+    }
+    try {
+      final value = await _methodChannel.invokeMapMethod<Object?, Object?>(
+        'getDiagnostics',
+      );
+      return LanDiscoveryDiagnostics.fromMap(value ?? const {});
+    } on MissingPluginException {
+      return const LanDiscoveryDiagnostics(
+        browsing: false,
+        publishing: false,
+        discoveredCount: 0,
+        resolvingCount: 0,
+        lastError: '当前 Windows Runner 尚未提供发现诊断',
+      );
+    }
+  }
+
+  @override
   Future<void> dispose() async {
     try {
       await stopBrowsing();
@@ -261,6 +351,17 @@ class UnsupportedLanDiscoveryService implements LanDiscoveryService {
 
   @override
   Future<void> stopPublishing() async {}
+
+  @override
+  Future<LanDiscoveryDiagnostics> getDiagnostics() async {
+    return const LanDiscoveryDiagnostics(
+      browsing: false,
+      publishing: false,
+      discoveredCount: 0,
+      resolvingCount: 0,
+      lastError: '当前平台不支持局域网发现',
+    );
+  }
 
   @override
   Future<void> dispose() async {}

@@ -145,4 +145,17 @@ void main() {
       closeTo(1, 0.0001),
     );
   });
+
+  test('Windows texture crop paints the active region over the viewport', () {
+    final layout = RemoteTextureCropLayout.forViewport(
+      encodedSize: const Size(1920, 1080),
+      visibleSourceRect: const Rect.fromLTWH(160, 108, 1600, 864),
+      viewportSize: const Size(1000, 540),
+    );
+
+    expect(layout.fullTextureRect.left, closeTo(-100, 0.001));
+    expect(layout.fullTextureRect.top, closeTo(-67.5, 0.001));
+    expect(layout.fullTextureRect.width, closeTo(1200, 0.001));
+    expect(layout.fullTextureRect.height, closeTo(675, 0.001));
+  });
 }
