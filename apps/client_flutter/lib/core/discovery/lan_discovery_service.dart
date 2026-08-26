@@ -11,6 +11,12 @@ class LanDiscoveryDiagnostics {
     required this.publishing,
     required this.discoveredCount,
     required this.resolvingCount,
+    this.browseCallbackCount = 0,
+    this.ptrRecordCount = 0,
+    this.resolveStartedCount = 0,
+    this.resolveSucceededCount = 0,
+    this.registrationSucceededCount = 0,
+    this.activeRegistrationAddress = '',
     this.lastError = '',
   });
 
@@ -20,6 +26,15 @@ class LanDiscoveryDiagnostics {
       publishing: value['publishing'] == true,
       discoveredCount: (value['discoveredCount'] as num?)?.toInt() ?? 0,
       resolvingCount: (value['resolvingCount'] as num?)?.toInt() ?? 0,
+      browseCallbackCount: (value['browseCallbackCount'] as num?)?.toInt() ?? 0,
+      ptrRecordCount: (value['ptrRecordCount'] as num?)?.toInt() ?? 0,
+      resolveStartedCount: (value['resolveStartedCount'] as num?)?.toInt() ?? 0,
+      resolveSucceededCount:
+          (value['resolveSucceededCount'] as num?)?.toInt() ?? 0,
+      registrationSucceededCount:
+          (value['registrationSucceededCount'] as num?)?.toInt() ?? 0,
+      activeRegistrationAddress:
+          value['activeRegistrationAddress']?.toString() ?? '',
       lastError: value['lastError']?.toString() ?? '',
     );
   }
@@ -28,6 +43,12 @@ class LanDiscoveryDiagnostics {
   final bool publishing;
   final int discoveredCount;
   final int resolvingCount;
+  final int browseCallbackCount;
+  final int ptrRecordCount;
+  final int resolveStartedCount;
+  final int resolveSucceededCount;
+  final int registrationSucceededCount;
+  final String activeRegistrationAddress;
   final String lastError;
 
   String get label => [
@@ -35,6 +56,12 @@ class LanDiscoveryDiagnostics {
     publishing ? '发布运行中' : '未发布',
     '已解析 $discoveredCount 台',
     if (resolvingCount > 0) '解析中 $resolvingCount 项',
+    if (browseCallbackCount > 0) '回调 $browseCallbackCount',
+    if (ptrRecordCount > 0) 'PTR $ptrRecordCount',
+    if (resolveStartedCount > 0)
+      '解析 $resolveSucceededCount/$resolveStartedCount',
+    if (registrationSucceededCount > 0) '注册 $registrationSucceededCount 次',
+    if (activeRegistrationAddress.isNotEmpty) '地址 $activeRegistrationAddress',
     if (lastError.isNotEmpty) lastError,
   ].join(' · ');
 }

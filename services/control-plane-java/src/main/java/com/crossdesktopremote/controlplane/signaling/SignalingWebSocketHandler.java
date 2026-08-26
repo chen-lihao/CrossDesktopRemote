@@ -2,6 +2,7 @@ package com.crossdesktopremote.controlplane.signaling;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -28,6 +29,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			"reject");
 	private static final String ROOM_ATTRIBUTE = "crossdesktop.room";
 	private static final String ROLE_ATTRIBUTE = "crossdesktop.role";
+	private static final String PLATFORM_ATTRIBUTE = "crossdesktop.platform";
+	private static final String CAPABILITIES_ATTRIBUTE = "crossdesktop.capabilities";
 
 	private final SignalingRoomRegistry rooms;
 	private final ObjectMapper objectMapper;
@@ -48,6 +51,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		var query = UriComponentsBuilder.fromUri(requestUri).build().getQueryParams();
 		var roomCode = query.getFirst("room");
 		var role = SignalingRole.parse(query.getFirst("role"));
+		var platform = normalizedPlatform(query.getFirst("platform"));
+		var clientCapabilities = normalizedCapabilities(query.getFirst("capabilities"));
 		if (role.isEmpty() ||
 				(role.get() == SignalingRole.CONTROLLER && !StringUtils.hasText(roomCode))) {
 			session.close(CloseStatus.BAD_DATA.withReason("Invalid room or role"));
@@ -69,6 +74,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 		session.getAttributes().put(ROOM_ATTRIBUTE, roomCode);
 		session.getAttributes().put(ROLE_ATTRIBUTE, role.get());
+		session.getAttributes().put(PLATFORM_ATTRIBUTE, platform);
+		session.getAttributes().put(CAPABILITIES_ATTRIBUTE, clientCapabilities);
 		var ready = new HashMap<String, Object>();
 		ready.put("type", "ready");
 		ready.put("protocolVersion", 2);
@@ -86,8 +93,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		sendJson(session, ready);
 		var joinedRoomCode = roomCode;
 		rooms.peer(joinedRoomCode, role.get()).ifPresent(peer -> {
-			sendJsonQuietly(peer, Map.of("type", "peer-joined", "role", role.get().wireName()));
-			sendJsonQuietly(session, Map.of("type", "peer-joined", "role", role.get().peerRole().wireName()));
+			sendJsonQuietly(peer, peerJoinedPayload(role.get(), session));
+			sendJsonQuietly(session, peerJoinedPayload(role.get().peerRole(), peer));
 		});
 	}
 
@@ -193,5 +200,33 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 	private SignalingRole role(WebSocketSession session) {
 		return (SignalingRole) session.getAttributes().get(ROLE_ATTRIBUTE);
+	}
+
+	private Map<String, Object> peerJoinedPayload(SignalingRole role, WebSocketSession peer) {
+		var payload = new HashMap<String, Object>();
+		payload.put("type", "peer-joined");
+		payload.put("role", role.wireName());
+		payload.put("peerPlatform", peer.getAttributes().getOrDefault(PLATFORM_ATTRIBUTE, "unknown"));
+		payload.put("peerCapabilities", peer.getAttributes().getOrDefault(CAPABILITIES_ATTRIBUTE, Set.of()));
+		return payload;
+	}
+
+	private String normalizedPlatform(String value) {
+		if (!StringUtils.hasText(value)) return "unknown";
+		var normalized = value.trim().toLowerCase();
+		return normalized.matches("[a-z0-9_-]{1,32}") ? normalized : "unknown";
+	}
+
+	private Set<String> normalizedCapabilities(String value) {
+		if (!StringUtils.hasText(value)) return Set.of();
+		var capabilities = new HashSet<String>();
+		for (var candidate : value.split(",")) {
+			var normalized = candidate.trim().toLowerCase();
+			if (normalized.matches("[a-z0-9_-]{1,64}")) {
+				capabilities.add(normalized);
+				if (capabilities.size() >= 16) break;
+			}
+		}
+		return Set.copyOf(capabilities);
 	}
 }

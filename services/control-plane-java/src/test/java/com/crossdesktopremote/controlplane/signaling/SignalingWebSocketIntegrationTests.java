@@ -66,6 +66,30 @@ class SignalingWebSocketIntegrationTests {
 	}
 
 	@Test
+	void announcesControllerPlatformCapabilitiesBeforeHostCaptureStarts() throws Exception {
+		var hostMessages = new RecordingListener();
+		var controllerMessages = new RecordingListener();
+		var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+
+		var host = connectHost(client, hostMessages);
+		var room = roomCode(hostMessages.next());
+		var controller = client.newWebSocketBuilder()
+				.connectTimeout(Duration.ofSeconds(5))
+				.buildAsync(URI.create("ws://127.0.0.1:" + port
+						+ "/ws/signaling?room=" + room
+						+ "&role=controller&platform=windows"
+						+ "&capabilities=active-content-geometry-v2"), controllerMessages)
+				.join();
+
+		assertThat(controllerMessages.next()).contains("\"type\":\"ready\"");
+		assertThat(hostMessages.next())
+				.contains("\"peerPlatform\":\"windows\"")
+				.contains("active-content-geometry-v2");
+		host.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+		controller.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+	}
+
+	@Test
 	void rejectsAControllerUntilTheHostRegistersTheCode() throws Exception {
 		var controllerMessages = new RecordingListener();
 		var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();

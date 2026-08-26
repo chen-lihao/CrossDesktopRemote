@@ -89,6 +89,31 @@ void main() {
     expect((calls[2].arguments as Map)['text'], '你好');
   });
 
+  test('Mac adapter exposes the canonical active capture rectangle', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(inputChannel, (call) async {
+          if (call.method != 'getCaptureFrameState') return null;
+          return {
+            'sequence': 4,
+            'sourceId': 'sidecar',
+            'width': 1920,
+            'height': 1080,
+            'captureGeneration': 3,
+            'activeContentX': 160.0,
+            'activeContentY': 0.0,
+            'activeContentWidth': 1600.0,
+            'activeContentHeight': 1080.0,
+          };
+        });
+
+    final state = await const MacHostPlatformAdapter().getCaptureFrameState();
+
+    expect(state, isNotNull);
+    expect(state!.hasValidActiveContent, isTrue);
+    expect(state.activeContentWidth, 1600);
+    expect(state.sourceId, 'sidecar');
+  });
+
   test(
     'unsupported adapter exposes capabilities without native calls',
     () async {

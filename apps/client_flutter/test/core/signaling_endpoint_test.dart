@@ -16,12 +16,19 @@ void main() {
       serverUrl: 'ws://192.168.1.8:8080/ws/signaling',
       roomCode: '123456',
       role: RemoteRole.controller,
+      clientPlatform: 'Windows',
+      clientCapabilities: const ['active-content-geometry-v2'],
     );
 
     expect(endpoint.scheme, 'ws');
     expect(endpoint.queryParameters['room'], '123456');
     expect(endpoint.queryParameters['role'], 'controller');
     expect(endpoint.queryParameters['protocol'], '2');
+    expect(endpoint.queryParameters['platform'], 'windows');
+    expect(
+      endpoint.queryParameters['capabilities'],
+      'active-content-geometry-v2',
+    );
   });
 
   test('allows a version two host to request a server-owned invitation', () {

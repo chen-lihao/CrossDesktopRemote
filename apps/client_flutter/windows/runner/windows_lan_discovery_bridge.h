@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include <winsock2.h>
 #include <windows.h>
 #include <windns.h>
 
@@ -108,6 +109,12 @@ class WindowsLanDiscoveryBridge {
   bool registration_completion_pending_ = false;
   std::atomic<bool> shutting_down_{false};
   std::atomic<uint64_t> browse_generation_{0};
+  uint64_t browse_callback_count_ = 0;
+  uint64_t ptr_record_count_ = 0;
+  uint64_t resolve_started_count_ = 0;
+  uint64_t resolve_succeeded_count_ = 0;
+  uint64_t registration_succeeded_count_ = 0;
+  std::string active_registration_address_;
   std::string last_error_;
 };
 

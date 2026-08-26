@@ -7,6 +7,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithDelegate:(id<RTCVideoCapturerDelegate>)delegate;
 
+/// Keeps ScreenCaptureKit's visible content geometry inside the canonical
+/// encoder canvas instead of cropping it to fill. This is capability-gated so
+/// existing Apple controllers retain their physically verified media path.
+- (void)setPreserveVisibleContentGeometry:(BOOL)enabled;
+
 - (void)startCaptureWithFPS:(NSInteger)fps
                    sourceId:(NSString* _Nullable)sourceId
              targetLongEdge:(NSInteger)targetLongEdge

@@ -52,6 +52,10 @@ class MacCaptureFrameState {
     required this.normalizationFailureCount,
     required this.bufferWidth,
     required this.bufferHeight,
+    required this.activeContentX,
+    required this.activeContentY,
+    required this.activeContentWidth,
+    required this.activeContentHeight,
   });
 
   factory MacCaptureFrameState.fromMap(Map<Object?, Object?> map) {
@@ -73,6 +77,11 @@ class MacCaptureFrameState {
           (map['normalizationFailureCount'] as num?)?.toInt() ?? 0,
       bufferWidth: (map['bufferWidth'] as num?)?.toInt() ?? 0,
       bufferHeight: (map['bufferHeight'] as num?)?.toInt() ?? 0,
+      activeContentX: (map['activeContentX'] as num?)?.toDouble() ?? 0,
+      activeContentY: (map['activeContentY'] as num?)?.toDouble() ?? 0,
+      activeContentWidth: (map['activeContentWidth'] as num?)?.toDouble() ?? 0,
+      activeContentHeight:
+          (map['activeContentHeight'] as num?)?.toDouble() ?? 0,
     );
   }
 
@@ -90,6 +99,10 @@ class MacCaptureFrameState {
   final int normalizationFailureCount;
   final int bufferWidth;
   final int bufferHeight;
+  final double activeContentX;
+  final double activeContentY;
+  final double activeContentWidth;
+  final double activeContentHeight;
 
   bool isReadyAfter({required int sequence, required String targetSourceId}) {
     return this.sequence > sequence &&

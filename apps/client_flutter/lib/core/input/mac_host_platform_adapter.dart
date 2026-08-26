@@ -99,6 +99,10 @@ class MacHostPlatformAdapter implements HostPlatformAdapter {
       normalizationFailureCount: state.normalizationFailureCount,
       bufferWidth: state.bufferWidth,
       bufferHeight: state.bufferHeight,
+      activeContentX: state.activeContentX,
+      activeContentY: state.activeContentY,
+      activeContentWidth: state.activeContentWidth,
+      activeContentHeight: state.activeContentHeight,
     );
   }
 

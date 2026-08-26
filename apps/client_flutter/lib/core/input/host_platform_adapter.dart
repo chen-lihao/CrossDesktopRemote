@@ -120,6 +120,10 @@ class HostCaptureFrameState {
     required this.normalizationFailureCount,
     required this.bufferWidth,
     required this.bufferHeight,
+    required this.activeContentX,
+    required this.activeContentY,
+    required this.activeContentWidth,
+    required this.activeContentHeight,
   });
 
   final int sequence;
@@ -136,6 +140,20 @@ class HostCaptureFrameState {
   final int normalizationFailureCount;
   final int bufferWidth;
   final int bufferHeight;
+  final double activeContentX;
+  final double activeContentY;
+  final double activeContentWidth;
+  final double activeContentHeight;
+
+  bool get hasValidActiveContent =>
+      width > 0 &&
+      height > 0 &&
+      activeContentX >= 0 &&
+      activeContentY >= 0 &&
+      activeContentWidth > 0 &&
+      activeContentHeight > 0 &&
+      activeContentX + activeContentWidth <= width + 1 &&
+      activeContentY + activeContentHeight <= height + 1;
 
   bool isReadyAfter({required int sequence, required String targetSourceId}) {
     return this.sequence > sequence &&

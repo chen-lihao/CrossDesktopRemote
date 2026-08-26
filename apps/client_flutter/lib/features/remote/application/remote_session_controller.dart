@@ -181,6 +181,7 @@ class RemoteSessionController extends ChangeNotifier {
   String? _hostInvitationCode;
   String? _hostInvitationLeaseId;
   bool _supportsInvitationRotation = false;
+  bool _remoteSupportsActiveContentGeometryV2 = false;
   Completer<void>? _invitationRotationCompleter;
   Completer<Map<String, dynamic>>? _sessionRepairCompleter;
   String? _sessionRepairRequestId;
@@ -192,6 +193,7 @@ class RemoteSessionController extends ChangeNotifier {
   RemoteVideoFrameSize? _outboundVideoFrameSize;
   RemoteVideoFrameSize? _inboundVideoFrameSize;
   RemoteFrameGeometry? _committedFrameGeometry;
+  HostCaptureFrameState? _lastHostCaptureFrameState;
   RemoteVideoGeometryState _videoGeometryState =
       RemoteVideoGeometryState.stable;
   RemoteColorDiagnostics? _colorDiagnostics;
@@ -353,6 +355,10 @@ class RemoteSessionController extends ChangeNotifier {
         serverUrl: serverUrl,
         roomCode: roomCode,
         role: role,
+        clientPlatform: Platform.operatingSystem,
+        clientCapabilities: role == RemoteRole.controller && Platform.isWindows
+            ? const ['active-content-geometry-v2']
+            : const [],
       );
       await _createPeerConnection();
       _setState(RemoteSessionState.connecting, '正在连接信令服务');
@@ -1811,6 +1817,33 @@ class RemoteSessionController extends ChangeNotifier {
         ? encodedSize!
         : _expectedVideoFrameSize;
     if (!capture.isValid || encoded?.isValid != true) return null;
+    var activeX = 0.0;
+    var activeY = 0.0;
+    var activeWidth = encoded!.width.toDouble();
+    var activeHeight = encoded.height.toDouble();
+    final nativeGeometry = _lastHostCaptureFrameState;
+    if (nativeGeometry != null &&
+        nativeGeometry.sourceId == display.id &&
+        nativeGeometry.hasValidActiveContent) {
+      final scaleX = encoded.width / nativeGeometry.width;
+      final scaleY = encoded.height / nativeGeometry.height;
+      activeX = (nativeGeometry.activeContentX * scaleX).clamp(
+        0,
+        encoded.width.toDouble(),
+      );
+      activeY = (nativeGeometry.activeContentY * scaleY).clamp(
+        0,
+        encoded.height.toDouble(),
+      );
+      activeWidth = (nativeGeometry.activeContentWidth * scaleX).clamp(
+        0,
+        encoded.width - activeX,
+      );
+      activeHeight = (nativeGeometry.activeContentHeight * scaleY).clamp(
+        0,
+        encoded.height - activeY,
+      );
+    }
     return RemoteFrameGeometry(
       displayId: display.id,
       generation: generation,
@@ -1818,12 +1851,12 @@ class RemoteSessionController extends ChangeNotifier {
       logicalHeight: display.height,
       captureWidth: capture.width,
       captureHeight: capture.height,
-      encodedWidth: encoded!.width,
+      encodedWidth: encoded.width,
       encodedHeight: encoded.height,
-      activeContentX: 0,
-      activeContentY: 0,
-      activeContentWidth: encoded.width.toDouble(),
-      activeContentHeight: encoded.height.toDouble(),
+      activeContentX: activeX,
+      activeContentY: activeY,
+      activeContentWidth: activeWidth,
+      activeContentHeight: activeHeight,
     );
   }
 
@@ -2006,6 +2039,13 @@ class RemoteSessionController extends ChangeNotifier {
       case 'peer-joined':
         _hostInvitationExpiresAt = null;
         if (role == RemoteRole.host) {
+          final peerCapabilities =
+              (message['peerCapabilities'] as List<dynamic>? ?? const [])
+                  .whereType<String>()
+                  .toSet();
+          _remoteSupportsActiveContentGeometryV2 = peerCapabilities.contains(
+            'active-content-geometry-v2',
+          );
           await _authorizePeer();
         } else {
           _setState(RemoteSessionState.connecting, '连接码已验证，正在建立视频连接');
@@ -2144,6 +2184,13 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<void> _refreshOutboundVideoDiagnostics() async {
+    if (_hostPlatform.capabilities.captureFrameReadiness) {
+      try {
+        _lastHostCaptureFrameState = await _hostPlatform.getCaptureFrameState();
+      } catch (_) {
+        // Frame geometry is optional on legacy host adapters.
+      }
+    }
     await _waitForOutboundVideoFrameSize(_expectedVideoFrameSize);
     _publishQualityState();
   }
@@ -2156,6 +2203,8 @@ class RemoteSessionController extends ChangeNotifier {
         'mandatory': {
           'frameRate': _sessionCaptureFrameRate.toDouble(),
           'targetLongEdge': _sessionCaptureLongEdge,
+          if (_remoteSupportsActiveContentGeometryV2)
+            'preserveVisibleContentGeometry': true,
         },
       },
     });
@@ -2182,6 +2231,7 @@ class RemoteSessionController extends ChangeNotifier {
           sequence: afterSequence,
           targetSourceId: sourceId,
         )) {
+          _lastHostCaptureFrameState = state;
           return _CaptureFrameWaitResult(ready: true, lastState: state);
         }
       } catch (_) {
@@ -3050,6 +3100,8 @@ class RemoteSessionController extends ChangeNotifier {
     _remoteDeviceId = null;
     _remoteHostPlatform = null;
     _remoteSupportsPhysicalKeyboard = false;
+    _remoteSupportsActiveContentGeometryV2 = false;
+    _lastHostCaptureFrameState = null;
     _hostInvitationExpiresAt = null;
     _hostInvitationCode = null;
     _hostInvitationLeaseId = null;

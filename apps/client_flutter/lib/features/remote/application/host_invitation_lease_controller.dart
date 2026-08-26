@@ -35,7 +35,7 @@ class HostInvitationLeaseController extends ChangeNotifier {
   String get statusLabel {
     if (_rotationPending) return '正在生成并注册新连接码';
     final value = remaining;
-    if (value == null) return '开始共享后连接码有效 5 分钟';
+    if (value == null) return '设备上线后连接码有效 5 分钟';
     final totalSeconds = value.inSeconds;
     final minutes = totalSeconds ~/ 60;
     final seconds = totalSeconds % 60;

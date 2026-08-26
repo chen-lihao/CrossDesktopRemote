@@ -5,8 +5,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <iterator>
 #include <utility>
+
+#include <iphlpapi.h>
+#include <ws2tcpip.h>
 
 #include "utils.h"
 
@@ -76,6 +80,89 @@ std::wstring ComputerHostName() {
   return std::wstring(name, length) + L".local";
 }
 
+struct ActiveIPv4Address {
+  IP4_ADDRESS value = 0;
+  std::string text;
+  ULONG route_metric = MAXULONG;
+  bool physical_interface = false;
+  bool private_address = false;
+};
+
+std::optional<ActiveIPv4Address> FindActiveIPv4Address() {
+  ULONG size = 16 * 1024;
+  std::vector<unsigned char> storage(size);
+  auto* adapters = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(storage.data());
+  ULONG status = GetAdaptersAddresses(
+      AF_INET,
+      GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+          GAA_FLAG_SKIP_DNS_SERVER,
+      nullptr, adapters, &size);
+  if (status == ERROR_BUFFER_OVERFLOW) {
+    storage.resize(size);
+    adapters = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(storage.data());
+    status = GetAdaptersAddresses(
+        AF_INET,
+        GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+            GAA_FLAG_SKIP_DNS_SERVER,
+        nullptr, adapters, &size);
+  }
+  if (status != NO_ERROR) {
+    return std::nullopt;
+  }
+  std::optional<ActiveIPv4Address> best;
+  for (auto* adapter = adapters; adapter != nullptr; adapter = adapter->Next) {
+    if (adapter->OperStatus != IfOperStatusUp ||
+        adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK ||
+        adapter->IfType == IF_TYPE_TUNNEL ||
+        (adapter->Flags & IP_ADAPTER_NO_MULTICAST) != 0) {
+      continue;
+    }
+    for (auto* unicast = adapter->FirstUnicastAddress; unicast != nullptr;
+         unicast = unicast->Next) {
+      if (unicast->Address.lpSockaddr == nullptr ||
+          unicast->Address.lpSockaddr->sa_family != AF_INET) {
+        continue;
+      }
+      auto* address = reinterpret_cast<sockaddr_in*>(
+          unicast->Address.lpSockaddr);
+      const auto host_order = ntohl(address->sin_addr.S_un.S_addr);
+      const auto first = static_cast<unsigned int>((host_order >> 24) & 0xff);
+      const auto second = static_cast<unsigned int>((host_order >> 16) & 0xff);
+      if (first == 0 || first == 127 || (first == 169 && second == 254)) {
+        continue;
+      }
+      char text[INET_ADDRSTRLEN]{};
+      if (InetNtopA(AF_INET, &address->sin_addr, text,
+                    static_cast<DWORD>(std::size(text))) == nullptr) {
+        continue;
+      }
+      const bool private_address =
+          first == 10 || (first == 172 && second >= 16 && second <= 31) ||
+          (first == 192 && second == 168);
+      const bool physical_interface =
+          adapter->IfType == IF_TYPE_ETHERNET_CSMACD ||
+          adapter->IfType == IF_TYPE_IEEE80211;
+      ActiveIPv4Address candidate{address->sin_addr.S_un.S_addr,
+                                  text,
+                                  adapter->Ipv4Metric,
+                                  physical_interface,
+                                  private_address};
+      const bool is_better =
+          !best.has_value() ||
+          candidate.route_metric < best->route_metric ||
+          (candidate.route_metric == best->route_metric &&
+           candidate.physical_interface && !best->physical_interface) ||
+          (candidate.route_metric == best->route_metric &&
+           candidate.physical_interface == best->physical_interface &&
+           candidate.private_address && !best->private_address);
+      if (is_better) {
+        best = std::move(candidate);
+      }
+    }
+  }
+  return best;
+}
+
 std::string ServiceDisplayName(const std::wstring& full_name) {
   const auto suffix = full_name.find(kServiceSuffix);
   return Utf8FromUtf16(
@@ -129,6 +216,7 @@ struct WindowsLanDiscoveryBridge::RegistrationContext {
   PDNS_SERVICE_INSTANCE instance = nullptr;
   std::wstring instance_name;
   std::wstring host_name;
+  std::string address;
   std::vector<std::wstring> property_keys;
   std::vector<std::wstring> property_values;
   std::vector<PCWSTR> key_pointers;
@@ -230,6 +318,10 @@ void WindowsLanDiscoveryBridge::StartBrowsing(
     std::lock_guard<std::mutex> lock(mutex_);
     browse_contexts_.push_back(context);
     current_browser_ = context;
+    browse_callback_count_ = 0;
+    ptr_record_count_ = 0;
+    resolve_started_count_ = 0;
+    resolve_succeeded_count_ = 0;
     last_error_.clear();
   }
   result->Success();
@@ -249,6 +341,18 @@ void WindowsLanDiscoveryBridge::GetDiagnostics(
        EncodableValue(static_cast<int32_t>(devices_.size()))},
       {EncodableValue("resolvingCount"),
        EncodableValue(static_cast<int32_t>(resolving_names_.size()))},
+      {EncodableValue("browseCallbackCount"),
+       EncodableValue(static_cast<int64_t>(browse_callback_count_))},
+      {EncodableValue("ptrRecordCount"),
+       EncodableValue(static_cast<int64_t>(ptr_record_count_))},
+      {EncodableValue("resolveStartedCount"),
+       EncodableValue(static_cast<int64_t>(resolve_started_count_))},
+      {EncodableValue("resolveSucceededCount"),
+       EncodableValue(static_cast<int64_t>(resolve_succeeded_count_))},
+      {EncodableValue("registrationSucceededCount"),
+       EncodableValue(static_cast<int64_t>(registration_succeeded_count_))},
+      {EncodableValue("activeRegistrationAddress"),
+       EncodableValue(active_registration_address_)},
       {EncodableValue("lastError"), EncodableValue(last_error_)},
   }));
 }
@@ -295,6 +399,20 @@ void WindowsLanDiscoveryBridge::PublishHost(
   context->owner = this;
   context->instance_name = WideFromUtf8(name) + kServiceSuffix;
   context->host_name = ComputerHostName();
+  auto active_address = FindActiveIPv4Address();
+  if (!active_address.has_value()) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      last_error_ =
+          "No active multicast-capable IPv4 interface is available";
+    }
+    delete context;
+    result->Error(
+        "dns_sd_no_interface",
+        "No active multicast-capable IPv4 interface is available");
+    return;
+  }
+  context->address = active_address->text;
   context->property_keys = {L"id", L"v", L"path", L"cap", L"platform",
                             L"signal", L"signalUrl"};
   context->property_values = {
@@ -312,7 +430,8 @@ void WindowsLanDiscoveryBridge::PublishHost(
     context->value_pointers.push_back(value.c_str());
   }
   context->instance = DnsServiceConstructInstance(
-      context->instance_name.c_str(), context->host_name.c_str(), nullptr,
+      context->instance_name.c_str(), context->host_name.c_str(),
+      &active_address->value,
       nullptr, static_cast<WORD>(port), 0, 0,
       static_cast<DWORD>(context->key_pointers.size()),
       context->key_pointers.data(), context->value_pointers.data());
@@ -397,6 +516,10 @@ void WindowsLanDiscoveryBridge::OnBrowseResult(BrowseContext* context,
     delete context;
     return;
   }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    browse_callback_count_ += 1;
+  }
   if (status == ERROR_SUCCESS &&
       context->generation == browse_generation_.load()) {
     for (auto* record = records; record != nullptr; record = record->pNext) {
@@ -404,6 +527,10 @@ void WindowsLanDiscoveryBridge::OnBrowseResult(BrowseContext* context,
         continue;
       }
       const std::wstring service_name(record->Data.PTR.pNameHost);
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ptr_record_count_ += 1;
+      }
       if (record->dwTtl == 0) {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto id = resolved_ids_.find(service_name);
@@ -434,6 +561,7 @@ void WindowsLanDiscoveryBridge::StartResolve(
         !resolving_names_.insert(service_name).second) {
       return;
     }
+    resolve_started_count_ += 1;
   }
   auto* context = new ResolveContext();
   context->owner = this;
@@ -494,6 +622,7 @@ void WindowsLanDiscoveryBridge::OnResolveResult(
       std::lock_guard<std::mutex> lock(mutex_);
       resolved_ids_[context->query_name] = device.id;
       devices_[device.id] = std::move(device);
+      resolve_succeeded_count_ += 1;
       PostUpdate();
     }
   } else if (status != ERROR_CANCELLED) {
@@ -594,6 +723,8 @@ void WindowsLanDiscoveryBridge::CompleteRegistrationOperation() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       context->operation = RegistrationOperation::kRegistered;
+      registration_succeeded_count_ += 1;
+      active_registration_address_ = context->address;
       last_error_.clear();
     }
     if (pending != nullptr) {
@@ -603,7 +734,11 @@ void WindowsLanDiscoveryBridge::CompleteRegistrationOperation() {
   }
   if (operation == RegistrationOperation::kStopping &&
       status == ERROR_SUCCESS) {
-    registration_ = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      registration_ = nullptr;
+      active_registration_address_.clear();
+    }
     if (pending != nullptr) {
       pending->Success();
     }

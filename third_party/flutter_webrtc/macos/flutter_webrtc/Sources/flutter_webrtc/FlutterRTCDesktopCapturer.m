@@ -102,6 +102,7 @@ NSArray<RTCDesktopSource*>* _captureSources;
   BOOL useDefaultScreen = NO;
   NSInteger fps = 30;
   NSInteger targetLongEdge = 0;
+  BOOL preserveVisibleContentGeometry = NO;
   id videoConstraints = constraints[@"video"];
   if ([videoConstraints isKindOfClass:[NSNumber class]] && [videoConstraints boolValue] == YES) {
     useDefaultScreen = YES;
@@ -129,6 +130,10 @@ NSArray<RTCDesktopSource*>* _captureSources;
       if (requestedLongEdge != nil &&
           [requestedLongEdge isKindOfClass:[NSNumber class]]) {
         targetLongEdge = MAX((NSInteger)0, [requestedLongEdge integerValue]);
+      }
+      id preserveGeometry = mandatory[@"preserveVisibleContentGeometry"];
+      if ([preserveGeometry isKindOfClass:[NSNumber class]]) {
+        preserveVisibleContentGeometry = [preserveGeometry boolValue];
       }
     }
   }
@@ -160,6 +165,8 @@ NSArray<RTCDesktopSource*>* _captureSources;
     if (@available(macOS 13.0, *)) {
       screenCaptureKitCapturer =
           [[FlutterScreenCaptureKitCapturer alloc] initWithDelegate:videoProcessingAdapter];
+      [screenCaptureKitCapturer
+          setPreserveVisibleContentGeometry:preserveVisibleContentGeometry];
       [screenCaptureKitCapturer startCaptureWithFPS:fps
                                            sourceId:sourceId
                                      targetLongEdge:targetLongEdge

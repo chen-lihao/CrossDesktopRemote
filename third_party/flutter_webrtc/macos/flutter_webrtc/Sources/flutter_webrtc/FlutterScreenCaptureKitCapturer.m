@@ -29,6 +29,7 @@ typedef void (^CDRCaptureSwitchCompletion)(
 @property(nonatomic, copy) NSString *sourceId;
 @property(nonatomic, assign) BOOL emittedColorDiagnostics;
 @property(nonatomic, assign) BOOL emittedFirstFrame;
+@property(nonatomic, assign) BOOL preserveVisibleContentGeometry;
 @property(nonatomic, strong) CIContext *colorContext;
 @property(nonatomic, assign) CVPixelBufferPoolRef normalizationPool;
 @property(nonatomic, assign) size_t normalizationPoolWidth;
@@ -78,6 +79,8 @@ typedef void (^CDRCaptureSwitchCompletion)(
 @property(nonatomic, assign) NSInteger retiredFrameRate;
 @property(nonatomic, assign) CVPixelBufferRef lastActiveEncoderPixelBuffer;
 @property(nonatomic, assign) CVPixelBufferRef retiredEncoderPixelBuffer;
+@property(nonatomic, assign) CGRect lastActiveContentRect;
+@property(nonatomic, assign) CGRect retiredActiveContentRect;
 #endif
 @end
 
@@ -980,6 +983,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
       self.retiredExpectedFrameWidth = 0;
       self.retiredExpectedFrameHeight = 0;
       self.retiredFrameRate = 0;
+      self.retiredActiveContentRect = CGRectZero;
       if (self.retiredEncoderPixelBuffer != NULL) {
         CVPixelBufferRelease(self.retiredEncoderPixelBuffer);
         self.retiredEncoderPixelBuffer = NULL;
@@ -1037,6 +1041,8 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
       }
       self.lastActiveEncoderPixelBuffer = self.retiredEncoderPixelBuffer;
       self.retiredEncoderPixelBuffer = NULL;
+      self.lastActiveContentRect = self.retiredActiveContentRect;
+      self.retiredActiveContentRect = CGRectZero;
       self.captureGeneration += 1;
       const NSUInteger rollbackGeneration = self.captureGeneration;
       self.emittedFirstFrame = NO;
@@ -1077,8 +1083,19 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
                               self.lastActiveEncoderPixelBuffer)),
                           @"height": @(CVPixelBufferGetHeight(
                               self.lastActiveEncoderPixelBuffer)),
-                          @"visibleWidthCoverage": @1.0,
-                          @"visibleHeightCoverage": @1.0,
+                          @"activeContentX": @(self.lastActiveContentRect.origin.x),
+                          @"activeContentY": @(self.lastActiveContentRect.origin.y),
+                          @"activeContentWidth": @(self.lastActiveContentRect.size.width),
+                          @"activeContentHeight": @(self.lastActiveContentRect.size.height),
+                          @"captureGeneration": @(rollbackGeneration),
+                          @"visibleWidthCoverage": @(
+                              self.lastActiveContentRect.size.width /
+                              MAX((CGFloat)1, (CGFloat)CVPixelBufferGetWidth(
+                                  self.lastActiveEncoderPixelBuffer))),
+                          @"visibleHeightCoverage": @(
+                              self.lastActiveContentRect.size.height /
+                              MAX((CGFloat)1, (CGFloat)CVPixelBufferGetHeight(
+                                  self.lastActiveEncoderPixelBuffer))),
                           @"contentNormalized": @NO,
                         }];
       }
@@ -1344,7 +1361,8 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
 - (CVPixelBufferRef)newNormalizedSDRPixelBufferFromPixelBuffer:(CVPixelBufferRef)source
                                              visiblePixelRect:(CGRect)visiblePixelRect
                                                   outputWidth:(size_t)outputWidth
-                                                 outputHeight:(size_t)outputHeight {
+                                                 outputHeight:(size_t)outputHeight
+                                            activeContentRect:(CGRect * _Nullable)activeContentRect {
   const size_t sourceWidth = CVPixelBufferGetWidth(source);
   const size_t sourceHeight = CVPixelBufferGetHeight(source);
   const size_t width = outputWidth > 0 ? outputWidth : sourceWidth;
@@ -1387,16 +1405,28 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
     CVPixelBufferRelease(output);
     return NULL;
   }
-  // Interactive desktop frames must not contain a second, hidden letterbox
-  // coordinate system. Fill the canonical target canvas and crop only the
-  // sub-pixel/alignment excess after the content aspect has passed the gate.
-  const CGFloat scale = MAX(
-      (CGFloat)width / croppedExtent.size.width,
-      (CGFloat)height / croppedExtent.size.height);
+  // Geometry-v2 controllers render and map input from the exact same active
+  // rectangle. Preserve the complete Sidecar surface inside the stable
+  // encoder canvas; legacy Apple controllers retain the prior fill behavior.
+  const CGFloat scale = self.preserveVisibleContentGeometry
+      ? MIN((CGFloat)width / croppedExtent.size.width,
+            (CGFloat)height / croppedExtent.size.height)
+      : MAX((CGFloat)width / croppedExtent.size.width,
+            (CGFloat)height / croppedExtent.size.height);
   const CGFloat scaledWidth = croppedExtent.size.width * scale;
   const CGFloat scaledHeight = croppedExtent.size.height * scale;
   const CGFloat destinationX = ((CGFloat)width - scaledWidth) / 2.0;
   const CGFloat destinationY = ((CGFloat)height - scaledHeight) / 2.0;
+  if (activeContentRect != NULL) {
+    *activeContentRect = self.preserveVisibleContentGeometry
+        ? CGRectIntersection(
+              CGRectMake(destinationX,
+                         destinationY,
+                         scaledWidth,
+                         scaledHeight),
+              CGRectMake(0, 0, width, height))
+        : CGRectMake(0, 0, width, height);
+  }
   image = [image imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
   image = [image imageByApplyingTransform:CGAffineTransformMakeTranslation(
       destinationX, destinationY)];
@@ -1552,7 +1582,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
       CVPixelBufferRelease(self.retiredEncoderPixelBuffer);
     }
     self.retiredEncoderPixelBuffer = self.lastActiveEncoderPixelBuffer;
+    self.retiredActiveContentRect = self.lastActiveContentRect;
     self.lastActiveEncoderPixelBuffer = NULL;
+    self.lastActiveContentRect = CGRectZero;
     self.stream = stream;
     self.sourceId = self.pendingSourceId ?: @"";
     self.expectedFrameWidth = self.pendingExpectedFrameWidth;
@@ -1688,7 +1720,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
   // differ by a few pixels. Ignoring a valid inset here encodes ScreenCaptureKit
   // padding and makes Sidecar appear top-aligned on the controller.
   const BOOL hasTrustedVisibleContentMetadata =
-      hasVisibleContentMetadata && contentAspectMatches;
+      hasVisibleContentMetadata &&
+      (contentAspectMatches || self.preserveVisibleContentGeometry);
   const CGRect normalizationVisiblePixelRect =
       hasTrustedVisibleContentMetadata
       ? visiblePixelRect
@@ -1720,13 +1753,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
       (CVPixelBufferGetWidth(pixelBuffer) != self.expectedFrameWidth ||
        CVPixelBufferGetHeight(pixelBuffer) != self.expectedFrameHeight);
   const CFAbsoluteTime normalizationStartedAt = CFAbsoluteTimeGetCurrent();
+  CGRect normalizedActiveContentRect = CGRectMake(
+      0, 0, self.expectedFrameWidth, self.expectedFrameHeight);
   CVPixelBufferRef normalizedPixelBuffer =
       (needsNormalization || needsFreshCanvas || needsContentNormalization ||
        needsCanonicalGeometry)
       ? [self newNormalizedSDRPixelBufferFromPixelBuffer:pixelBuffer
                                          visiblePixelRect:normalizationVisiblePixelRect
                                               outputWidth:self.expectedFrameWidth
-                                             outputHeight:self.expectedFrameHeight]
+                                             outputHeight:self.expectedFrameHeight
+                                        activeContentRect:&normalizedActiveContentRect]
       : NULL;
   if ((needsContentNormalization || needsCanonicalGeometry) &&
       normalizedPixelBuffer == NULL) {
@@ -1738,6 +1774,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
   const double normalizationDurationMs =
       (CFAbsoluteTimeGetCurrent() - normalizationStartedAt) * 1000.0;
   CVPixelBufferRef encoderPixelBuffer = normalizedPixelBuffer ?: pixelBuffer;
+  const CGRect encoderActiveContentRect = normalizedPixelBuffer != NULL
+      ? normalizedActiveContentRect
+      : CGRectMake(0,
+                   0,
+                   CVPixelBufferGetWidth(encoderPixelBuffer),
+                   CVPixelBufferGetHeight(encoderPixelBuffer));
 
   if (frameGateBecameReady || self.lastFrameGateRejection.length > 0) {
     [self publishFrameGateStatus:@"ready"
@@ -1760,6 +1802,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                       @"sourceId": self.sourceId ?: @"",
                       @"width": @(CVPixelBufferGetWidth(encoderPixelBuffer)),
                       @"height": @(CVPixelBufferGetHeight(encoderPixelBuffer)),
+                      @"activeContentX": @(encoderActiveContentRect.origin.x),
+                      @"activeContentY": @(encoderActiveContentRect.origin.y),
+                      @"activeContentWidth": @(encoderActiveContentRect.size.width),
+                      @"activeContentHeight": @(encoderActiveContentRect.size.height),
+                      @"captureGeneration": @(self.captureGeneration),
                       @"visibleWidthCoverage": @(widthCoverage),
                       @"visibleHeightCoverage": @(heightCoverage),
                       @"contentNormalized": @(needsContentNormalization),
@@ -1794,6 +1841,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSMutableDictionary<NSString *, id> *frameGeometry =
         [CDRFrameGeometryDiagnostics(frameAttachments, pixelBuffer) mutableCopy];
     frameGeometry[@"captureGeneration"] = @(self.captureGeneration);
+    frameGeometry[@"activeContentX"] = @(encoderActiveContentRect.origin.x);
+    frameGeometry[@"activeContentY"] = @(encoderActiveContentRect.origin.y);
+    frameGeometry[@"activeContentWidth"] = @(encoderActiveContentRect.size.width);
+    frameGeometry[@"activeContentHeight"] = @(encoderActiveContentRect.size.height);
     diagnostics[@"frameGeometry"] = frameGeometry;
     NSLog(@"CrossDesktopRemote capture color diagnostics: %@", diagnostics);
     [[NSNotificationCenter defaultCenter]
@@ -1809,6 +1860,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CVPixelBufferRelease(self.lastActiveEncoderPixelBuffer);
   }
   self.lastActiveEncoderPixelBuffer = CVPixelBufferRetain(encoderPixelBuffer);
+  self.lastActiveContentRect = encoderActiveContentRect;
 
   id<RTCVideoFrameBuffer> rtcBuffer =
       [[RTCCVPixelBuffer alloc] initWithPixelBuffer:encoderPixelBuffer];

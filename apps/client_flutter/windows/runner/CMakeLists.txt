@@ -30,7 +30,7 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION_PATCH=${FLUTT
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION_BUILD=${FLUTTER_VERSION_BUILD}")
 
 # Disable Windows macros that collide with C++ standard library functions.
-target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
+target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX" "WIN32_LEAN_AND_MEAN")
 # Native channel messages contain Chinese user-facing diagnostics and must be
 # encoded as UTF-8 independently of the developer machine's active code page.
 target_compile_options(${BINARY_NAME} PRIVATE /utf-8)
@@ -40,6 +40,8 @@ target_compile_options(${BINARY_NAME} PRIVATE /utf-8)
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "dnsapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "iphlpapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "ws2_32.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "shcore.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 

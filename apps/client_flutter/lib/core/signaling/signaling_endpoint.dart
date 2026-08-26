@@ -13,6 +13,8 @@ Uri buildSignalingUri({
   required String serverUrl,
   required String roomCode,
   required RemoteRole role,
+  String clientPlatform = '',
+  Iterable<String> clientCapabilities = const [],
 }) {
   final baseUri = Uri.parse(serverUrl.trim());
   if (baseUri.scheme != 'ws' && baseUri.scheme != 'wss') {
@@ -31,6 +33,10 @@ Uri buildSignalingUri({
       if (roomCode.isNotEmpty) 'room': roomCode,
       'role': role.name,
       'protocol': '2',
+      if (clientPlatform.trim().isNotEmpty)
+        'platform': clientPlatform.trim().toLowerCase(),
+      if (clientCapabilities.isNotEmpty)
+        'capabilities': clientCapabilities.join(','),
     },
   );
 }

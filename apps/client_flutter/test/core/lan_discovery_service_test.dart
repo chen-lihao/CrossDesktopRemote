@@ -104,6 +104,12 @@ void main() {
       'publishing': true,
       'discoveredCount': 2,
       'resolvingCount': 1,
+      'browseCallbackCount': 4,
+      'ptrRecordCount': 3,
+      'resolveStartedCount': 3,
+      'resolveSucceededCount': 2,
+      'registrationSucceededCount': 1,
+      'activeRegistrationAddress': '192.168.1.20',
       'lastError': '',
     });
 
@@ -111,6 +117,9 @@ void main() {
     expect(diagnostics.publishing, isTrue);
     expect(diagnostics.discoveredCount, 2);
     expect(diagnostics.label, contains('解析中 1 项'));
+    expect(diagnostics.label, contains('PTR 3'));
+    expect(diagnostics.label, contains('解析 2/3'));
+    expect(diagnostics.label, contains('地址 192.168.1.20'));
   });
 
   group('selected device signaling endpoint', () {
