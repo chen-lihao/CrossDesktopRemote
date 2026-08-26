@@ -64,4 +64,47 @@ void main() {
       throwsFormatException,
     );
   });
+
+  group('selected device signaling endpoint', () {
+    final device = DiscoveredDevice.fromMap({
+      'id': 'windows-host',
+      'name': 'Windows Host',
+      'host': 'windows-host.local',
+      'port': 8080,
+      'rendezvousUrl': 'ws://192.168.1.20:8080/ws/signaling',
+      'signalingProfileId': signalingProfileIdForUrl(
+        'ws://192.168.1.20:8080/ws/signaling',
+      ),
+    });
+
+    test('replaces a loopback default with the host rendezvous endpoint', () {
+      expect(
+        signalingUrlForSelectedDevice(
+          currentServerUrl: 'ws://127.0.0.1:8080/ws/signaling',
+          device: device,
+        ),
+        device.rendezvousUrl,
+      );
+    });
+
+    test('replaces a different signaling profile after explicit selection', () {
+      expect(
+        signalingUrlForSelectedDevice(
+          currentServerUrl: 'wss://signal.example.com/ws/signaling',
+          device: device,
+        ),
+        device.rendezvousUrl,
+      );
+    });
+
+    test('keeps an endpoint that already matches the advertised profile', () {
+      expect(
+        signalingUrlForSelectedDevice(
+          currentServerUrl: device.rendezvousUrl,
+          device: device,
+        ),
+        device.rendezvousUrl,
+      );
+    });
+  });
 }

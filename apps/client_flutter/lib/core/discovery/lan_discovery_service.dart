@@ -51,6 +51,38 @@ String signalingProfileIdForUrl(String value) {
   return 'fnv1a-${hash.toRadixString(16).padLeft(8, '0')}';
 }
 
+bool isLoopbackSignalingUrl(String value) {
+  final uri = Uri.tryParse(value.trim());
+  if (uri == null) return false;
+  return const {
+    '127.0.0.1',
+    'localhost',
+    '::1',
+  }.contains(uri.host.toLowerCase());
+}
+
+/// Resolves the signaling endpoint after the user explicitly selects a LAN
+/// device. DNS-SD discovers a host, not a signaling server; the non-secret
+/// rendezvous URL in that host's TXT record tells both peers where to meet.
+///
+/// An explicitly selected device may replace an empty, loopback, or different
+/// signaling profile. Matching profiles keep the user's canonical endpoint.
+String signalingUrlForSelectedDevice({
+  required String currentServerUrl,
+  required DiscoveredDevice device,
+}) {
+  final current = currentServerUrl.trim();
+  final advertised = device.rendezvousUrl.trim();
+  if (advertised.isEmpty) return current;
+  if (current.isEmpty || isLoopbackSignalingUrl(current)) return advertised;
+  final advertisedProfile = device.signalingProfileId;
+  if (advertisedProfile.isNotEmpty &&
+      advertisedProfile != signalingProfileIdForUrl(current)) {
+    return advertised;
+  }
+  return current;
+}
+
 class DiscoveredDevice {
   const DiscoveredDevice({
     required this.id,

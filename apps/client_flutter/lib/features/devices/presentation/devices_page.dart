@@ -250,15 +250,19 @@ class _DevicesPageState extends State<DevicesPage> {
 
   void _selectDevice(DiscoveredDevice device) {
     final currentServer = _serverController.text.trim();
-    if (currentServer.isEmpty && device.rendezvousUrl.isNotEmpty) {
-      _serverController.text = device.rendezvousUrl;
-      unawaited(widget.settings.setSignalingServerUrl(device.rendezvousUrl));
-    } else if (currentServer.isNotEmpty &&
-        device.signalingProfileId.isNotEmpty &&
-        device.signalingProfileId != signalingProfileIdForUrl(currentServer)) {
+    final selectedServer = signalingUrlForSelectedDevice(
+      currentServerUrl: currentServer,
+      device: device,
+    );
+    if (selectedServer.isNotEmpty && selectedServer != currentServer) {
+      _serverController.value = TextEditingValue(
+        text: selectedServer,
+        selection: TextSelection.collapsed(offset: selectedServer.length),
+      );
+      unawaited(widget.settings.setSignalingServerUrl(selectedServer));
       AppMessenger.show(
-        '${device.name} 使用另一个信令服务器，已保留当前配置',
-        level: AppMessageLevel.warning,
+        '已采用 ${device.name} 声明的信令服务器',
+        level: AppMessageLevel.info,
       );
     }
     setState(() => _discoveryError = null);
@@ -606,7 +610,7 @@ class _DevicesPageState extends State<DevicesPage> {
                           isPublishing: _isPublishing,
                           hostSharingRequested: _hostSharing.sharingRequested,
                           hostRestarting: _hostSharing.rearming,
-                          invitationStatus: _invitationLease.statusLabel,
+                          invitationStatus: _hostInvitationStatusLabel,
                           invitationRefreshing:
                               _invitationLease.rotationPending,
                           settings: widget.settings,
@@ -647,6 +651,15 @@ class _DevicesPageState extends State<DevicesPage> {
         RemoteSessionState.failed,
       }.contains(_session.state) ||
       (_role == RemoteRole.host && _hostSharing.sharingRequested);
+
+  String get _hostInvitationStatusLabel {
+    if (_hostSharing.rearming) return '正在恢复等待并生成新的单次连接码';
+    if (_session.hostInvitationCode != null &&
+        _session.state != RemoteSessionState.waitingForPeer) {
+      return '本次连接码已使用；当前会话断开后会自动生成新码';
+    }
+    return _invitationLease.statusLabel;
+  }
 }
 
 class _ConnectionCard extends StatelessWidget {
@@ -742,6 +755,10 @@ class _ConnectionCard extends StatelessWidget {
   }
 
   Widget _buildHostContent(BuildContext context, {required bool twoColumns}) {
+    final invitationConsumed =
+        hostSharingRequested &&
+        roomController.text.isNotEmpty &&
+        session.state != RemoteSessionState.waitingForPeer;
     final credentials = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -770,7 +787,13 @@ class _ConnectionCard extends StatelessWidget {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.refresh, size: 18),
-              label: Text(roomController.text.isEmpty ? '生成连接码' : '刷新连接码'),
+              label: Text(
+                roomController.text.isEmpty
+                    ? '生成连接码'
+                    : invitationConsumed
+                    ? '当前码已使用'
+                    : '刷新连接码',
+              ),
             ),
           ],
         ),
@@ -856,7 +879,7 @@ class _ConnectionCard extends StatelessWidget {
       children: [
         Text('连接设备', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 6),
-        const Text('优先选择附近设备，也可以手动输入局域网地址。'),
+        const Text('附近设备发现用于找到被控端；信令服务可以在 Mac、Windows 或独立公网服务器上。'),
         const SizedBox(height: 18),
         if (settings.lanDiscoveryEnabled) ...[
           _NearbyDevices(
@@ -864,10 +887,13 @@ class _ConnectionCard extends StatelessWidget {
             error: discoveryError,
             isBrowsing: isBrowsing,
             enabled: !_isActive,
+            currentServerUrl: serverController.text.trim(),
             onRefresh: onRefreshDiscovery,
             onSelect: onSelectDevice,
           ),
           const SizedBox(height: 16),
+          const Text('点击设备会采用它声明的信令地址，但仍需输入一次性连接码。mDNS 被禁用时请使用手动地址。'),
+          const SizedBox(height: 12),
         ],
         TextField(
           key: const ValueKey('signalingServerField'),
@@ -1147,6 +1173,7 @@ class _NearbyDevices extends StatelessWidget {
     required this.error,
     required this.isBrowsing,
     required this.enabled,
+    required this.currentServerUrl,
     required this.onRefresh,
     required this.onSelect,
   });
@@ -1155,6 +1182,7 @@ class _NearbyDevices extends StatelessWidget {
   final String? error;
   final bool isBrowsing;
   final bool enabled;
+  final String currentServerUrl;
   final Future<void> Function() onRefresh;
   final ValueChanged<DiscoveredDevice> onSelect;
 
@@ -1207,7 +1235,14 @@ class _NearbyDevices extends StatelessWidget {
                   subtitle: Text(
                     [
                       device.platform,
-                      if (device.signalingProfileId.isNotEmpty) '已声明信令配置',
+                      if (device.rendezvousUrl.isNotEmpty)
+                        signalingUrlForSelectedDevice(
+                                  currentServerUrl: currentServerUrl,
+                                  device: device,
+                                ) ==
+                                currentServerUrl.trim()
+                            ? '使用当前信令服务'
+                            : '点击后切换至设备信令服务',
                       '${device.host}:${device.port}',
                     ].join(' · '),
                   ),

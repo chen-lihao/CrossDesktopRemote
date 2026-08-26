@@ -35,8 +35,11 @@ void main() {
 
       expect(RemoteQualityProfile.smooth.scaleFor(display), 3);
       expect(RemoteQualityProfile.high.scaleFor(display), 2);
+      expect(RemoteQualityProfile.high60.scaleFor(display), 2);
       expect(RemoteQualityProfile.ultra.scaleFor(display), 1.5);
+      expect(RemoteQualityProfile.ultra60.scaleFor(display), 1.5);
       expect(RemoteQualityProfile.original.scaleFor(display), 1);
+      expect(RemoteQualityProfile.original60.scaleFor(display), 1);
       expect(
         RemoteQualityProfile.fromWireValue('ultra'),
         RemoteQualityProfile.ultra,
@@ -58,6 +61,11 @@ void main() {
     expect(RemoteQualityProfile.ultra.scaleFor(sidecar), 1);
     expect(RemoteQualityProfile.automatic.maxFramerate, 30);
     expect(RemoteQualityProfile.ultra.maxFramerate, 30);
+    expect(RemoteQualityProfile.high60.maxFramerate, 60);
+    expect(RemoteQualityProfile.ultra60.maxFramerate, 60);
+    expect(RemoteQualityProfile.original60.maxFramerate, 60);
+    expect(RemoteQualityProfile.high60.desktopControllerOnly, isTrue);
+    expect(RemoteQualityProfile.high.desktopControllerOnly, isFalse);
   });
 
   test(

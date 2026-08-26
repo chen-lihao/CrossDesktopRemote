@@ -53,7 +53,8 @@ class RemoteVideoTarget {
       targetLongEdge: profile.targetLongEdge,
       maxBitrate: profile.maxBitrate,
       maxFramerate: profile.maxFramerate,
-      prioritizeFrameRate: profile == RemoteQualityProfile.smooth,
+      prioritizeFrameRate:
+          profile == RemoteQualityProfile.smooth || profile.prioritizeFrameRate,
     );
   }
 

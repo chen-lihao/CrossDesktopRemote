@@ -64,7 +64,13 @@ class RemoteKeyboardTranslator {
         (physicalOnly || shortcut || character == null || character.isEmpty);
 
     if (requiresPhysicalKey) {
-      final physicalHidUsage = event.physicalKey.usbHidUsage;
+      // Editing/navigation keys are semantic across platforms. In particular,
+      // macOS and Windows do not always expose the same physical usage for
+      // Return/Backspace. Let the host map their stable wire name to its native
+      // virtual key, while printable remote-IME input keeps USB HID usages.
+      final physicalHidUsage = _usesLogicalHostMapping(event.logicalKey)
+          ? null
+          : event.physicalKey.usbHidUsage;
       if (event is KeyDownEvent) {
         _pressed[event.physicalKey] = _PressedRemoteKey(
           key: key,
@@ -159,5 +165,37 @@ class _PressedRemoteKey {
   const _PressedRemoteKey({required this.key, required this.physicalHidUsage});
 
   final String key;
-  final int physicalHidUsage;
+  final int? physicalHidUsage;
 }
+
+bool _usesLogicalHostMapping(LogicalKeyboardKey key) =>
+    _logicalHostMappedKeys.contains(key);
+
+final Set<LogicalKeyboardKey> _logicalHostMappedKeys = {
+  LogicalKeyboardKey.enter,
+  LogicalKeyboardKey.numpadEnter,
+  LogicalKeyboardKey.backspace,
+  LogicalKeyboardKey.delete,
+  LogicalKeyboardKey.tab,
+  LogicalKeyboardKey.escape,
+  LogicalKeyboardKey.arrowLeft,
+  LogicalKeyboardKey.arrowRight,
+  LogicalKeyboardKey.arrowUp,
+  LogicalKeyboardKey.arrowDown,
+  LogicalKeyboardKey.home,
+  LogicalKeyboardKey.end,
+  LogicalKeyboardKey.pageUp,
+  LogicalKeyboardKey.pageDown,
+  LogicalKeyboardKey.f1,
+  LogicalKeyboardKey.f2,
+  LogicalKeyboardKey.f3,
+  LogicalKeyboardKey.f4,
+  LogicalKeyboardKey.f5,
+  LogicalKeyboardKey.f6,
+  LogicalKeyboardKey.f7,
+  LogicalKeyboardKey.f8,
+  LogicalKeyboardKey.f9,
+  LogicalKeyboardKey.f10,
+  LogicalKeyboardKey.f11,
+  LogicalKeyboardKey.f12,
+};

@@ -593,15 +593,19 @@ enum RemoteQualityProfile {
   automatic('自动', 1920, 7 * 1000 * 1000, 30),
   smooth('流畅 720p60', 1280, 5 * 1000 * 1000, 60),
   high('高清 1080p30', 1920, 9 * 1000 * 1000, 30),
+  high60('高清 1080p60', 1920, 14 * 1000 * 1000, 60, true),
   ultra('超清 2K', 2560, 16 * 1000 * 1000, 30),
-  original('原画', null, 35 * 1000 * 1000, 30);
+  ultra60('超清 2K60', 2560, 24 * 1000 * 1000, 60, true),
+  original('原画 30fps', null, 35 * 1000 * 1000, 30),
+  original60('原画 60fps', null, 48 * 1000 * 1000, 60, true);
 
   const RemoteQualityProfile(
     this.label,
     this.targetLongEdge,
     this.maxBitrate,
-    this.maxFramerate,
-  );
+    this.maxFramerate, [
+    this.prioritizeFrameRate = false,
+  ]);
 
   factory RemoteQualityProfile.fromWireValue(String? value) {
     return RemoteQualityProfile.values.firstWhere(
@@ -614,6 +618,14 @@ enum RemoteQualityProfile {
   final int? targetLongEdge;
   final int maxBitrate;
   final int maxFramerate;
+  final bool prioritizeFrameRate;
+
+  /// Keep the established mobile quality menu unchanged until the more
+  /// demanding manual 60 fps modes are physically verified on tablets.
+  bool get desktopControllerOnly => switch (this) {
+    high60 || ultra60 || original60 => true,
+    _ => false,
+  };
 
   double scaleFor(RemoteDisplay? display) {
     final target = targetLongEdge;

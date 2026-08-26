@@ -52,10 +52,13 @@ void main() {
     () {
       final smooth = RemoteVideoTarget.forProfile(RemoteQualityProfile.smooth);
       final high = RemoteVideoTarget.forProfile(RemoteQualityProfile.high);
+      final high60 = RemoteVideoTarget.forProfile(RemoteQualityProfile.high60);
       expect(smooth.prioritizeFrameRate, isTrue);
       expect(smooth.maxFramerate, 60);
       expect(high.prioritizeFrameRate, isFalse);
       expect(high.maxFramerate, 30);
+      expect(high60.prioritizeFrameRate, isTrue);
+      expect(high60.maxFramerate, 60);
     },
   );
 }

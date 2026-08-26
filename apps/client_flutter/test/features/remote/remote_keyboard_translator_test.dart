@@ -89,6 +89,47 @@ void main() {
     expect(up.single.phase, 'up');
   });
 
+  test('editing keys use stable host semantic mapping', () {
+    final translator = RemoteKeyboardTranslator();
+
+    for (final key in [
+      (
+        physical: PhysicalKeyboardKey.enter,
+        logical: LogicalKeyboardKey.enter,
+        wire: 'Enter',
+      ),
+      (
+        physical: PhysicalKeyboardKey.backspace,
+        logical: LogicalKeyboardKey.backspace,
+        wire: 'Backspace',
+      ),
+    ]) {
+      final down = translator.translate(
+        KeyDownEvent(
+          physicalKey: key.physical,
+          logicalKey: key.logical,
+          timeStamp: Duration.zero,
+        ),
+        modifiers: const [],
+        physicalOnly: true,
+      );
+      final up = translator.translate(
+        KeyUpEvent(
+          physicalKey: key.physical,
+          logicalKey: key.logical,
+          timeStamp: Duration.zero,
+        ),
+        modifiers: const [],
+        physicalOnly: true,
+      );
+
+      expect(down.single.key, key.wire);
+      expect(down.single.physicalHidUsage, isNull);
+      expect(up.single.key, key.wire);
+      expect(up.single.physicalHidUsage, isNull);
+    }
+  });
+
   test('focus loss releases all physical keys', () {
     final translator = RemoteKeyboardTranslator();
     translator.translate(

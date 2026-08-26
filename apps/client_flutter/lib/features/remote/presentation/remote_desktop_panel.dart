@@ -659,6 +659,8 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
         onViewFitChanged: _setViewFit,
         keyboardMode: inputSettings.keyboardMode,
         onKeyboardModeSelected: _showKeyboard,
+        textInputMode: inputSettings.textInputMode,
+        onTextInputModeSelected: _setTextInputMode,
         onHelp: () => _showGestureHelp(context, inputSettings.pointerMode),
         onInputSettings: () => _showRemoteInputSettings(
           context,
@@ -920,6 +922,8 @@ class _FullScreenRemoteDesktopPageState
                   },
                   keyboardMode: inputSettings.keyboardMode,
                   onKeyboardModeSelected: _showKeyboard,
+                  textInputMode: inputSettings.textInputMode,
+                  onTextInputModeSelected: _setTextInputMode,
                   onHelp: () =>
                       _showGestureHelp(context, inputSettings.pointerMode),
                   onInputSettings: () => _showRemoteInputSettings(
@@ -971,6 +975,8 @@ class _RemoteToolbar extends StatelessWidget {
     required this.onViewFitChanged,
     required this.keyboardMode,
     required this.onKeyboardModeSelected,
+    required this.textInputMode,
+    required this.onTextInputModeSelected,
     required this.onHelp,
     required this.onInputSettings,
     required this.onDisplayAdjustment,
@@ -987,6 +993,8 @@ class _RemoteToolbar extends StatelessWidget {
   final ValueChanged<RemoteViewFit> onViewFitChanged;
   final RemoteKeyboardMode keyboardMode;
   final ValueChanged<RemoteKeyboardMode> onKeyboardModeSelected;
+  final RemoteTextInputMode textInputMode;
+  final ValueChanged<RemoteTextInputMode> onTextInputModeSelected;
   final VoidCallback onHelp;
   final VoidCallback onInputSettings;
   final VoidCallback onDisplayAdjustment;
@@ -1188,19 +1196,23 @@ class _RemoteToolbar extends StatelessWidget {
                         onSelected: session.selectQuality,
                         itemBuilder: (context) => [
                           for (final profile in RemoteQualityProfile.values)
-                            PopupMenuItem(
-                              value: profile,
-                              child: ListTile(
-                                dense: true,
-                                contentPadding: EdgeInsets.zero,
-                                leading: Icon(
-                                  profile == session.selectedQuality
-                                      ? Icons.check_circle
-                                      : Icons.high_quality_outlined,
+                            if (!profile.desktopControllerOnly ||
+                                Platform.isMacOS ||
+                                Platform.isWindows ||
+                                Platform.isLinux)
+                              PopupMenuItem(
+                                value: profile,
+                                child: ListTile(
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: Icon(
+                                    profile == session.selectedQuality
+                                        ? Icons.check_circle
+                                        : Icons.high_quality_outlined,
+                                  ),
+                                  title: Text(profile.label),
                                 ),
-                                title: Text(profile.label),
                               ),
-                            ),
                         ],
                         icon: session.qualityPending
                             ? const SizedBox.square(
@@ -1216,6 +1228,41 @@ class _RemoteToolbar extends StatelessWidget {
                         onPressed: onDisplayAdjustment,
                         icon: const Icon(Icons.tonality_outlined),
                       ),
+                      if ((Platform.isMacOS || Platform.isWindows) &&
+                          session.remoteHostPlatform ==
+                              HostPlatformType.windows.name &&
+                          session.remoteSupportsPhysicalKeyboard)
+                        PopupMenuButton<RemoteTextInputMode>(
+                          tooltip: '文字输入：${textInputMode.label}',
+                          initialValue: textInputMode,
+                          onSelected: onTextInputModeSelected,
+                          itemBuilder: (context) => [
+                            for (final mode in RemoteTextInputMode.values)
+                              PopupMenuItem(
+                                value: mode,
+                                child: ListTile(
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: Icon(
+                                    mode == textInputMode
+                                        ? Icons.check_circle
+                                        : Icons.translate,
+                                  ),
+                                  title: Text(mode.label),
+                                  subtitle: Text(
+                                    mode == RemoteTextInputMode.remoteIme
+                                        ? '直接发送物理按键；请在 Windows 用 Win+Space 选择微软拼音'
+                                        : mode.description,
+                                  ),
+                                ),
+                              ),
+                          ],
+                          icon: Icon(
+                            textInputMode == RemoteTextInputMode.remoteIme
+                                ? Icons.language
+                                : Icons.translate,
+                          ),
+                        ),
                       PopupMenuButton<RemoteKeyboardMode>(
                         tooltip: session.canSendControl
                             ? (Platform.isWindows

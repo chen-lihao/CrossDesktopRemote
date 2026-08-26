@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 共用的信令配置已持久化，连接码改为 Java 服务生成并在原 WebSocket 上原子轮换。DNS-SD 现只负责设备身份与能力发现，不再把被控设备地址当成信令服务器。Mac→Windows 新增“本机输入法/被控端输入法”双模式，后者使用 USB HID/扫描码由 Windows 系统输入法直接组词。Mac 与 iOS Debug 已构建通过，Windows MSVC 与双机实测待 Windows 设备验收。
+> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 共用的信令配置已持久化，一次性连接码可等待期手动轮换，并在已消费会话结束后自动补发。DNS-SD 负责发现被控设备，用户选择设备后采用其声明的局域网或公网信令地址。Mac→Windows 提供“本机输入法/被控端输入法”双模式，后者使用 USB HID/语义键映射由 Windows 系统输入法直接组词。Flutter 分析和 108 项测试通过，Windows MSVC 与双机实测待 Windows 设备验收。
 
 ## 项目定位
 
@@ -237,7 +237,7 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 - 拼音组合、候选翻页、空格选词和组合内退格保留在 Windows；只有输入法提交后的 Unicode 文本才发送到被控端。
 - `Ctrl`/`Alt`/`Win` 组合键以及 Enter、Tab、方向键和 F1～F12 继续使用成对的物理按键通道；切换窗口或失焦时统一释放按键并取消本地组合态。
 - 输入法候选窗口锚定在最近一次远程点击位置附近；工具栏的“系统完整键盘”保留为第三方输入法兼容入口，不再是微软拼音的必经步骤。
-- Mac 控制 Windows 可在“输入设置与诊断”选择“被控端输入法”；可打印按键改为 USB HID 事件，候选、选词、退格和中英文状态均由 Windows 输入法维护。“本机输入法”仍保留为 Unicode 文本、粘贴和表情兼容模式。
+- Mac 控制 Windows 可直接在远程工具栏或“输入设置与诊断”选择“被控端输入法”；可打印按键走 USB HID，Enter、Backspace、导航键等走稳定语义键映射，候选、选词、退格和中英文状态均由 Windows 输入法维护。该模式不远程调用私有 IME API，而是像本地物理键盘一样注入按键，由 Windows 当前激活的微软拼音/其他系统输入法处理；可在被控端用 `Win+Space` 切换输入法。“本机输入法”仍保留为 Unicode 文本、粘贴和表情兼容模式。
 - 同一输入代理已在 macOS 控制端启用，使系统拼音在本地完成组合和选词后直接向 Windows 被控端发送已提交 Unicode；无需打开“全局键盘”文本框。
 - 此路径只在 Windows/macOS 桌面端启用，不改变 iPad 的 UIKit IME、双键盘、触控和移动端全屏实现。
 
@@ -250,7 +250,7 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 - 绝对指针以协议归一化坐标传输，再结合目标显示器与整个虚拟桌面映射到`0～65535`；物理按键使用扫描码，文字使用`KEYEVENTF_UNICODE`。
 - 断开和Runner退出时统一释放合成按键与鼠标按钮，避免远端异常退出后出现粘键。
 - UIPI限制普通权限进程控制管理员/UAC安全桌面；应用会提示限制，不通过长期管理员运行规避。
-- Windows默认仍以控制端启动；用户需要主动切换到“共享本机”。Runner 已使用 Windows 10+ DNS Service Discovery API 发布和浏览`_cdrremote._tcp.local`，且永久保留手动地址后备；多显示器事务仍待单屏实机闭环后启用。
+- Windows默认仍以控制端启动；用户需要主动切换到“共享本机”。Runner 已使用 Windows 10+ DNS Service Discovery API 发布和浏览`_cdrremote._tcp.local`。发现对象是正在等待连接的被控设备，不是独立信令服务器目录；设备 TXT 会声明双方应使用的信令地址，用户点击设备后显式采用，且永久保留手动地址后备。多显示器事务仍待单屏实机闭环后启用。
 
 构建和物理检查步骤见 [Windows 被控端首轮验收](./docs/Windows被控端验收.md)。
 
@@ -267,7 +267,7 @@ Mac 选择“共享本机”，先点击“设置远程输入权限”，然后�
 - iPad 只保留一个呈现变换：外层画布负责 `contain/cover`、居中、裁剪和指针归一化，内层 RTC Texture 只铺满该矩形；已提交的目标显示器尺寸优先于解码器过渡尺寸，避免 Sidecar 返回主屏后再次 `contain` 产生大面积黑边。
 - 显示器协议分别携带逻辑尺寸、采集像素尺寸和点像素比例：远程输入继续使用逻辑坐标，视频画质与 WebRTC 适配使用实际像素。macOS 14+ 通过 `SCContentFilter.contentRect × pointPixelScale` 采集，旧系统回退到 `CGDisplayPixelsWide/High`，避免把 Sidecar 的逻辑尺寸放大成模糊视频。
 - 自动画质默认从 1080p30/7 Mbps 开始，以 1 秒区间统计观察丢包、RTT、可用出站带宽、编码耗时、掉帧、冻结和拥塞原因；连续 2 个坏样本降档，连续 10 个好样本且至少稳定 15 秒才升档。档位依次为 1080p60、1080p30、720p60、720p30，切换失败会回滚；手动画质不被自动策略覆盖。显示器事务期间冻结自动档，事务结束后 5 秒内的切屏抖动不参与档位判断。
-- 会话建立时固定 ScreenCaptureKit 的 1920 长边/60 FPS 采集上限；自动与手动画质仅调整 RTP Sender 的码率、帧率和分辨率缩放，切屏期间的请求延后合并执行，不再动态调用 `SCStream.updateConfiguration()`。macOS 优先使用 VideoToolbox H.264。
+- Apple 会话继续固定 ScreenCaptureKit 的 1920 长边/60 FPS 采集上限；Windows 单屏原型将固定采集上限提升至 2560 长边/60 FPS。桌面控制端新增 1080p60、2K60 和原画60 手动档位，自动与手动画质仍只调整 RTP Sender 的码率、帧率和分辨率缩放。高负载手动档暂不显示在移动端，避免改变已稳定的 iPad 路径；120 FPS 在采集、硬编、解码和高刷呈现全链路实测前不开放。切屏期间的画质请求继续延后合并执行，macOS 不动态调用 `SCStream.updateConfiguration()`。
 - 会话诊断展示区间码率/丢包、带宽、掉帧/冻结、关键帧、NACK/PLI/FIR、codec 和编解码器实现；色彩诊断同时记录 SCK `contentRect`、scale 与 PixelBuffer 尺寸，用于区分源画面残留、编码参考帧污染和接收端渲染问题。
 - iPad 全屏采用“工具栏 + 稳定视频画布”的结构；软键盘和快捷小键盘覆盖在画布上，不再改变视频尺寸与指针变换。视频显示与指针归一化复用同一个变换，输入只绑定已经真实渲染的显示器；Mac 绝对坐标限制在最后一个有效逻辑像素，避免视觉偏移、串屏和边缘越界。
 - Java 信令对失败连接采用两级限流：同一来源与连接码 5 次/分钟，来源跨连接码 20 次/分钟。旧码达到邀请级限流后可改用新的正确连接码，轮换随机码仍会触发来源级保护；关闭原因携带作用域和剩余等待秒数。
@@ -318,7 +318,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；`HostPlatformAdapter`已接入Windows能力握手、显示器/DPI枚举、主屏采集和`SendInput`鼠标/扫描码/Unicode输入；Windows DNS-SD注册/浏览已接入；`analyze`零告警、99项测试通过且1项按设计跳过 | Windows MSVC原生构建、Mac→Windows单屏/拼音/DNS-SD实机验收；随后实现Windows多显示器事务 |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；`HostPlatformAdapter`已接入Windows能力握手、显示器/DPI枚举、主屏采集和`SendInput`鼠标/扫描码/Unicode输入；Windows DNS-SD注册/浏览已接入；`analyze`零告警、108项测试通过且1项按设计跳过 | Windows MSVC原生构建、Mac→Windows单屏/拼音/DNS-SD实机验收；随后实现Windows多显示器事务 |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |

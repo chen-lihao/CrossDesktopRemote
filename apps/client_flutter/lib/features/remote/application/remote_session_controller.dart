@@ -92,7 +92,8 @@ class _CaptureFrameWaitResult {
 }
 
 class RemoteSessionController extends ChangeNotifier {
-  static const int _sessionCaptureLongEdge = 1920;
+  static const int _appleSessionCaptureLongEdge = 1920;
+  static const int _windowsSessionCaptureLongEdge = 2560;
   static const int _sessionCaptureFrameRate = 60;
 
   RemoteSessionController({
@@ -107,6 +108,14 @@ class RemoteSessionController extends ChangeNotifier {
   final RemoteRole role;
   final SignalingClient _signaling;
   final HostPlatformAdapter _hostPlatform;
+
+  /// Apple keeps the physically verified fixed 1080p ScreenCaptureKit canvas.
+  /// Windows can capture a 2K source without entering the Apple display-switch
+  /// transaction, so its first performance prototype receives a higher cap.
+  int get _sessionCaptureLongEdge =>
+      _hostPlatform.type == HostPlatformType.windows
+      ? _windowsSessionCaptureLongEdge
+      : _appleSessionCaptureLongEdge;
   final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
   final StreamController<RemoteNotice> _notices =
       StreamController<RemoteNotice>.broadcast(sync: true);

@@ -54,10 +54,14 @@ class SettingsPage extends StatelessWidget {
                           },
                           items: [
                             for (final profile in RemoteQualityProfile.values)
-                              DropdownMenuItem(
-                                value: profile,
-                                child: Text(profile.label),
-                              ),
+                              if (!profile.desktopControllerOnly ||
+                                  Platform.isMacOS ||
+                                  Platform.isWindows ||
+                                  Platform.isLinux)
+                                DropdownMenuItem(
+                                  value: profile,
+                                  child: Text(profile.label),
+                                ),
                           ],
                         ),
                       ),

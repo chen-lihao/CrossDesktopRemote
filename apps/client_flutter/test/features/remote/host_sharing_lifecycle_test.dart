@@ -83,6 +83,43 @@ void main() {
     expect(lifecycle.sharingRequested, isFalse);
   });
 
+  test('re-arms when a consumed code fails before media starts', () {
+    final lifecycle = HostSharingLifecycle()..start();
+    expect(
+      lifecycle.observeTransition(
+        previous: RemoteSessionState.waitingForPeer,
+        next: RemoteSessionState.connecting,
+      ),
+      isFalse,
+    );
+
+    final shouldRestart = lifecycle.observeTransition(
+      previous: RemoteSessionState.connecting,
+      next: RemoteSessionState.disconnected,
+    );
+
+    expect(shouldRestart, isTrue);
+    expect(lifecycle.sharingRequested, isTrue);
+    expect(lifecycle.rearming, isTrue);
+  });
+
+  test('re-arms when host capture fails after consuming the code', () {
+    final lifecycle = HostSharingLifecycle()..start();
+    lifecycle.observeTransition(
+      previous: RemoteSessionState.waitingForPeer,
+      next: RemoteSessionState.connecting,
+    );
+
+    final shouldRestart = lifecycle.observeTransition(
+      previous: RemoteSessionState.connecting,
+      next: RemoteSessionState.failed,
+    );
+
+    expect(shouldRestart, isTrue);
+    expect(lifecycle.sharingRequested, isTrue);
+    expect(lifecycle.rearming, isTrue);
+  });
+
   test('a failed re-arm returns control to the user', () {
     final lifecycle = HostSharingLifecycle()..start();
     lifecycle.observeTransition(
