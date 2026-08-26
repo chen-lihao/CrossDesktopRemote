@@ -1,6 +1,5 @@
 import 'package:cross_desktop_remote/main.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -82,25 +81,10 @@ void main() {
   });
 
   testWidgets(
-    'host connection code is selectable and has a working copy action',
+    'host requests a server-owned connection code when sharing starts',
     (tester) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
-      MethodCall? clipboardCall;
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
-        (call) async {
-          if (call.method == 'Clipboard.setData') clipboardCall = call;
-          return null;
-        },
-      );
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          null,
-        ),
-      );
-
       await tester.pumpWidget(const MainApp());
       final codeFinder = find.byKey(const ValueKey('hostRoomCodeText'));
       if (codeFinder.evaluate().isEmpty) return;
@@ -113,17 +97,12 @@ void main() {
       expect(field.decoration.suffixIcon, isA<IconButton>());
 
       final code = tester.widget<SelectableText>(codeFinder).data;
-      expect(code, matches(RegExp(r'^\d{6}$')));
-      await tester.tap(find.byKey(const ValueKey('copyRoomCodeButton')));
-      await tester.pump();
-
-      expect(clipboardCall?.method, 'Clipboard.setData');
-      expect(
-        (clipboardCall?.arguments as Map<Object?, Object?>?)?['text'],
-        code,
+      expect(code, isEmpty);
+      final copy = tester.widget<IconButton>(
+        find.byKey(const ValueKey('copyRoomCodeButton')),
       );
-      expect(find.text('连接码已复制'), findsOneWidget);
-      await tester.pump(const Duration(seconds: 4));
+      expect(copy.onPressed, isNull);
+      expect(find.text('生成连接码'), findsOneWidget);
     },
   );
 }

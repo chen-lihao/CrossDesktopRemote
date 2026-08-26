@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/remote_ime_input_adapter.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
@@ -87,6 +88,7 @@ Future<void> _showRemoteInputSettings(
   required ValueNotifier<RemoteInputSettings> settings,
   required RemoteSessionController session,
   ValueChanged<RemoteKeyboardMode>? onKeyboardModeChanged,
+  ValueChanged<RemoteTextInputMode>? onTextInputModeChanged,
 }) {
   return showModalBottomSheet<void>(
     context: context,
@@ -153,6 +155,40 @@ Future<void> _showRemoteInputSettings(
                     ],
                   ),
                 ),
+                if (Platform.isMacOS || Platform.isWindows || Platform.isLinux)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('文字输入方式'),
+                    subtitle: Text(
+                      value.textInputMode == RemoteTextInputMode.remoteIme &&
+                              !session.remoteSupportsPhysicalKeyboard
+                          ? '被控端未声明物理键盘能力，当前使用本机输入法'
+                          : value.textInputMode.description,
+                    ),
+                    trailing: DropdownButton<RemoteTextInputMode>(
+                      value: value.textInputMode,
+                      onChanged: (mode) {
+                        if (mode == null) return;
+                        if (mode == RemoteTextInputMode.remoteIme &&
+                            !session.remoteSupportsPhysicalKeyboard) {
+                          AppMessenger.show(
+                            '当前被控端不支持系统输入法模式',
+                            level: AppMessageLevel.warning,
+                          );
+                          return;
+                        }
+                        settings.value = value.copyWith(textInputMode: mode);
+                        onTextInputModeChanged?.call(mode);
+                      },
+                      items: [
+                        for (final mode in RemoteTextInputMode.values)
+                          DropdownMenuItem(
+                            value: mode,
+                            child: Text(mode.label),
+                          ),
+                      ],
+                    ),
+                  ),
                 const Divider(),
                 ListTile(
                   contentPadding: EdgeInsets.zero,
@@ -458,6 +494,7 @@ class RemoteDesktopPanel extends StatefulWidget {
     required this.session,
     this.initialInputSettings = const RemoteInputSettings(),
     this.onKeyboardModeChanged,
+    this.onTextInputModeChanged,
     this.desktopFullScreen = false,
     this.onDesktopFullScreenChanged,
   });
@@ -465,6 +502,7 @@ class RemoteDesktopPanel extends StatefulWidget {
   final RemoteSessionController session;
   final RemoteInputSettings initialInputSettings;
   final ValueChanged<RemoteKeyboardMode>? onKeyboardModeChanged;
+  final ValueChanged<RemoteTextInputMode>? onTextInputModeChanged;
   final bool desktopFullScreen;
   final Future<bool> Function(bool enabled)? onDesktopFullScreenChanged;
 
@@ -515,6 +553,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
           displayAdjustment: _displayAdjustment,
           initialViewFit: _viewFit,
           onKeyboardModeChanged: widget.onKeyboardModeChanged,
+          onTextInputModeChanged: widget.onTextInputModeChanged,
         ),
       ),
     );
@@ -596,6 +635,13 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
     widget.onKeyboardModeChanged?.call(mode);
   }
 
+  void _setTextInputMode(RemoteTextInputMode mode) {
+    _inputSettings.value = _inputSettings.value.copyWith(textInputMode: mode);
+    widget.onTextInputModeChanged?.call(mode);
+    _surfaceKey.currentState?.requestHardwareKeyboardFocus();
+    AppMessenger.show('文字输入：${mode.label}');
+  }
+
   Widget _buildToolbar(
     BuildContext context,
     RemoteInputSettings inputSettings, {
@@ -619,6 +665,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
           settings: _inputSettings,
           session: widget.session,
           onKeyboardModeChanged: _setKeyboardMode,
+          onTextInputModeChanged: _setTextInputMode,
         ),
         onDisplayAdjustment: () => _showRemoteDisplayAdjustment(
           context,
@@ -755,6 +802,7 @@ class _FullScreenRemoteDesktopPage extends StatefulWidget {
     required this.displayAdjustment,
     required this.initialViewFit,
     this.onKeyboardModeChanged,
+    this.onTextInputModeChanged,
   });
 
   final RemoteSessionController session;
@@ -762,6 +810,7 @@ class _FullScreenRemoteDesktopPage extends StatefulWidget {
   final RemoteDisplayAdjustmentController displayAdjustment;
   final RemoteViewFit initialViewFit;
   final ValueChanged<RemoteKeyboardMode>? onKeyboardModeChanged;
+  final ValueChanged<RemoteTextInputMode>? onTextInputModeChanged;
 
   @override
   State<_FullScreenRemoteDesktopPage> createState() =>
@@ -827,6 +876,15 @@ class _FullScreenRemoteDesktopPageState
     widget.onKeyboardModeChanged?.call(mode);
   }
 
+  void _setTextInputMode(RemoteTextInputMode mode) {
+    widget.inputSettings.value = widget.inputSettings.value.copyWith(
+      textInputMode: mode,
+    );
+    widget.onTextInputModeChanged?.call(mode);
+    _surfaceKey.currentState?.requestHardwareKeyboardFocus();
+    AppMessenger.show('文字输入：${mode.label}');
+  }
+
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<RemoteInputSettings>(
@@ -869,6 +927,7 @@ class _FullScreenRemoteDesktopPageState
                     settings: widget.inputSettings,
                     session: widget.session,
                     onKeyboardModeChanged: _setKeyboardMode,
+                    onTextInputModeChanged: _setTextInputMode,
                   ),
                   onDisplayAdjustment: () => _showRemoteDisplayAdjustment(
                     context,
@@ -1302,12 +1361,24 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
 
   bool get _usesDesktopIme => Platform.isWindows || Platform.isMacOS;
 
+  bool get _remoteHostImeActive =>
+      _usesDesktopKeyboard &&
+      widget.inputSettings.textInputMode == RemoteTextInputMode.remoteIme &&
+      session.remoteHostPlatform == HostPlatformType.windows.name &&
+      session.remoteSupportsPhysicalKeyboard;
+
   bool get _desktopDirectImeAvailable =>
-      _usesDesktopIme && !_keyboardVisible && session.canSendControl;
+      _usesDesktopIme &&
+      !_remoteHostImeActive &&
+      !_keyboardVisible &&
+      session.canSendControl;
 
   void requestHardwareKeyboardFocus() {
     if (!mounted) return;
-    if (_desktopDirectImeAvailable) {
+    if (_remoteHostImeActive) {
+      _textFocus.unfocus();
+      _hardwareFocus.requestFocus();
+    } else if (_desktopDirectImeAvailable) {
       unawaited(_activateDesktopDirectIme());
     } else {
       _hardwareFocus.requestFocus();
@@ -1356,6 +1427,14 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       if (!_keyboardVisible) {
         _activeKeyboardMode = widget.inputSettings.keyboardMode;
       }
+      if (oldWidget.inputSettings.textInputMode !=
+          widget.inputSettings.textInputMode) {
+        _releaseDesktopKeys();
+        _resetTextInput();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) requestHardwareKeyboardFocus();
+        });
+      }
     }
   }
 
@@ -1377,6 +1456,17 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       return;
     }
     final nextMode = mode ?? widget.inputSettings.keyboardMode;
+    if (nextMode == RemoteKeyboardMode.system && _remoteHostImeActive) {
+      setState(() {
+        _activeKeyboardMode = nextMode;
+        _keyboardVisible = false;
+      });
+      _releaseDesktopKeys();
+      _textFocus.unfocus();
+      _hardwareFocus.requestFocus();
+      AppMessenger.show('已使用被控端 Windows 输入法，可直接键入拼音');
+      return;
+    }
     if (nextMode == RemoteKeyboardMode.compact) {
       if ((_keyboardVisible &&
               _activeKeyboardMode == RemoteKeyboardMode.system) ||
@@ -2471,6 +2561,22 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
 
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (!session.canSendControl) return KeyEventResult.ignored;
+    if (_remoteHostImeActive) {
+      if (widget.desktopFullScreen &&
+          event.logicalKey == LogicalKeyboardKey.escape) {
+        if (event is KeyDownEvent) widget.onExitDesktopFullScreen?.call();
+        return KeyEventResult.handled;
+      }
+      final actions = _desktopKeyboard.translate(
+        event,
+        modifiers: _remoteModifiers(HardwareKeyboard.instance),
+        physicalOnly: true,
+      );
+      for (final action in actions) {
+        _dispatchKeyboardAction(action);
+      }
+      return actions.isEmpty ? KeyEventResult.ignored : KeyEventResult.handled;
+    }
     if (_textFocus.hasFocus) {
       if (!_usesDesktopIme || _desktopIme.isComposing) {
         // Let the active IME own candidate selection, cancellation and editing.

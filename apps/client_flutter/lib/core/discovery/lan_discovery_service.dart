@@ -13,6 +13,9 @@ class HostAdvertisement {
     this.path = '/ws/signaling',
     this.version = '1',
     this.capabilities = 'screen,pointer,keyboard,quality,displays',
+    this.platform = 'unknown',
+    this.signalingProfileId = '',
+    this.rendezvousUrl = '',
   });
 
   final String deviceId;
@@ -21,6 +24,9 @@ class HostAdvertisement {
   final String path;
   final String version;
   final String capabilities;
+  final String platform;
+  final String signalingProfileId;
+  final String rendezvousUrl;
 
   Map<String, Object> toMap() => {
     'deviceId': deviceId,
@@ -29,7 +35,20 @@ class HostAdvertisement {
     'path': path,
     'version': version,
     'capabilities': capabilities,
+    'platform': platform,
+    'signalingProfileId': signalingProfileId,
+    'rendezvousUrl': rendezvousUrl,
   };
+}
+
+String signalingProfileIdForUrl(String value) {
+  final normalized = value.trim().toLowerCase();
+  var hash = 0x811c9dc5;
+  for (final byte in normalized.codeUnits) {
+    hash ^= byte;
+    hash = (hash * 0x01000193) & 0xffffffff;
+  }
+  return 'fnv1a-${hash.toRadixString(16).padLeft(8, '0')}';
 }
 
 class DiscoveredDevice {
@@ -41,6 +60,9 @@ class DiscoveredDevice {
     required this.path,
     required this.version,
     required this.capabilities,
+    this.platform = 'unknown',
+    this.signalingProfileId = '',
+    this.rendezvousUrl = '',
   });
 
   factory DiscoveredDevice.fromMap(Map<Object?, Object?> value) {
@@ -55,6 +77,14 @@ class DiscoveredDevice {
     final name = value['name']?.toString().trim();
     final id = value['id']?.toString().trim();
     final rawPath = value['path']?.toString().trim() ?? '/ws/signaling';
+    final rawRendezvousUrl = value['rendezvousUrl']?.toString().trim() ?? '';
+    final rendezvousUri = Uri.tryParse(rawRendezvousUrl);
+    final rendezvousUrl =
+        rendezvousUri != null &&
+            const {'ws', 'wss'}.contains(rendezvousUri.scheme) &&
+            rendezvousUri.host.isNotEmpty
+        ? rendezvousUri.toString()
+        : '';
     return DiscoveredDevice(
       id: id == null || id.isEmpty ? '$host:${port.toInt()}' : id,
       name: name == null || name.isEmpty ? host : name,
@@ -63,6 +93,9 @@ class DiscoveredDevice {
       path: rawPath.startsWith('/') ? rawPath : '/$rawPath',
       version: value['version']?.toString() ?? '1',
       capabilities: value['capabilities']?.toString() ?? '',
+      platform: value['platform']?.toString() ?? 'unknown',
+      signalingProfileId: value['signalingProfileId']?.toString() ?? '',
+      rendezvousUrl: rendezvousUrl,
     );
   }
 
@@ -73,9 +106,13 @@ class DiscoveredDevice {
   final String path;
   final String version;
   final String capabilities;
+  final String platform;
+  final String signalingProfileId;
+  final String rendezvousUrl;
 
-  String get signalingUrl =>
-      Uri(scheme: 'ws', host: host, port: port, path: path).toString();
+  String get signalingUrl => rendezvousUrl.isNotEmpty
+      ? rendezvousUrl
+      : Uri(scheme: 'ws', host: host, port: port, path: path).toString();
 }
 
 abstract interface class LanDiscoveryService {

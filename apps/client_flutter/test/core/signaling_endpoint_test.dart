@@ -21,6 +21,19 @@ void main() {
     expect(endpoint.scheme, 'ws');
     expect(endpoint.queryParameters['room'], '123456');
     expect(endpoint.queryParameters['role'], 'controller');
+    expect(endpoint.queryParameters['protocol'], '2');
+  });
+
+  test('allows a version two host to request a server-owned invitation', () {
+    final endpoint = buildSignalingUri(
+      serverUrl: 'wss://signal.example.com/ws/signaling',
+      roomCode: '',
+      role: RemoteRole.host,
+    );
+
+    expect(endpoint.queryParameters.containsKey('room'), isFalse);
+    expect(endpoint.queryParameters['role'], 'host');
+    expect(endpoint.queryParameters['protocol'], '2');
   });
 
   test('rejects non websocket endpoints', () {

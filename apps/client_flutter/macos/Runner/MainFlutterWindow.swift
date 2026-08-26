@@ -576,7 +576,10 @@ private final class AppleLanDiscoveryBridge: NSObject, FlutterStreamHandler {
         "id": deviceId,
         "v": values["version"] as? String ?? "1",
         "path": values["path"] as? String ?? "/ws/signaling",
-        "cap": values["capabilities"] as? String ?? "screen,pointer,keyboard,quality,displays"
+        "cap": values["capabilities"] as? String ?? "screen,pointer,keyboard,quality,displays",
+        "platform": values["platform"] as? String ?? "macos",
+        "signal": values["signalingProfileId"] as? String ?? "",
+        "signalUrl": values["rendezvousUrl"] as? String ?? ""
       ]
       result(runDNSOperation {
         try self.publish(name: name, port: port, metadata: metadata)
@@ -762,7 +765,10 @@ private final class AppleLanDiscoveryBridge: NSObject, FlutterStreamHandler {
       "port": Int(UInt16(bigEndian: port)),
       "path": metadata["path"] ?? "/ws/signaling",
       "version": metadata["v"] ?? "1",
-      "capabilities": metadata["cap"] ?? ""
+      "capabilities": metadata["cap"] ?? "",
+      "platform": metadata["platform"] ?? "unknown",
+      "signalingProfileId": metadata["signal"] ?? "",
+      "rendezvousUrl": metadata["signalUrl"] ?? ""
     ]
     emitDevices()
   }

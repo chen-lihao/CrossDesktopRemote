@@ -21,15 +21,16 @@ Uri buildSignalingUri({
   if (baseUri.host.isEmpty) {
     throw const FormatException('信令地址缺少主机名或 IP');
   }
-  if (!isValidRoomCode(roomCode)) {
+  if (role == RemoteRole.controller && !isValidRoomCode(roomCode)) {
     throw const FormatException('连接码必须是 6 位数字');
   }
 
   return baseUri.replace(
     queryParameters: {
       ...baseUri.queryParameters,
-      'room': roomCode,
+      if (roomCode.isNotEmpty) 'room': roomCode,
       'role': role.name,
+      'protocol': '2',
     },
   );
 }

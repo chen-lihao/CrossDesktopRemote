@@ -24,6 +24,7 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			"candidate",
 			"hangup",
 			"offer",
+			"rotate-invitation",
 			"reject");
 	private static final String ROOM_ATTRIBUTE = "crossdesktop.room";
 	private static final String ROLE_ATTRIBUTE = "crossdesktop.role";
@@ -47,28 +48,44 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		var query = UriComponentsBuilder.fromUri(requestUri).build().getQueryParams();
 		var roomCode = query.getFirst("room");
 		var role = SignalingRole.parse(query.getFirst("role"));
-		if (!StringUtils.hasText(roomCode) || role.isEmpty()) {
+		if (role.isEmpty() ||
+				(role.get() == SignalingRole.CONTROLLER && !StringUtils.hasText(roomCode))) {
 			session.close(CloseStatus.BAD_DATA.withReason("Invalid room or role"));
 			return;
 		}
 
-		var result = rooms.join(roomCode, role.get(), session);
-		if (result != SignalingRoomRegistry.JoinResult.JOINED) {
-			session.close(CloseStatus.POLICY_VIOLATION.withReason(
-					rooms.rejectionReason(result, roomCode, session)));
-			return;
+		SignalingRoomRegistry.HostInvitation invitation = null;
+		if (role.get() == SignalingRole.HOST && !StringUtils.hasText(roomCode)) {
+			invitation = rooms.createHostInvitation(session);
+			roomCode = invitation.roomCode();
+		} else {
+			var result = rooms.join(roomCode, role.get(), session);
+			if (result != SignalingRoomRegistry.JoinResult.JOINED) {
+				session.close(CloseStatus.POLICY_VIOLATION.withReason(
+						rooms.rejectionReason(result, roomCode, session)));
+				return;
+			}
 		}
 
 		session.getAttributes().put(ROOM_ATTRIBUTE, roomCode);
 		session.getAttributes().put(ROLE_ATTRIBUTE, role.get());
 		var ready = new HashMap<String, Object>();
 		ready.put("type", "ready");
+		ready.put("protocolVersion", 2);
+		ready.put("capabilities", Set.of("server-invitations", "invitation-rotation"));
 		ready.put("room", roomCode);
 		ready.put("role", role.get().wireName());
-		rooms.invitationRemainingMillis(roomCode, role.get(), session)
-				.ifPresent(value -> ready.put("invitationExpiresInMillis", value));
+		if (invitation != null) {
+			ready.put("invitationLeaseId", invitation.leaseId());
+			ready.put("invitationExpiresAtUnixMillis", invitation.expiresAtUnixMillis());
+			ready.put("invitationExpiresInMillis", invitation.expiresInMillis());
+		} else {
+			rooms.invitationRemainingMillis(roomCode, role.get(), session)
+					.ifPresent(value -> ready.put("invitationExpiresInMillis", value));
+		}
 		sendJson(session, ready);
-		rooms.peer(roomCode, role.get()).ifPresent(peer -> {
+		var joinedRoomCode = roomCode;
+		rooms.peer(joinedRoomCode, role.get()).ifPresent(peer -> {
 			sendJsonQuietly(peer, Map.of("type", "peer-joined", "role", role.get().wireName()));
 			sendJsonQuietly(session, Map.of("type", "peer-joined", "role", role.get().peerRole().wireName()));
 		});
@@ -92,6 +109,32 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		var role = role(session);
 		if (roomCode == null || role == null) {
 			session.close(CloseStatus.POLICY_VIOLATION);
+			return;
+		}
+
+		if (messageType.equals("rotate-invitation")) {
+			if (role != SignalingRole.HOST) {
+				session.close(CloseStatus.POLICY_VIOLATION.withReason("Host role required"));
+				return;
+			}
+			var rotated = rooms.rotateHostInvitation(roomCode, session);
+			if (rotated.isEmpty()) {
+				sendJson(session, Map.of(
+						"type", "invitation-rotation-error",
+						"code", "INVITATION_NOT_ROTATABLE"));
+				return;
+			}
+			var invitation = rotated.get();
+			session.getAttributes().put(ROOM_ATTRIBUTE, invitation.roomCode());
+			var response = new HashMap<String, Object>();
+			response.put("type", "invitation-rotated");
+			response.put("room", invitation.roomCode());
+			response.put("invitationLeaseId", invitation.leaseId());
+			response.put("invitationExpiresAtUnixMillis", invitation.expiresAtUnixMillis());
+			response.put("invitationExpiresInMillis", invitation.expiresInMillis());
+			var requestId = payload.path("requestId").asText();
+			if (StringUtils.hasText(requestId)) response.put("requestId", requestId);
+			sendJson(session, response);
 			return;
 		}
 

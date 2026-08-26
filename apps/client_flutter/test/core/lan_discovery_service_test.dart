@@ -18,7 +18,7 @@ void main() {
     },
   );
 
-  test('parses a Bonjour advertisement into a signaling endpoint', () {
+  test('keeps device identity separate from its rendezvous server', () {
     final device = DiscoveredDevice.fromMap({
       'id': 'macbook-pro',
       'name': 'MacBook Pro',
@@ -27,11 +27,23 @@ void main() {
       'path': '/ws/signaling',
       'version': '1',
       'capabilities': 'screen,pointer',
+      'platform': 'macos',
+      'signalingProfileId': 'signal-prod',
+      'rendezvousUrl': 'wss://signal.example.com/ws/signaling',
     });
 
     expect(device.host, 'macbook-pro.local');
-    expect(device.signalingUrl, 'ws://macbook-pro.local:8080/ws/signaling');
+    expect(device.signalingUrl, 'wss://signal.example.com/ws/signaling');
+    expect(device.signalingProfileId, 'signal-prod');
+    expect(device.platform, 'macos');
     expect(device.capabilities, contains('pointer'));
+  });
+
+  test('creates a stable non-secret signaling profile identifier', () {
+    expect(
+      signalingProfileIdForUrl('WS://MAC.LOCAL:8080/ws/signaling '),
+      signalingProfileIdForUrl('ws://mac.local:8080/ws/signaling'),
+    );
   });
 
   test('normalizes paths and rejects invalid advertisements', () {

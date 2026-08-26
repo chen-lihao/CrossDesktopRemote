@@ -45,6 +45,9 @@ class WindowsLanDiscoveryBridge {
     std::string path;
     std::string version;
     std::string capabilities;
+    std::string platform;
+    std::string signaling_profile_id;
+    std::string rendezvous_url;
   };
 
   enum class RegistrationOperation { kRegistering, kRegistered, kStopping };

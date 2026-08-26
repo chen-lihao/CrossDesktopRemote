@@ -14,6 +14,38 @@ import org.springframework.web.socket.WebSocketSession;
 class SignalingRoomRegistryTests {
 
 	@Test
+	void createsAndAtomicallyRotatesAServerOwnedInvitation() {
+		var now = new AtomicLong(1_000);
+		var registry = new SignalingRoomRegistry(now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
+		var host = openSession("host", "192.168.1.10");
+		var controller = openSession("controller", "192.168.1.20");
+
+		var initial = registry.createHostInvitation(host);
+		assertThat(initial.roomCode()).matches("[0-9]{6}");
+		assertThat(initial.expiresInMillis()).isEqualTo(Duration.ofMinutes(5).toMillis());
+
+		var rotated = registry.rotateHostInvitation(initial.roomCode(), host).orElseThrow();
+		assertThat(rotated.roomCode()).isNotEqualTo(initial.roomCode());
+		assertThat(registry.join(initial.roomCode(), SignalingRole.CONTROLLER, controller))
+				.isEqualTo(SignalingRoomRegistry.JoinResult.INVALID_ROOM);
+		assertThat(registry.join(rotated.roomCode(), SignalingRole.CONTROLLER, controller))
+				.isEqualTo(SignalingRoomRegistry.JoinResult.JOINED);
+	}
+
+	@Test
+	void refusesToRotateAnInvitationAfterAControllerConsumesIt() {
+		var registry = new SignalingRoomRegistry();
+		var host = openSession("host", "192.168.1.10");
+		var controller = openSession("controller", "192.168.1.20");
+		var invitation = registry.createHostInvitation(host);
+
+		assertThat(registry.join(invitation.roomCode(), SignalingRole.CONTROLLER, controller))
+				.isEqualTo(SignalingRoomRegistry.JoinResult.JOINED);
+		assertThat(registry.rotateHostInvitation(invitation.roomCode(), host)).isEmpty();
+		assertThat(registry.peer(invitation.roomCode(), SignalingRole.HOST)).contains(controller);
+	}
+
+	@Test
 	void expiresAHostRegistrationAndConsumesAValidCodeOnce() {
 		var now = new AtomicLong(1_000);
 		var registry = new SignalingRoomRegistry(now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);

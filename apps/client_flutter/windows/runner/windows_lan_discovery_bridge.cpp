@@ -268,12 +268,16 @@ void WindowsLanDiscoveryBridge::PublishHost(
   context->owner = this;
   context->instance_name = WideFromUtf8(name) + kServiceSuffix;
   context->host_name = ComputerHostName();
-  context->property_keys = {L"id", L"v", L"path", L"cap"};
+  context->property_keys = {L"id", L"v", L"path", L"cap", L"platform",
+                            L"signal", L"signalUrl"};
   context->property_values = {
       WideFromUtf8(device_id),
       WideFromUtf8(StringValue(arguments, "version", "1")),
       WideFromUtf8(StringValue(arguments, "path", "/ws/signaling")),
-      WideFromUtf8(StringValue(arguments, "capabilities"))};
+      WideFromUtf8(StringValue(arguments, "capabilities")),
+      WideFromUtf8(StringValue(arguments, "platform", "windows")),
+      WideFromUtf8(StringValue(arguments, "signalingProfileId")),
+      WideFromUtf8(StringValue(arguments, "rendezvousUrl"))};
   for (const auto& key : context->property_keys) {
     context->key_pointers.push_back(key.c_str());
   }
@@ -382,6 +386,9 @@ void WindowsLanDiscoveryBridge::OnBrowseResult(BrowseContext* context,
         }
         PostUpdate();
       } else {
+        // InterfaceIndex 0 asks WinDNS to resolve on every eligible interface.
+        // The instance name remains the de-duplication key across Wi-Fi,
+        // Ethernet and VPN adapters.
         StartResolve(service_name, 0, context->generation);
       }
     }
@@ -452,6 +459,9 @@ void WindowsLanDiscoveryBridge::OnResolveResult(
     device.path = Property(instance, L"path", "/ws/signaling");
     device.version = Property(instance, L"v", "1");
     device.capabilities = Property(instance, L"cap");
+    device.platform = Property(instance, L"platform", "unknown");
+    device.signaling_profile_id = Property(instance, L"signal");
+    device.rendezvous_url = Property(instance, L"signalUrl");
     if (!device.id.empty() && !device.host.empty() && device.port > 0) {
       std::lock_guard<std::mutex> lock(mutex_);
       resolved_ids_[context->query_name] = device.id;
@@ -601,6 +611,11 @@ void WindowsLanDiscoveryBridge::EmitDevices() {
           {EncodableValue("version"), EncodableValue(device.version)},
           {EncodableValue("capabilities"),
            EncodableValue(device.capabilities)},
+          {EncodableValue("platform"), EncodableValue(device.platform)},
+          {EncodableValue("signalingProfileId"),
+           EncodableValue(device.signaling_profile_id)},
+          {EncodableValue("rendezvousUrl"),
+           EncodableValue(device.rendezvous_url)},
       });
     }
   }

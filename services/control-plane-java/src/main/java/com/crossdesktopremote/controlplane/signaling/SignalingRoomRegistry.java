@@ -1,11 +1,13 @@
 package com.crossdesktopremote.controlplane.signaling;
 
 import java.net.InetSocketAddress;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -27,6 +29,7 @@ final class SignalingRoomRegistry {
 	private final ConcurrentMap<String, Room> rooms = new ConcurrentHashMap<>();
 	private final ConcurrentMap<String, AttemptWindow> invitationFailedAttempts = new ConcurrentHashMap<>();
 	private final ConcurrentMap<String, AttemptWindow> sourceFailedAttempts = new ConcurrentHashMap<>();
+	private final SecureRandom secureRandom = new SecureRandom();
 	private final LongSupplier currentTimeMillis;
 	private final long roomTtlMillis;
 	private final long attemptWindowMillis;
@@ -66,6 +69,37 @@ final class SignalingRoomRegistry {
 		return role == SignalingRole.HOST
 				? registerHost(roomCode, session)
 				: joinController(roomCode, session);
+	}
+
+	HostInvitation createHostInvitation(WebSocketSession session) {
+		for (var attempt = 0; attempt < 100; attempt++) {
+			var roomCode = String.format("%06d", secureRandom.nextInt(900_000) + 100_000);
+			var room = Room.withHost(session, currentTimeMillis.getAsLong());
+			if (rooms.putIfAbsent(roomCode, room) == null) {
+				return invitation(roomCode, room);
+			}
+		}
+		throw new IllegalStateException("Unable to allocate a unique invitation code");
+	}
+
+	synchronized Optional<HostInvitation> rotateHostInvitation(
+			String roomCode,
+			WebSocketSession session) {
+		var current = rooms.get(roomCode);
+		if (current == null || !current.invalidateForRotation(session)) {
+			return Optional.empty();
+		}
+		rooms.remove(roomCode, current);
+		return Optional.of(createHostInvitation(session));
+	}
+
+	private HostInvitation invitation(String roomCode, Room room) {
+		var expiresAt = room.createdAtMillis() + roomTtlMillis;
+		return new HostInvitation(
+				roomCode,
+				room.leaseId(),
+				expiresAt,
+				Math.max(0, expiresAt - currentTimeMillis.getAsLong()));
 	}
 
 	Optional<WebSocketSession> peer(String roomCode, SignalingRole role) {
@@ -203,6 +237,13 @@ final class SignalingRoomRegistry {
 		return remoteAddress.getHostString();
 	}
 
+	record HostInvitation(
+			String roomCode,
+			String leaseId,
+			long expiresAtUnixMillis,
+			long expiresInMillis) {
+	}
+
 	enum JoinResult {
 		JOINED,
 		INVALID_ROOM,
@@ -215,7 +256,9 @@ final class SignalingRoomRegistry {
 	private static final class Room {
 		private final Map<SignalingRole, WebSocketSession> participants = new EnumMap<>(SignalingRole.class);
 		private final long createdAtMillis;
+		private final String leaseId = UUID.randomUUID().toString();
 		private boolean controllerCodeConsumed;
+		private boolean invitationInvalidated;
 
 		private Room(WebSocketSession host, long createdAtMillis) {
 			this.createdAtMillis = createdAtMillis;
@@ -227,6 +270,9 @@ final class SignalingRoomRegistry {
 		}
 
 		synchronized JoinResult joinController(WebSocketSession session) {
+			if (invitationInvalidated) {
+				return JoinResult.INVALID_ROOM;
+			}
 			if (controllerCodeConsumed) {
 				return JoinResult.CODE_CONSUMED;
 			}
@@ -255,7 +301,8 @@ final class SignalingRoomRegistry {
 		}
 
 		synchronized boolean isExpired(long nowMillis, long ttlMillis) {
-			return !controllerCodeConsumed && nowMillis - createdAtMillis >= ttlMillis;
+			return invitationInvalidated ||
+					(!controllerCodeConsumed && nowMillis - createdAtMillis >= ttlMillis);
 		}
 
 		synchronized boolean isEmpty() {
@@ -264,6 +311,18 @@ final class SignalingRoomRegistry {
 
 		synchronized long createdAtMillis() {
 			return createdAtMillis;
+		}
+
+		synchronized String leaseId() {
+			return leaseId;
+		}
+
+		synchronized boolean invalidateForRotation(WebSocketSession host) {
+			if (participants.get(SignalingRole.HOST) != host || controllerCodeConsumed) {
+				return false;
+			}
+			invitationInvalidated = true;
+			return true;
 		}
 	}
 

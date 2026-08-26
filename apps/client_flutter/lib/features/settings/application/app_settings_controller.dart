@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
 import 'package:flutter/foundation.dart';
@@ -11,6 +13,8 @@ class AppSettingsController extends ChangeNotifier {
   static const _pointerSensitivityKey = 'settings.pointer_sensitivity';
   static const _scrollSensitivityKey = 'settings.scroll_sensitivity';
   static const _keyboardModeKey = 'settings.keyboard_mode';
+  static const _textInputModeKey = 'settings.text_input_mode';
+  static const _signalingServerUrlKey = 'settings.signaling_server_url';
   static const _lanDiscoveryKey = 'settings.lan_discovery';
   static const _historyEnabledKey = 'settings.session_history_enabled';
   static const _historyLimitKey = 'settings.session_history_limit';
@@ -33,6 +37,10 @@ class AppSettingsController extends ChangeNotifier {
   double pointerSensitivity = 1.25;
   double scrollSensitivity = 2;
   RemoteKeyboardMode keyboardMode = RemoteKeyboardMode.system;
+  RemoteTextInputMode textInputMode = RemoteTextInputMode.localIme;
+  String signalingServerUrl = Platform.isMacOS
+      ? 'ws://127.0.0.1:8080/ws/signaling'
+      : '';
   bool lanDiscoveryEnabled = true;
   bool sessionHistoryEnabled = true;
   int sessionHistoryLimit = 50;
@@ -44,6 +52,7 @@ class AppSettingsController extends ChangeNotifier {
     pointerSensitivity: pointerSensitivity,
     scrollSensitivity: scrollSensitivity,
     keyboardMode: keyboardMode,
+    textInputMode: textInputMode,
   );
 
   Future<void> load() async {
@@ -68,6 +77,13 @@ class AppSettingsController extends ChangeNotifier {
       (value) => value.name == (storedKeyboardMode ?? keyboardMode.name),
       orElse: () => RemoteKeyboardMode.system,
     );
+    final storedTextInputMode = await store.getString(_textInputModeKey);
+    textInputMode = RemoteTextInputMode.values.firstWhere(
+      (value) => value.name == (storedTextInputMode ?? textInputMode.name),
+      orElse: () => RemoteTextInputMode.localIme,
+    );
+    signalingServerUrl =
+        await store.getString(_signalingServerUrlKey) ?? signalingServerUrl;
     lanDiscoveryEnabled = await store.getBool(_lanDiscoveryKey) ?? true;
     sessionHistoryEnabled = await store.getBool(_historyEnabledKey) ?? true;
     sessionHistoryLimit = (await store.getInt(_historyLimitKey) ?? 50).clamp(
@@ -114,6 +130,23 @@ class AppSettingsController extends ChangeNotifier {
     keyboardMode = value;
     notifyListeners();
     await _persist((store) => store.setString(_keyboardModeKey, value.name));
+  }
+
+  Future<void> setTextInputMode(RemoteTextInputMode value) async {
+    if (textInputMode == value) return;
+    textInputMode = value;
+    notifyListeners();
+    await _persist((store) => store.setString(_textInputModeKey, value.name));
+  }
+
+  Future<void> setSignalingServerUrl(String value) async {
+    final normalized = value.trim();
+    if (signalingServerUrl == normalized) return;
+    signalingServerUrl = normalized;
+    notifyListeners();
+    await _persist(
+      (store) => store.setString(_signalingServerUrlKey, normalized),
+    );
   }
 
   Future<void> setLanDiscoveryEnabled(bool value) async {

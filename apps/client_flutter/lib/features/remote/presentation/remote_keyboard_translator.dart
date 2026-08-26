@@ -39,6 +39,7 @@ class RemoteKeyboardTranslator {
   List<RemoteKeyboardAction> translate(
     KeyEvent event, {
     required List<String> modifiers,
+    bool physicalOnly = false,
   }) {
     if (event is KeyUpEvent) {
       final pressed = _pressed.remove(event.physicalKey);
@@ -59,7 +60,8 @@ class RemoteKeyboardTranslator {
       const {'command', 'control', 'option'}.contains,
     );
     final requiresPhysicalKey =
-        key != null && (shortcut || character == null || character.isEmpty);
+        key != null &&
+        (physicalOnly || shortcut || character == null || character.isEmpty);
 
     if (requiresPhysicalKey) {
       final physicalHidUsage = event.physicalKey.usbHidUsage;

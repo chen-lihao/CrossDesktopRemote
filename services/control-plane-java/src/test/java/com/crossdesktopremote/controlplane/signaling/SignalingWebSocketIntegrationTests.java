@@ -26,6 +26,25 @@ class SignalingWebSocketIntegrationTests {
 	private int port;
 
 	@Test
+	void allocatesAndRotatesAHostInvitationWithoutReconnecting() throws Exception {
+		var hostMessages = new RecordingListener();
+		var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+
+		var host = connectHost(client, hostMessages);
+		var ready = hostMessages.next();
+		assertThat(ready).contains("\"type\":\"ready\"");
+		assertThat(ready).contains("\"invitation-rotation\"");
+		var initialCode = roomCode(ready);
+
+		host.sendText("{\"type\":\"rotate-invitation\",\"requestId\":\"test-1\"}", true).join();
+		var rotated = hostMessages.next();
+		assertThat(rotated).contains("\"type\":\"invitation-rotated\"");
+		assertThat(rotated).contains("\"requestId\":\"test-1\"");
+		assertThat(roomCode(rotated)).isNotEqualTo(initialCode);
+		host.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+	}
+
+	@Test
 	void relaysAllowedMessagesBetweenHostAndController() throws Exception {
 		var hostMessages = new RecordingListener();
 		var controllerMessages = new RecordingListener();
@@ -80,6 +99,19 @@ class SignalingWebSocketIntegrationTests {
 				.connectTimeout(Duration.ofSeconds(5))
 				.buildAsync(URI.create("ws://127.0.0.1:" + port + "/ws/signaling?room=" + room + "&role=" + role), listener)
 				.join();
+	}
+
+	private WebSocket connectHost(HttpClient client, RecordingListener listener) {
+		return client.newWebSocketBuilder()
+				.connectTimeout(Duration.ofSeconds(5))
+				.buildAsync(URI.create("ws://127.0.0.1:" + port + "/ws/signaling?role=host&protocol=2"), listener)
+				.join();
+	}
+
+	private String roomCode(String message) {
+		var marker = "\"room\":\"";
+		var start = message.indexOf(marker);
+		return message.substring(start + marker.length(), start + marker.length() + 6);
 	}
 
 	private static final class RecordingListener implements WebSocket.Listener {

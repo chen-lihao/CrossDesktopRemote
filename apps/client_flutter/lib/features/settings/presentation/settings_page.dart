@@ -1,9 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
-import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter/material.dart';
 
@@ -105,6 +106,28 @@ class SettingsPage extends StatelessWidget {
                           ],
                         ),
                       ),
+                      if (Platform.isMacOS ||
+                          Platform.isWindows ||
+                          Platform.isLinux)
+                        ListTile(
+                          title: const Text('默认文字输入方式'),
+                          subtitle: Text(settings.textInputMode.description),
+                          trailing: DropdownButton<RemoteTextInputMode>(
+                            value: settings.textInputMode,
+                            onChanged: (value) {
+                              if (value != null) {
+                                unawaited(settings.setTextInputMode(value));
+                              }
+                            },
+                            items: [
+                              for (final mode in RemoteTextInputMode.values)
+                                DropdownMenuItem(
+                                  value: mode,
+                                  child: Text(mode.label),
+                                ),
+                            ],
+                          ),
+                        ),
                       _SliderSetting(
                         label: '指针灵敏度',
                         value: settings.pointerSensitivity,
@@ -130,6 +153,15 @@ class SettingsPage extends StatelessWidget {
                     title: '连接与发现',
                     icon: Icons.lan_outlined,
                     children: [
+                      ListTile(
+                        title: const Text('信令服务器'),
+                        subtitle: SelectableText(
+                          settings.signalingServerUrl.isEmpty
+                              ? '尚未配置，请在“设备”页输入'
+                              : settings.signalingServerUrl,
+                        ),
+                        leading: const Icon(Icons.dns_outlined),
+                      ),
                       SwitchListTile(
                         title: const Text('局域网设备发现'),
                         subtitle: const Text('自动显示同一局域网内正在共享的设备'),

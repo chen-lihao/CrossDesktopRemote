@@ -60,6 +60,35 @@ void main() {
     expect(translator.isPressed(PhysicalKeyboardKey.keyC), isFalse);
   });
 
+  test('remote IME mode sends printable keys as balanced HID events', () {
+    final translator = RemoteKeyboardTranslator();
+
+    final down = translator.translate(
+      const KeyDownEvent(
+        physicalKey: PhysicalKeyboardKey.keyN,
+        logicalKey: LogicalKeyboardKey.keyN,
+        character: 'n',
+        timeStamp: Duration.zero,
+      ),
+      modifiers: const [],
+      physicalOnly: true,
+    );
+    final up = translator.translate(
+      const KeyUpEvent(
+        physicalKey: PhysicalKeyboardKey.keyN,
+        logicalKey: LogicalKeyboardKey.keyN,
+        timeStamp: Duration.zero,
+      ),
+      modifiers: const [],
+      physicalOnly: true,
+    );
+
+    expect(down.single.type, RemoteKeyboardActionType.key);
+    expect(down.single.key, 'KeyN');
+    expect(down.single.physicalHidUsage, isNonZero);
+    expect(up.single.phase, 'up');
+  });
+
   test('focus loss releases all physical keys', () {
     final translator = RemoteKeyboardTranslator();
     translator.translate(

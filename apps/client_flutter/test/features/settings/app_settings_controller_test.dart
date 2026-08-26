@@ -13,6 +13,10 @@ void main() {
       await controller.setDefaultQuality(RemoteQualityProfile.ultra);
       await controller.setPointerSensitivity(9);
       await controller.setKeyboardMode(RemoteKeyboardMode.compact);
+      await controller.setTextInputMode(RemoteTextInputMode.remoteIme);
+      await controller.setSignalingServerUrl(
+        ' ws://192.168.1.10:8080/ws/signaling ',
+      );
       await controller.setSessionHistoryLimit(1);
 
       expect(controller.loaded, isTrue);
@@ -20,6 +24,14 @@ void main() {
       expect(controller.pointerSensitivity, 2.5);
       expect(controller.keyboardMode, RemoteKeyboardMode.compact);
       expect(controller.inputSettings.keyboardMode, RemoteKeyboardMode.compact);
+      expect(
+        controller.inputSettings.textInputMode,
+        RemoteTextInputMode.remoteIme,
+      );
+      expect(
+        controller.signalingServerUrl,
+        'ws://192.168.1.10:8080/ws/signaling',
+      );
       expect(controller.sessionHistoryLimit, 10);
     },
   );

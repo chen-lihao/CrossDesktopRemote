@@ -225,7 +225,10 @@ private final class AppleLanDiscoveryBridge: NSObject, FlutterStreamHandler {
       "port": Int(UInt16(bigEndian: port)),
       "path": metadata["path"] ?? "/ws/signaling",
       "version": metadata["v"] ?? "1",
-      "capabilities": metadata["cap"] ?? ""
+      "capabilities": metadata["cap"] ?? "",
+      "platform": metadata["platform"] ?? "unknown",
+      "signalingProfileId": metadata["signal"] ?? "",
+      "rendezvousUrl": metadata["signalUrl"] ?? ""
     ]
     emitDevices()
   }

@@ -161,11 +161,17 @@ class RemoteSessionController extends ChangeNotifier {
   String? _renderedDisplayId;
   String? _pendingDisplayId;
   String? _remoteDeviceId;
+  String? _remoteHostPlatform;
+  bool _remoteSupportsPhysicalKeyboard = false;
   String? _controlError;
   String? _error;
   DateTime? _lastControlUnavailableNotice;
   DateTime? _automaticQualitySuppressedUntil;
   DateTime? _hostInvitationExpiresAt;
+  String? _hostInvitationCode;
+  String? _hostInvitationLeaseId;
+  bool _supportsInvitationRotation = false;
+  Completer<void>? _invitationRotationCompleter;
   RemoteQualityProfile _selectedQuality;
   RemoteQualityProfile? _queuedQualityProfile;
   int? _actualVideoWidth;
@@ -193,6 +199,8 @@ class RemoteSessionController extends ChangeNotifier {
   String? get error => _error;
   String? get controlError => _controlError;
   DateTime? get hostInvitationExpiresAt => _hostInvitationExpiresAt;
+  String? get hostInvitationCode => _hostInvitationCode;
+  bool get supportsInvitationRotation => _supportsInvitationRotation;
   bool get screenCaptureGranted => _screenCaptureGranted;
   bool? get accessibilityGranted => _accessibilityGranted;
   RemoteQualityProfile get selectedQuality => _selectedQuality;
@@ -240,6 +248,8 @@ class RemoteSessionController extends ChangeNotifier {
   String? get selectedDisplayId => _selectedDisplayId;
   String? get renderedDisplayId => _renderedDisplayId;
   String? get remoteDeviceId => _remoteDeviceId;
+  String? get remoteHostPlatform => _remoteHostPlatform;
+  bool get remoteSupportsPhysicalKeyboard => _remoteSupportsPhysicalKeyboard;
   RemoteColorDiagnostics? get colorDiagnostics => _colorDiagnostics;
   RemoteFrameColorDiagnostics? get decoderOutputColorDiagnostics =>
       _decoderOutputColorDiagnostics;
@@ -316,6 +326,9 @@ class RemoteSessionController extends ChangeNotifier {
     _closing = false;
     _error = null;
     _hostInvitationExpiresAt = null;
+    _hostInvitationCode = null;
+    _hostInvitationLeaseId = null;
+    _supportsInvitationRotation = false;
     if (role == RemoteRole.controller) {
       _controlError = null;
     }
@@ -352,6 +365,33 @@ class RemoteSessionController extends ChangeNotifier {
       return;
     }
     await _authorizePeer();
+  }
+
+  Future<void> rotateHostInvitation() async {
+    if (role != RemoteRole.host ||
+        state != RemoteSessionState.waitingForPeer ||
+        !_signaling.isConnected) {
+      throw StateError('当前无法刷新连接码');
+    }
+    if (!_supportsInvitationRotation) {
+      throw UnsupportedError('信令服务版本过旧，请重新构建并启动 Java 服务');
+    }
+    if (_invitationRotationCompleter != null) return;
+    final completer = Completer<void>();
+    _invitationRotationCompleter = completer;
+    final requestId = DateTime.now().microsecondsSinceEpoch.toString();
+    _signaling.send({
+      'type': 'rotate-invitation',
+      'requestId': requestId,
+      if (_hostInvitationLeaseId != null) 'leaseId': _hostInvitationLeaseId,
+    });
+    try {
+      await completer.future.timeout(const Duration(seconds: 8));
+    } finally {
+      if (identical(_invitationRotationCompleter, completer)) {
+        _invitationRotationCompleter = null;
+      }
+    }
   }
 
   Future<void> reject() async {
@@ -1072,6 +1112,10 @@ class RemoteSessionController extends ChangeNotifier {
       case 'host-status':
         final previousInputAccess = _accessibilityGranted;
         _remoteDeviceId = message['deviceId'] as String?;
+        _remoteHostPlatform = message['hostPlatform'] as String?;
+        _remoteSupportsPhysicalKeyboard = wireBool(
+          message['supportsPhysicalKeyboard'],
+        );
         _screenCaptureGranted = wireBool(message['screenCaptureGranted']);
         _accessibilityGranted = wireBool(message['accessibilityGranted']);
         if (_accessibilityGranted == true) {
@@ -1402,6 +1446,10 @@ class RemoteSessionController extends ChangeNotifier {
       'type': 'host-status',
       'version': 2,
       'deviceId': Platform.localHostname.toLowerCase(),
+      'hostPlatform': _hostPlatform.type.name,
+      'supportsUnicodeText': true,
+      'supportsPhysicalKeyboard':
+          _hostPlatform.type == HostPlatformType.windows,
       'screenCaptureGranted': _screenCaptureGranted,
       'accessibilityGranted': _accessibilityGranted == true,
       'inputReady': _accessibilityGranted == true,
@@ -1758,6 +1806,15 @@ class RemoteSessionController extends ChangeNotifier {
     switch (message['type']) {
       case 'ready':
         if (role == RemoteRole.host) {
+          _hostInvitationCode = message['room'] as String?;
+          _hostInvitationLeaseId = message['invitationLeaseId'] as String?;
+          final capabilities =
+              (message['capabilities'] as List<dynamic>? ?? const [])
+                  .whereType<String>()
+                  .toSet();
+          _supportsInvitationRotation = capabilities.contains(
+            'invitation-rotation',
+          );
           final rawRemaining = message['invitationExpiresInMillis'];
           final rawExpiry = message['invitationExpiresAtUnixMillis'];
           _hostInvitationExpiresAt = rawRemaining is num
@@ -1769,6 +1826,27 @@ class RemoteSessionController extends ChangeNotifier {
               : null;
         }
         _setState(RemoteSessionState.waitingForPeer, '已进入房间，等待另一台设备');
+      case 'invitation-rotated':
+        _hostInvitationCode = message['room'] as String?;
+        _hostInvitationLeaseId = message['invitationLeaseId'] as String?;
+        final rawRemaining = message['invitationExpiresInMillis'];
+        final rawExpiry = message['invitationExpiresAtUnixMillis'];
+        _hostInvitationExpiresAt = rawRemaining is num
+            ? DateTime.now().add(
+                Duration(milliseconds: rawRemaining.toInt().clamp(0, 300000)),
+              )
+            : rawExpiry is num
+            ? DateTime.fromMillisecondsSinceEpoch(rawExpiry.toInt())
+            : null;
+        _invitationRotationCompleter?.complete();
+        _invitationRotationCompleter = null;
+        notifyListeners();
+        _emitNotice('连接码已刷新', level: RemoteNoticeLevel.success);
+      case 'invitation-rotation-error':
+        final error = StateError('连接码当前无法刷新');
+        _invitationRotationCompleter?.completeError(error);
+        _invitationRotationCompleter = null;
+        _emitNotice(error.message, level: RemoteNoticeLevel.error);
       case 'peer-joined':
         _hostInvitationExpiresAt = null;
         if (role == RemoteRole.host) {
@@ -2720,6 +2798,11 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   void _handleSignalingClosed(int? code, String? reason) {
+    final rotation = _invitationRotationCompleter;
+    _invitationRotationCompleter = null;
+    if (rotation != null && !rotation.isCompleted) {
+      rotation.completeError(StateError('信令连接已断开'));
+    }
     if (!_closing) {
       final reasonParts = reason?.split(':') ?? const <String>[];
       final reasonCode = reasonParts.firstOrNull;
@@ -2736,6 +2819,8 @@ class RemoteSessionController extends ChangeNotifier {
         'RATE_LIMITED_SOURCE' => '当前设备尝试连接过于频繁，请$retryLabel',
         'RATE_LIMITED' => '连接码尝试过多，请稍后再试',
         'ROLE_OCCUPIED' => '该设备角色已经连接',
+        'Invalid room or role' when role == RemoteRole.host =>
+          '信令服务版本过旧，请更新并重启 Java 控制平面',
         _ => '信令连接已断开',
       };
       _setState(RemoteSessionState.disconnected, message);
@@ -2801,7 +2886,12 @@ class RemoteSessionController extends ChangeNotifier {
     _renderedDisplayId = null;
     _pendingDisplayId = null;
     _remoteDeviceId = null;
+    _remoteHostPlatform = null;
+    _remoteSupportsPhysicalKeyboard = false;
     _hostInvitationExpiresAt = null;
+    _hostInvitationCode = null;
+    _hostInvitationLeaseId = null;
+    _supportsInvitationRotation = false;
     _decoderOutputColorDiagnostics = null;
     _renderOutputColorDiagnostics = null;
     _receiverColorConversion = null;

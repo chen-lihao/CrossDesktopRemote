@@ -47,12 +47,10 @@ class _DevicesPageState extends State<DevicesPage> {
   RemoteSessionController get _session => widget.session;
 
   late final TextEditingController _serverController = TextEditingController(
-    text: _role == RemoteRole.host
-        ? 'ws://127.0.0.1:8080/ws/signaling'
-        : 'ws://<设备-IP>:8080/ws/signaling',
+    text: widget.settings.signalingServerUrl,
   );
   late final TextEditingController _roomController = TextEditingController(
-    text: _role == RemoteRole.host ? generateRoomCode() : '',
+    text: '',
   );
   StreamSubscription<List<DiscoveredDevice>>? _discoverySubscription;
   StreamSubscription<RemoteNotice>? _noticeSubscription;
@@ -64,6 +62,8 @@ class _DevicesPageState extends State<DevicesPage> {
   bool _discoveryActive = false;
   bool _isPublishing = false;
   bool _publicationBusy = false;
+  bool _serverTesting = false;
+  String? _serverTestStatus;
   bool _desktopFullScreen = false;
   bool _windowModeChanging = false;
   final GlobalKey _remoteDesktopPanelKey = GlobalKey(
@@ -108,6 +108,15 @@ class _DevicesPageState extends State<DevicesPage> {
   }
 
   void _handleSettingsChanged() {
+    if (!_sessionIsActive &&
+        _serverController.text != widget.settings.signalingServerUrl) {
+      _serverController.value = TextEditingValue(
+        text: widget.settings.signalingServerUrl,
+        selection: TextSelection.collapsed(
+          offset: widget.settings.signalingServerUrl.length,
+        ),
+      );
+    }
     if (_role != RemoteRole.controller) {
       if (mounted) setState(() {});
       return;
@@ -203,8 +212,55 @@ class _DevicesPageState extends State<DevicesPage> {
     }
   }
 
+  Future<void> _testSignalingServer() async {
+    if (_serverTesting) return;
+    setState(() {
+      _serverTesting = true;
+      _serverTestStatus = null;
+    });
+    final stopwatch = Stopwatch()..start();
+    try {
+      final endpoint = Uri.parse(_serverController.text.trim());
+      if (!const {'ws', 'wss'}.contains(endpoint.scheme) ||
+          endpoint.host.isEmpty) {
+        throw const FormatException('信令地址必须使用 ws:// 或 wss://');
+      }
+      final port = endpoint.hasPort
+          ? endpoint.port
+          : endpoint.scheme == 'wss'
+          ? 443
+          : 80;
+      final socket = await Socket.connect(
+        endpoint.host,
+        port,
+        timeout: const Duration(seconds: 4),
+      );
+      socket.destroy();
+      stopwatch.stop();
+      _serverTestStatus = '信令服务器网络可达 · ${stopwatch.elapsedMilliseconds} ms';
+      await widget.settings.setSignalingServerUrl(endpoint.toString());
+      AppMessenger.show(_serverTestStatus!, level: AppMessageLevel.success);
+    } catch (error) {
+      _serverTestStatus = '信令服务器不可达：$error';
+      AppMessenger.show(_serverTestStatus!, level: AppMessageLevel.error);
+    } finally {
+      if (mounted) setState(() => _serverTesting = false);
+    }
+  }
+
   void _selectDevice(DiscoveredDevice device) {
-    _serverController.text = device.signalingUrl;
+    final currentServer = _serverController.text.trim();
+    if (currentServer.isEmpty && device.rendezvousUrl.isNotEmpty) {
+      _serverController.text = device.rendezvousUrl;
+      unawaited(widget.settings.setSignalingServerUrl(device.rendezvousUrl));
+    } else if (currentServer.isNotEmpty &&
+        device.signalingProfileId.isNotEmpty &&
+        device.signalingProfileId != signalingProfileIdForUrl(currentServer)) {
+      AppMessenger.show(
+        '${device.name} 使用另一个信令服务器，已保留当前配置',
+        level: AppMessageLevel.warning,
+      );
+    }
     setState(() => _discoveryError = null);
     AppMessenger.show('已选择 ${device.name}', level: AppMessageLevel.success);
   }
@@ -250,16 +306,20 @@ class _DevicesPageState extends State<DevicesPage> {
       return;
     }
 
+    final invitationCode = _session.hostInvitationCode;
+    if (invitationCode != null && invitationCode != _roomController.text) {
+      _roomController.text = invitationCode;
+    }
+
     final shouldRestart = _hostSharing.observeTransition(
       previous: previousState,
       next: _session.state,
     );
-    if (previousState != RemoteSessionState.idle &&
-        {
-          RemoteSessionState.disconnected,
-          RemoteSessionState.failed,
-        }.contains(_session.state)) {
-      _roomController.text = generateRoomCode();
+    if ({
+      RemoteSessionState.disconnected,
+      RemoteSessionState.failed,
+    }.contains(_session.state)) {
+      _roomController.clear();
     }
     if (shouldRestart) unawaited(_restartHostSharing());
     _reconcileInvitationLease();
@@ -290,14 +350,14 @@ class _DevicesPageState extends State<DevicesPage> {
         _session.state != RemoteSessionState.waitingForPeer) {
       return;
     }
-    final previousCode = _roomController.text;
-    var nextCode = generateRoomCode();
-    while (nextCode == previousCode) {
-      nextCode = generateRoomCode();
+    AppMessenger.show('正在向信令服务器申请新连接码', level: AppMessageLevel.info);
+    try {
+      await _session.rotateHostInvitation();
+      final code = _session.hostInvitationCode;
+      if (code != null) _roomController.text = code;
+    } catch (error) {
+      AppMessenger.show('刷新连接码失败：$error', level: AppMessageLevel.error);
     }
-    _roomController.text = nextCode;
-    AppMessenger.show('正在更新一次性连接码', level: AppMessageLevel.info);
-    await _connect(userInitiated: false);
   }
 
   void _reconcileHostPublication() {
@@ -324,6 +384,21 @@ class _DevicesPageState extends State<DevicesPage> {
         throw UnsupportedError('当前平台暂不支持局域网设备发布');
       }
       final endpoint = Uri.parse(_serverController.text.trim());
+      var advertisedEndpoint = endpoint;
+      if (const {'127.0.0.1', 'localhost', '::1'}.contains(endpoint.host)) {
+        var addresses = _localAddresses;
+        if (addresses == null || addresses.isEmpty) {
+          addresses = await widget.addressService.listUsableAddresses();
+          if (mounted) _localAddresses = addresses;
+        }
+        final address =
+            addresses.where((value) => value.recommended).firstOrNull ??
+            addresses.firstOrNull;
+        if (address == null) {
+          throw StateError('信令服务器使用本机回环地址，但未找到可发布的局域网地址');
+        }
+        advertisedEndpoint = endpoint.replace(host: address.address);
+      }
       await widget.discoveryService.publishHost(
         HostAdvertisement(
           deviceId: Platform.localHostname.toLowerCase(),
@@ -334,6 +409,12 @@ class _DevicesPageState extends State<DevicesPage> {
               ? 443
               : 80,
           path: endpoint.path.isEmpty ? '/ws/signaling' : endpoint.path,
+          version: '2',
+          platform: Platform.operatingSystem,
+          signalingProfileId: signalingProfileIdForUrl(
+            advertisedEndpoint.toString(),
+          ),
+          rendezvousUrl: advertisedEndpoint.toString(),
         ),
       );
       _isPublishing = true;
@@ -436,6 +517,8 @@ class _DevicesPageState extends State<DevicesPage> {
       onDesktopFullScreenChanged: _setDesktopFullScreen,
       onKeyboardModeChanged: (mode) =>
           unawaited(widget.settings.setKeyboardMode(mode)),
+      onTextInputModeChanged: (mode) =>
+          unawaited(widget.settings.setTextInputMode(mode)),
     );
   }
 
@@ -533,6 +616,12 @@ class _DevicesPageState extends State<DevicesPage> {
                           onRefreshDiscovery: _refreshDiscovery,
                           onRefreshRoomCode: _invitationLease.rotateNow,
                           onSelectDevice: _selectDevice,
+                          onServerChanged: (value) => unawaited(
+                            widget.settings.setSignalingServerUrl(value),
+                          ),
+                          onTestServer: _testSignalingServer,
+                          serverTesting: _serverTesting,
+                          serverTestStatus: _serverTestStatus,
                         ),
                         if (_role == RemoteRole.controller &&
                             _session.hasRemoteVideo) ...[
@@ -583,6 +672,10 @@ class _ConnectionCard extends StatelessWidget {
     required this.onRefreshDiscovery,
     required this.onRefreshRoomCode,
     required this.onSelectDevice,
+    required this.onServerChanged,
+    required this.onTestServer,
+    required this.serverTesting,
+    required this.serverTestStatus,
   });
 
   final RemoteRole role;
@@ -606,6 +699,10 @@ class _ConnectionCard extends StatelessWidget {
   final Future<void> Function() onRefreshDiscovery;
   final Future<void> Function() onRefreshRoomCode;
   final ValueChanged<DiscoveredDevice> onSelectDevice;
+  final ValueChanged<String> onServerChanged;
+  final Future<void> Function() onTestServer;
+  final bool serverTesting;
+  final String? serverTestStatus;
 
   bool get _isActive => role == RemoteRole.host
       ? hostSharingRequested
@@ -659,11 +756,13 @@ class _ConnectionCard extends StatelessWidget {
             Expanded(child: Text(invitationStatus)),
             TextButton.icon(
               key: const ValueKey('refreshRoomCodeButton'),
-              onPressed:
-                  hostSharingRequested &&
-                      session.state == RemoteSessionState.waitingForPeer &&
-                      !invitationRefreshing
+              onPressed: invitationRefreshing
+                  ? null
+                  : hostSharingRequested &&
+                        session.state == RemoteSessionState.waitingForPeer
                   ? onRefreshRoomCode
+                  : !_isActive
+                  ? onConnect
                   : null,
               icon: invitationRefreshing
                   ? const SizedBox.square(
@@ -671,25 +770,41 @@ class _ConnectionCard extends StatelessWidget {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.refresh, size: 18),
-              label: const Text('刷新连接码'),
+              label: Text(roomController.text.isEmpty ? '生成连接码' : '刷新连接码'),
             ),
           ],
         ),
-        if (settings.showAdvancedNetwork) ...[
-          const SizedBox(height: 16),
-          TextField(
-            key: const ValueKey('signalingServerField'),
-            controller: serverController,
-            enabled: !_isActive,
-            autocorrect: false,
-            keyboardType: TextInputType.url,
-            decoration: const InputDecoration(
-              labelText: '本机信令地址',
-              prefixIcon: Icon(Icons.dns_outlined),
-            ),
-          ),
-          const SizedBox(height: 6),
-          const Text('127.0.0.1 仅供本机服务使用。'),
+        const SizedBox(height: 16),
+        TextField(
+          key: const ValueKey('signalingServerField'),
+          controller: serverController,
+          enabled: !_isActive,
+          onChanged: onServerChanged,
+          autocorrect: false,
+          keyboardType: TextInputType.url,
+          decoration:
+              const InputDecoration(
+                labelText: '信令服务器地址',
+                hintText: 'ws://192.168.1.10:8080/ws/signaling',
+                prefixIcon: Icon(Icons.dns_outlined),
+              ).copyWith(
+                suffixIcon: IconButton(
+                  tooltip: '测试信令服务器',
+                  onPressed: serverTesting ? null : onTestServer,
+                  icon: serverTesting
+                      ? const SizedBox.square(
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.network_ping),
+                ),
+              ),
+        ),
+        const SizedBox(height: 6),
+        const Text('控制端和被控端必须使用同一个信令服务器；127.0.0.1 仅表示当前设备。'),
+        if (serverTestStatus != null) ...[
+          const SizedBox(height: 4),
+          Text(serverTestStatus!),
         ],
       ],
     );
@@ -758,13 +873,30 @@ class _ConnectionCard extends StatelessWidget {
           key: const ValueKey('signalingServerField'),
           controller: serverController,
           enabled: !_isActive,
+          onChanged: onServerChanged,
           autocorrect: false,
           keyboardType: TextInputType.url,
-          decoration: const InputDecoration(
-            labelText: '手动信令地址',
-            prefixIcon: Icon(Icons.dns_outlined),
-          ),
+          decoration:
+              const InputDecoration(
+                labelText: '手动信令地址',
+                prefixIcon: Icon(Icons.dns_outlined),
+              ).copyWith(
+                suffixIcon: IconButton(
+                  tooltip: '测试信令服务器',
+                  onPressed: serverTesting ? null : onTestServer,
+                  icon: serverTesting
+                      ? const SizedBox.square(
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.network_ping),
+                ),
+              ),
         ),
+        if (serverTestStatus != null) ...[
+          const SizedBox(height: 4),
+          Text(serverTestStatus!),
+        ],
         const SizedBox(height: 12),
         TextField(
           key: const ValueKey('roomCodeField'),
@@ -1072,7 +1204,13 @@ class _NearbyDevices extends StatelessWidget {
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(Icons.devices_outlined),
                   title: Text(device.name),
-                  subtitle: Text('${device.host}:${device.port}'),
+                  subtitle: Text(
+                    [
+                      device.platform,
+                      if (device.signalingProfileId.isNotEmpty) '已声明信令配置',
+                      '${device.host}:${device.port}',
+                    ].join(' · '),
+                  ),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: enabled ? () => onSelect(device) : null,
                 ),

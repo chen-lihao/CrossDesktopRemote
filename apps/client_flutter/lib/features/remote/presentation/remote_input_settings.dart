@@ -11,6 +11,21 @@ enum RemoteKeyboardMode {
   };
 }
 
+enum RemoteTextInputMode {
+  localIme,
+  remoteIme;
+
+  String get label => switch (this) {
+    RemoteTextInputMode.localIme => '本机输入法',
+    RemoteTextInputMode.remoteIme => '被控端输入法',
+  };
+
+  String get description => switch (this) {
+    RemoteTextInputMode.localIme => '本机选词后发送 Unicode 文本',
+    RemoteTextInputMode.remoteIme => '发送物理按键，由被控端系统输入法选词',
+  };
+}
+
 @immutable
 class RemoteInputSettings {
   const RemoteInputSettings({
@@ -19,6 +34,7 @@ class RemoteInputSettings {
     this.scrollSensitivity = 2,
     this.dragLock = false,
     this.keyboardMode = RemoteKeyboardMode.system,
+    this.textInputMode = RemoteTextInputMode.localIme,
   });
 
   final RemotePointerMode pointerMode;
@@ -26,6 +42,7 @@ class RemoteInputSettings {
   final double scrollSensitivity;
   final bool dragLock;
   final RemoteKeyboardMode keyboardMode;
+  final RemoteTextInputMode textInputMode;
 
   RemoteInputSettings copyWith({
     RemotePointerMode? pointerMode,
@@ -33,11 +50,13 @@ class RemoteInputSettings {
     double? scrollSensitivity,
     bool? dragLock,
     RemoteKeyboardMode? keyboardMode,
+    RemoteTextInputMode? textInputMode,
   }) => RemoteInputSettings(
     pointerMode: pointerMode ?? this.pointerMode,
     pointerSensitivity: pointerSensitivity ?? this.pointerSensitivity,
     scrollSensitivity: scrollSensitivity ?? this.scrollSensitivity,
     dragLock: dragLock ?? this.dragLock,
     keyboardMode: keyboardMode ?? this.keyboardMode,
+    textInputMode: textInputMode ?? this.textInputMode,
   );
 }
