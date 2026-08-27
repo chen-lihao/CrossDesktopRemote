@@ -39,6 +39,8 @@ bool FlutterWindow::OnCreate() {
 
   host_bridge_ = std::make_unique<WindowsHostBridge>(
       flutter_controller_->engine()->messenger());
+  clipboard_bridge_ = std::make_unique<WindowsClipboardBridge>(
+      flutter_controller_->engine()->messenger(), GetHandle());
   lan_discovery_bridge_ = std::make_unique<WindowsLanDiscoveryBridge>(
       flutter_controller_->engine()->messenger(), GetHandle());
 
@@ -116,6 +118,7 @@ bool FlutterWindow::OnCreate() {
 void FlutterWindow::OnDestroy() {
   KillTimer(GetHandle(), kDeferredFlutterRedrawTimer);
   lan_discovery_bridge_.reset();
+  clipboard_bridge_.reset();
   host_bridge_.reset();
   window_channel_.reset();
   if (flutter_controller_) {
@@ -171,6 +174,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   if (lan_discovery_bridge_ &&
       lan_discovery_bridge_->HandleWindowMessage(message)) {
     return 0;
+  }
+  if (clipboard_bridge_) {
+    clipboard_bridge_->HandleWindowMessage(message);
   }
 
   // Give Flutter, including plugins, an opportunity to handle window messages.

@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package crossdesktop.v1;
 
+import "crossdesktop/v1/clipboard.proto";
+import "crossdesktop/v1/transfer.proto";
+
 option java_multiple_files = true;
 option java_package = "com.crossdesktopremote.protocol.v1";
 option java_outer_classname = "CapabilityProto";
@@ -54,4 +57,6 @@ message ClientCapabilities {
   DisplayCapability display = 5;
   bool supports_unattended_access = 6;
   bool supports_file_resume = 7;
+  ClipboardCapabilities clipboard = 8;
+  TransferCapabilities transfer = 9;
 }

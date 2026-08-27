@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package crossdesktop.v1;
+
+import "crossdesktop/v1/common.proto";
+
+option java_multiple_files = true;
+option java_package = "com.crossdesktopremote.protocol.v1";
+option java_outer_classname = "ClipboardProto";
+
+enum ClipboardFormat {
+  CLIPBOARD_FORMAT_UNSPECIFIED = 0;
+  CLIPBOARD_FORMAT_TEXT_UTF8 = 1;
+  CLIPBOARD_FORMAT_PNG = 2;
+  CLIPBOARD_FORMAT_FILE_LIST = 3;
+}
+
+message ClipboardCapabilities {
+  ProtocolVersion protocol_version = 1;
+  repeated ClipboardFormat formats = 2;
+  uint64 max_text_bytes = 3;
+  uint64 max_image_bytes = 4;
+  bool supports_delayed_rendering = 5;
+}
+
+message ClipboardItemDescriptor {
+  ClipboardFormat format = 1;
+  uint64 size_bytes = 2;
+  bytes sha256 = 3;
+}
+
+// An offer carries metadata only. The receiver requests the selected format
+// after permission and size checks, so connecting never copies clipboard
+// history automatically.
+message ClipboardOffer {
+  RequestContext context = 1;
+  string clipboard_id = 2;
+  uint64 revision = 3;
+  repeated ClipboardItemDescriptor items = 4;
+}
+
+message ClipboardDataRequest {
+  RequestContext context = 1;
+  string clipboard_id = 2;
+  ClipboardFormat format = 3;
+  uint64 offset = 4;
+  uint32 max_bytes = 5;
+}
+
+message ClipboardDataChunk {
+  RequestContext context = 1;
+  string clipboard_id = 2;
+  ClipboardFormat format = 3;
+  uint64 offset = 4;
+
+  // A WebRTC transport boundary must reject payloads larger than 16 KiB.
+  bytes payload = 5;
+  bool complete = 6;
+  ErrorStatus error = 7;
+}
+
+message ClipboardRelease {
+  RequestContext context = 1;
+  string clipboard_id = 2;
+}
+
+message ClipboardEnvelope {
+  oneof message {
+    ClipboardOffer offer = 1;
+    ClipboardDataRequest data_request = 2;
+    ClipboardDataChunk data_chunk = 3;
+    ClipboardRelease release = 4;
+  }
+}

@@ -76,6 +76,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _session = RemoteSessionController(
       role: _role,
       initialQuality: _settings.defaultQuality,
+      initialClipboardMode: _settings.clipboardSyncMode,
     );
     _history.attach(_session);
     _discovery = createLanDiscoveryService();
@@ -120,6 +121,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   void _handleSettingsChanged() {
     _session.setIdleQuality(_settings.defaultQuality);
+    _session.setClipboardMode(_settings.clipboardSyncMode);
   }
 
   void _handleDesktopFullScreenChanged(bool enabled) {

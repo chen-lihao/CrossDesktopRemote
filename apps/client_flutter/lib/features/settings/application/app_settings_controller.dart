@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
 import 'package:flutter/foundation.dart';
@@ -14,6 +15,7 @@ class AppSettingsController extends ChangeNotifier {
   static const _scrollSensitivityKey = 'settings.scroll_sensitivity';
   static const _keyboardModeKey = 'settings.keyboard_mode';
   static const _textInputModeKey = 'settings.text_input_mode';
+  static const _clipboardSyncModeKey = 'settings.clipboard_sync_mode';
   static const _signalingServerUrlKey = 'settings.signaling_server_url';
   static const _lanDiscoveryKey = 'settings.lan_discovery';
   static const _historyEnabledKey = 'settings.session_history_enabled';
@@ -38,6 +40,7 @@ class AppSettingsController extends ChangeNotifier {
   double scrollSensitivity = 2;
   RemoteKeyboardMode keyboardMode = RemoteKeyboardMode.system;
   RemoteTextInputMode textInputMode = RemoteTextInputMode.localIme;
+  ClipboardSyncMode clipboardSyncMode = ClipboardSyncMode.bidirectional;
   String signalingServerUrl = Platform.isMacOS
       ? 'ws://127.0.0.1:8080/ws/signaling'
       : '';
@@ -81,6 +84,11 @@ class AppSettingsController extends ChangeNotifier {
     textInputMode = RemoteTextInputMode.values.firstWhere(
       (value) => value.name == (storedTextInputMode ?? textInputMode.name),
       orElse: () => RemoteTextInputMode.localIme,
+    );
+    final storedClipboardMode = await store.getString(_clipboardSyncModeKey);
+    clipboardSyncMode = ClipboardSyncMode.values.firstWhere(
+      (value) => value.name == (storedClipboardMode ?? clipboardSyncMode.name),
+      orElse: () => ClipboardSyncMode.bidirectional,
     );
     signalingServerUrl =
         await store.getString(_signalingServerUrlKey) ?? signalingServerUrl;
@@ -137,6 +145,15 @@ class AppSettingsController extends ChangeNotifier {
     textInputMode = value;
     notifyListeners();
     await _persist((store) => store.setString(_textInputModeKey, value.name));
+  }
+
+  Future<void> setClipboardSyncMode(ClipboardSyncMode value) async {
+    if (clipboardSyncMode == value) return;
+    clipboardSyncMode = value;
+    notifyListeners();
+    await _persist(
+      (store) => store.setString(_clipboardSyncModeKey, value.name),
+    );
   }
 
   Future<void> setSignalingServerUrl(String value) async {

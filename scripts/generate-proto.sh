@@ -7,6 +7,8 @@ java_out="$repo_root/services/control-plane-java/build/generated/sources/proto/m
 dart_out="$repo_root/apps/client_flutter/build/generated/proto/dart"
 proto_files=(
     "$proto_root/crossdesktop/v1/common.proto"
+    "$proto_root/crossdesktop/v1/clipboard.proto"
+    "$proto_root/crossdesktop/v1/transfer.proto"
     "$proto_root/crossdesktop/v1/capability.proto"
     "$proto_root/crossdesktop/v1/device.proto"
     "$proto_root/crossdesktop/v1/input.proto"

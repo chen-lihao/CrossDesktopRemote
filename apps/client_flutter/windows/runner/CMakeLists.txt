@@ -11,6 +11,7 @@ add_executable(${BINARY_NAME} WIN32
   "main.cpp"
   "utils.cpp"
   "win32_window.cpp"
+  "windows_clipboard_bridge.cpp"
   "windows_host_bridge.cpp"
   "windows_lan_discovery_bridge.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"

@@ -20,6 +20,7 @@ func crossDesktopRemoteAbsolutePointerPosition(
 
 class MainFlutterWindow: NSWindow {
   private var inputChannel: FlutterMethodChannel?
+  private var clipboardBridge: AppleClipboardBridge?
   private var lanDiscoveryBridge: AppleLanDiscoveryBridge?
   private var pressedMouseButtons: Set<String> = []
   private var captureColorDiagnostics: [String: Any] = [:]
@@ -65,6 +66,9 @@ class MainFlutterWindow: NSWindow {
       self?.captureFrameGateState = notification.userInfo as? [String: Any] ?? [:]
     }
     registerInputChannel(binaryMessenger: flutterViewController.engine.binaryMessenger)
+    clipboardBridge = AppleClipboardBridge(
+      binaryMessenger: flutterViewController.engine.binaryMessenger
+    )
     lanDiscoveryBridge = AppleLanDiscoveryBridge(
       binaryMessenger: flutterViewController.engine.binaryMessenger
     )
@@ -455,6 +459,110 @@ class MainFlutterWindow: NSWindow {
     grayscaleTestPanel?.center()
     grayscaleTestPanel?.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
+  }
+}
+
+private final class AppleClipboardBridge: NSObject, FlutterStreamHandler {
+  private static let maximumTextBytes = 256 * 1024
+  private let methodChannel: FlutterMethodChannel
+  private let eventChannel: FlutterEventChannel
+  private var eventSink: FlutterEventSink?
+  private var pollTimer: Timer?
+  private var lastChangeCount = NSPasteboard.general.changeCount
+
+  init(binaryMessenger: FlutterBinaryMessenger) {
+    methodChannel = FlutterMethodChannel(
+      name: "com.crossdesktopremote.cross_desktop_remote/clipboard",
+      binaryMessenger: binaryMessenger
+    )
+    eventChannel = FlutterEventChannel(
+      name: "com.crossdesktopremote.cross_desktop_remote/clipboard_events",
+      binaryMessenger: binaryMessenger
+    )
+    super.init()
+    methodChannel.setMethodCallHandler { [weak self] call, result in
+      guard let self else {
+        result(FlutterError(code: "clipboard_unavailable", message: "Clipboard bridge is unavailable", details: nil))
+        return
+      }
+      switch call.method {
+      case "getSnapshot":
+        result(self.snapshot())
+      case "writeText":
+        guard
+          let arguments = call.arguments as? [String: Any],
+          let text = arguments["text"] as? String
+        else {
+          result(FlutterError(code: "invalid_clipboard_text", message: "Expected UTF-8 text", details: nil))
+          return
+        }
+        let byteCount = text.lengthOfBytes(using: .utf8)
+        guard byteCount <= Self.maximumTextBytes else {
+          result(FlutterError(code: "clipboard_text_too_large", message: "Clipboard text exceeds 256 KiB", details: byteCount))
+          return
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setString(text, forType: .string) else {
+          result(FlutterError(code: "clipboard_write_failed", message: "Unable to write the macOS clipboard", details: nil))
+          return
+        }
+        result(self.snapshot())
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    eventChannel.setStreamHandler(self)
+  }
+
+  deinit {
+    pollTimer?.invalidate()
+    methodChannel.setMethodCallHandler(nil)
+    eventChannel.setStreamHandler(nil)
+  }
+
+  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+    eventSink = events
+    lastChangeCount = NSPasteboard.general.changeCount
+    pollTimer?.invalidate()
+    pollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+      guard let self else { return }
+      let changeCount = NSPasteboard.general.changeCount
+      guard changeCount != self.lastChangeCount else { return }
+      self.lastChangeCount = changeCount
+      self.eventSink?(self.snapshot())
+    }
+    return nil
+  }
+
+  func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    pollTimer?.invalidate()
+    pollTimer = nil
+    eventSink = nil
+    return nil
+  }
+
+  private func snapshot() -> [String: Any] {
+    let pasteboard = NSPasteboard.general
+    guard let text = pasteboard.string(forType: .string) else {
+      return [
+        "revision": pasteboard.changeCount,
+        "hasText": false,
+        "tooLarge": false,
+        "utf8Bytes": 0,
+      ]
+    }
+    let byteCount = text.lengthOfBytes(using: .utf8)
+    var value: [String: Any] = [
+      "revision": pasteboard.changeCount,
+      "hasText": true,
+      "tooLarge": byteCount > Self.maximumTextBytes,
+      "utf8Bytes": byteCount,
+    ]
+    if byteCount <= Self.maximumTextBytes {
+      value["text"] = text
+    }
+    return value
   }
 }
 

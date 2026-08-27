@@ -1,3 +1,5 @@
+mod transfer;
+
 use session_core::core_build_info;
 
 #[unsafe(no_mangle)]
@@ -17,7 +19,10 @@ pub extern "C" fn cdr_core_feature_flags() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use session_core::{FEATURE_NARROW_C_ABI, FEATURE_PROTOBUF_V1};
+    use session_core::{
+        FEATURE_CLIPBOARD_PROTOCOL_V1, FEATURE_FILE_TRANSFER_PROTOCOL_V1, FEATURE_NARROW_C_ABI,
+        FEATURE_PROTOBUF_V1, FEATURE_WEBRTC_TRANSFER_TRANSPORT,
+    };
 
     use super::*;
 
@@ -27,7 +32,11 @@ mod tests {
         assert_eq!(cdr_core_protocol_major_version(), 1);
         assert_eq!(
             cdr_core_feature_flags(),
-            FEATURE_NARROW_C_ABI | FEATURE_PROTOBUF_V1
+            FEATURE_NARROW_C_ABI
+                | FEATURE_PROTOBUF_V1
+                | FEATURE_CLIPBOARD_PROTOCOL_V1
+                | FEATURE_FILE_TRANSFER_PROTOCOL_V1
+                | FEATURE_WEBRTC_TRANSFER_TRANSPORT
         );
     }
 }

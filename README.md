@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 进入共享角色后自动上线并取得一次性连接码，验证通过前不采集屏幕，会话结束后控制端清空旧码、被控端自动补发新码。DNS-SD 负责发现被控设备，用户选择设备后采用其声明的局域网或公网信令地址。Mac→Windows 提供“本机输入法/被控端输入法”双模式，后者使用 USB HID/语义键映射由 Windows 系统输入法直接组词。Flutter 分析和 115 项测试通过，Windows MSVC 与双机实测待 Windows 设备验收。
+> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 进入共享角色后自动上线并取得一次性连接码。文件/剪贴板阶段 1 已完成 Protobuf、Rust 核心和窄 C ABI；阶段 2 已接入 macOS/Windows UTF-8 文本剪贴板、独立 WebRTC 通道、方向策略、revision/SHA-256 回环抑制和设置 UI。文件选择器、磁盘写入器、文件剪贴板与断点续传尚未接入。
 
 ## 项目定位
 
@@ -81,6 +81,7 @@ flowchart LR
 - M1 Apple 原型由项目内维护的 `flutter_webrtc 1.6.0` fork 在原生层完成媒体与视频视图，Dart 只管理会话和小型控制消息；fork 明确约束 macOS SDR/Rec.709/Video-Range 采集，阶段结束后再根据性能数据决定继续维护或迁移到自有媒体适配器。
 - 视频走原生 GPU 采集、硬编、WebRTC、硬解和原生 Texture 路径。
 - 屏幕、输入、文件和剪贴板优先在两端 P2P 传输；TURN 只转发加密数据。
+- 文件/剪贴板字节停留在 Rust 和平台原生层，Flutter 只下发任务命令并接收有界进度；旧客户端缺少数据能力字段时仅关闭新增功能。
 - coturn 独立部署，不使用 Java 重写 STUN/TURN 数据面。
 
 ## 技术栈
@@ -123,7 +124,7 @@ CrossDesktopRemote/
 │   ├── session-core/            # Rust 会话状态机
 │   ├── protocol/                # Rust 协议类型
 │   ├── media-core/              # 媒体抽象与帧管线
-│   ├── transfer-core/           # 文件传输
+│   ├── transfer-core/           # 文件传输状态、校验、恢复与传输抽象
 │   ├── security-core/           # 设备身份与会话安全
 │   └── client-ffi/              # 面向 Flutter/原生壳的窄 C ABI
 ├── platform/
@@ -325,9 +326,9 @@ flutter build ios --simulator --debug
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
 | Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；`HostPlatformAdapter`已接入Windows能力握手、显示器/DPI枚举、主屏采集和`SendInput`鼠标/扫描码/Unicode输入；桌面DNS-SD双工浏览/发布与Windows诊断、Windows单一Texture几何、系统双击和窗口/采集停滞恢复已编码；`analyze`零告警、115项测试通过且1项按设计跳过 | Windows MSVC原生构建、Windows→Mac双击与副屏几何、Mac→Windows窗口恢复/拼音/DNS-SD实机验收；随后实现Windows多显示器事务 |
-| Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
+| Rust | `fmt`、Clippy；27个workspace单测；传输状态机、限额、Manifest/路径、恢复位图、SHA-256、WebRTC背压抽象与任务C ABI | `transfer-control`/`file-n`、平台文件 IO、断点续传和发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
-| Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |
+| Protobuf | v1基础消息、剪贴板/文件传输协议、显式能力协商和旧客户端降级；Buf lint、Java/Rust/Dart生成和编译 | 平台互操作、模糊测试和breaking基线待增加 |
 | Infrastructure | PostgreSQL、Redis、coturn Compose 均健康 | 当前仅本地开发配置；生产密钥、TLS、高可用尚未配置 |
 
 相关说明：
@@ -339,6 +340,7 @@ flutter build ios --simulator --debug
 - [工程搭建说明](./docs/工程搭建.md)
 - [局域网发现与跨平台适配](./docs/局域网发现与跨平台适配.md)
 - [Windows 被控端首轮验收](./docs/Windows被控端验收.md)
+- [文件与剪贴板传输协议](./docs/文件与剪贴板传输协议.md)
 
 ## 工程复现方式
 

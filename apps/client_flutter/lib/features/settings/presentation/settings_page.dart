@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
@@ -153,6 +154,53 @@ class SettingsPage extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
+                  if (Platform.isMacOS || Platform.isWindows) ...[
+                    _SettingsSection(
+                      title: '数据交换',
+                      icon: Icons.content_paste_go_outlined,
+                      children: [
+                        ListTile(
+                          title: const Text('文本剪贴板'),
+                          subtitle: Text(
+                            settings.clipboardSyncMode.description,
+                          ),
+                          trailing: DropdownButton<ClipboardSyncMode>(
+                            value: settings.clipboardSyncMode,
+                            onChanged: (value) {
+                              if (value != null) {
+                                unawaited(settings.setClipboardSyncMode(value));
+                              }
+                            },
+                            items: [
+                              for (final mode in ClipboardSyncMode.values)
+                                DropdownMenuItem(
+                                  value: mode,
+                                  child: Text(mode.label),
+                                ),
+                            ],
+                          ),
+                        ),
+                        ListTile(
+                          leading: Icon(
+                            session.clipboardStatus == ClipboardSyncStatus.error
+                                ? Icons.error_outline
+                                : session.clipboardStatus ==
+                                      ClipboardSyncStatus.ready
+                                ? Icons.check_circle_outline
+                                : Icons.sync_outlined,
+                          ),
+                          title: const Text('剪贴板状态'),
+                          subtitle: Text(session.clipboardStatusMessage),
+                        ),
+                        const ListTile(
+                          leading: Icon(Icons.shield_outlined),
+                          title: Text('仅同步新复制的 UTF-8 文本'),
+                          subtitle: Text('不同步连接前的历史内容；单条上限 256 KiB；不写入会话记录'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                  ],
                   _SettingsSection(
                     title: '连接与发现',
                     icon: Icons.lan_outlined,

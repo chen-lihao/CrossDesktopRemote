@@ -1,3 +1,4 @@
+import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
@@ -14,6 +15,7 @@ void main() {
       await controller.setPointerSensitivity(9);
       await controller.setKeyboardMode(RemoteKeyboardMode.compact);
       await controller.setTextInputMode(RemoteTextInputMode.remoteIme);
+      await controller.setClipboardSyncMode(ClipboardSyncMode.controllerToHost);
       await controller.setSignalingServerUrl(
         ' ws://192.168.1.10:8080/ws/signaling ',
       );
@@ -28,6 +30,7 @@ void main() {
         controller.inputSettings.textInputMode,
         RemoteTextInputMode.remoteIme,
       );
+      expect(controller.clipboardSyncMode, ClipboardSyncMode.controllerToHost);
       expect(
         controller.signalingServerUrl,
         'ws://192.168.1.10:8080/ws/signaling',

@@ -6,6 +6,8 @@ fn main() {
     let proto_root = manifest_dir.join("../../proto");
     let proto_files = [
         "common.proto",
+        "clipboard.proto",
+        "transfer.proto",
         "capability.proto",
         "device.proto",
         "input.proto",
