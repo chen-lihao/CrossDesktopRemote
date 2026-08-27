@@ -7,6 +7,7 @@ import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/host_platform_adapter_factory.dart';
 import 'package:cross_desktop_remote/core/protocol/wire_value_parsers.dart';
 import 'package:cross_desktop_remote/core/input/remote_text_chunks.dart';
+import 'package:cross_desktop_remote/core/platform/desktop_window_mode.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_client.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_input_sequence_guard.dart';
@@ -100,14 +101,19 @@ class RemoteSessionController extends ChangeNotifier {
     required this.role,
     SignalingClient? signalingClient,
     HostPlatformAdapter? hostPlatformAdapter,
+    Stream<DesktopWindowLifecycleEvent>? hostWindowLifecycleEvents,
     RemoteQualityProfile initialQuality = RemoteQualityProfile.automatic,
   }) : _signaling = signalingClient ?? SignalingClient(),
        _hostPlatform = hostPlatformAdapter ?? createHostPlatformAdapter(),
+       _hostWindowLifecycleEvents =
+           hostWindowLifecycleEvents ??
+           PlatformDesktopWindowModeController.lifecycleEvents,
        _selectedQuality = initialQuality;
 
   final RemoteRole role;
   final SignalingClient _signaling;
   final HostPlatformAdapter _hostPlatform;
+  final Stream<DesktopWindowLifecycleEvent> _hostWindowLifecycleEvents;
 
   /// Apple keeps the physically verified fixed 1080p ScreenCaptureKit canvas.
   /// Windows can capture a 2K source without entering the Apple display-switch
@@ -136,12 +142,15 @@ class RemoteSessionController extends ChangeNotifier {
   List<RemoteDisplay> _displays = const [];
   StreamSubscription<DesktopCapturerSource>? _displayAddedSubscription;
   StreamSubscription<DesktopCapturerSource>? _displayRemovedSubscription;
+  StreamSubscription<DesktopWindowLifecycleEvent>?
+  _hostWindowLifecycleSubscription;
   Timer? _displayRefreshTimer;
   Timer? _inputPermissionPollTimer;
   Timer? _qualityRequestTimer;
   Timer? _displaySwitchRequestTimer;
   Timer? _connectionRecoveryTimer;
   Timer? _mediaStatsTimer;
+  Timer? _windowsCaptureRecoveryTimer;
   final List<RTCIceCandidate> _pendingCandidates = [];
   bool _remoteDescriptionSet = false;
   bool _rendererReady = false;
@@ -156,6 +165,8 @@ class RemoteSessionController extends ChangeNotifier {
   bool _hostDisplaySwitchInProgress = false;
   bool _samplingMediaStats = false;
   bool _adaptiveQualityUpdateInProgress = false;
+  bool _windowsCaptureRecoveryInProgress = false;
+  int _windowsCaptureRecoveryGeneration = 0;
   Completer<void>? _adaptiveQualityUpdateCompleter;
   bool _screenCaptureGranted = false;
   bool? _accessibilityGranted;
@@ -299,6 +310,10 @@ class RemoteSessionController extends ChangeNotifier {
       _rendererReady = true;
       if (role == RemoteRole.host &&
           _hostPlatform.capabilities.canHostDesktop) {
+        if (_hostPlatform.type == HostPlatformType.windows) {
+          _hostWindowLifecycleSubscription ??= _hostWindowLifecycleEvents
+              .listen(_handleHostWindowLifecycleEvent);
+        }
         try {
           final permission = await _hostPlatform.checkPermissions();
           _accessibilityGranted = permission.inputGranted;
@@ -756,7 +771,9 @@ class RemoteSessionController extends ChangeNotifier {
 
     try {
       final response = await completion.future.timeout(
-        const Duration(seconds: 3),
+        _remoteHostPlatform == HostPlatformType.windows.name
+            ? const Duration(seconds: 6)
+            : const Duration(seconds: 3),
       );
       if (response['ok'] != true) {
         throw StateError(response['message'] as String? ?? '被控端无法执行修复');
@@ -1505,11 +1522,19 @@ class RemoteSessionController extends ChangeNotifier {
       _controlError = permission.inputGranted ? null : permission.limitation;
       await _refreshHostDisplays();
       var keyFrameRequested = false;
+      var captureRestarted = false;
       try {
         keyFrameRequested = await desktopCapturer.requestKeyFrame();
       } catch (_) {
         // Some platform capturers cannot explicitly request a key frame. The
         // state refresh and controller texture rebind still remain useful.
+      }
+      if (_hostPlatform.type == HostPlatformType.windows &&
+          !keyFrameRequested) {
+        captureRestarted = await _warmRestartWindowsHostCapture();
+        if (!captureRestarted) {
+          throw StateError('Windows 当前采集轨道未能恢复');
+        }
       }
       _publishHostState();
       _publishQualityState();
@@ -1520,6 +1545,7 @@ class RemoteSessionController extends ChangeNotifier {
         'requestId': requestId,
         'ok': true,
         'keyFrameRequested': keyFrameRequested,
+        'captureRestarted': captureRestarted,
       });
       notifyListeners();
     } catch (error) {
@@ -1530,6 +1556,146 @@ class RemoteSessionController extends ChangeNotifier {
         'ok': false,
         'message': error.toString(),
       });
+    }
+  }
+
+  void _handleHostWindowLifecycleEvent(DesktopWindowLifecycleEvent event) {
+    _windowsCaptureRecoveryTimer?.cancel();
+    if (!_canRecoverWindowsHostCapture) return;
+    unawaited(_armWindowsCaptureRecovery(event));
+  }
+
+  Future<void> _armWindowsCaptureRecovery(
+    DesktopWindowLifecycleEvent event,
+  ) async {
+    _RtcVideoProgress? baseline;
+    try {
+      baseline = await _readRtcVideoProgress('outbound-rtp');
+    } catch (_) {
+      // Missing counters are handled conservatively by the delayed probe.
+    }
+    if (!_canRecoverWindowsHostCapture) return;
+    _windowsCaptureRecoveryTimer = Timer(
+      const Duration(milliseconds: 650),
+      () => unawaited(_recoverWindowsCaptureIfStalled(baseline, event)),
+    );
+  }
+
+  bool get _canRecoverWindowsHostCapture =>
+      role == RemoteRole.host &&
+      _hostPlatform.type == HostPlatformType.windows &&
+      !_closing &&
+      !_hostDisplaySwitchInProgress &&
+      !_windowsCaptureRecoveryInProgress &&
+      _connectionEstablished &&
+      _localStream != null &&
+      _videoSender != null;
+
+  Future<void> _recoverWindowsCaptureIfStalled(
+    _RtcVideoProgress? baseline,
+    DesktopWindowLifecycleEvent event,
+  ) async {
+    if (!_canRecoverWindowsHostCapture) return;
+    try {
+      final current = await _readRtcVideoProgress('outbound-rtp');
+      if (_videoFramesAdvanced(current, afterFrames: baseline?.frames)) return;
+      final recovered = await _warmRestartWindowsHostCapture();
+      if (!recovered) {
+        _emitNotice(
+          'Windows 窗口状态变化后画面未恢复，可使用“刷新当前画面”重试（${event.name}）',
+          level: RemoteNoticeLevel.warning,
+        );
+      }
+    } catch (_) {
+      // Automatic recovery is best-effort and must never end the session.
+    }
+  }
+
+  Future<bool> _warmRestartWindowsHostCapture() async {
+    if (!_canRecoverWindowsHostCapture) return false;
+    final source = _sourceForId(_selectedDisplayId);
+    final previousStream = _localStream;
+    final sender = _videoSender;
+    final previousTrack = previousStream?.getVideoTracks().firstOrNull;
+    if (source == null ||
+        previousStream == null ||
+        sender == null ||
+        previousTrack == null) {
+      return false;
+    }
+
+    _windowsCaptureRecoveryInProgress = true;
+    final recoveryGeneration = ++_windowsCaptureRecoveryGeneration;
+    MediaStream? replacementStream;
+    var replacementAttached = false;
+    try {
+      _RtcVideoProgress? baseline;
+      try {
+        baseline = await _readRtcVideoProgress('outbound-rtp');
+      } catch (_) {
+        // replaceTrack remains the authoritative recovery operation.
+      }
+      replacementStream = await _captureDisplay(source);
+      final replacementTrack = replacementStream.getVideoTracks().firstOrNull;
+      if (replacementTrack == null) {
+        throw StateError('Windows 恢复采集未返回视频轨道');
+      }
+      // Allow Desktop Duplication to acquire its first surface before the
+      // existing sender is switched. The previous capture stays attached.
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      if (_closing || recoveryGeneration != _windowsCaptureRecoveryGeneration) {
+        throw StateError('Windows 采集恢复已取消');
+      }
+      await sender.replaceTrack(replacementTrack);
+      replacementAttached = true;
+      _localStream = replacementStream;
+      await _applyVideoQuality(
+        _selectedQuality,
+        reportFailure: false,
+        publishState: false,
+      );
+      final progress = await _waitForOutboundVideoProgress(
+        afterFrames: baseline?.frames,
+        allowCounterReset: true,
+      );
+      if (_closing || recoveryGeneration != _windowsCaptureRecoveryGeneration) {
+        throw StateError('Windows 采集恢复已取消');
+      }
+      if (progress == null) {
+        throw StateError('Windows 新采集轨道未输出视频帧');
+      }
+      _outboundVideoFrameSize = progress.size.isValid
+          ? progress.size
+          : _outboundVideoFrameSize;
+      await _disposeMediaStream(previousStream);
+      replacementStream = null;
+      _publishQualityState();
+      notifyListeners();
+      return true;
+    } catch (_) {
+      if (replacementAttached &&
+          !_closing &&
+          recoveryGeneration == _windowsCaptureRecoveryGeneration) {
+        try {
+          await sender.replaceTrack(previousTrack);
+          _localStream = previousStream;
+          await _applyVideoQuality(
+            _selectedQuality,
+            reportFailure: false,
+            publishState: false,
+          );
+        } catch (_) {
+          // The original session remains the safest available rollback.
+        }
+      }
+      return false;
+    } finally {
+      if (replacementStream != null) {
+        await _disposeMediaStream(replacementStream);
+      }
+      if (recoveryGeneration == _windowsCaptureRecoveryGeneration) {
+        _windowsCaptureRecoveryInProgress = false;
+      }
     }
   }
 
@@ -2244,6 +2410,7 @@ class RemoteSessionController extends ChangeNotifier {
 
   Future<_RtcVideoProgress?> _waitForOutboundVideoProgress({
     int? afterFrames,
+    bool allowCounterReset = false,
   }) async {
     _RtcVideoProgress? latest;
     for (var attempt = 0; attempt < 24; attempt += 1) {
@@ -2253,6 +2420,15 @@ class RemoteSessionController extends ChangeNotifier {
         // Sender statistics are sampled again until the media-flow timeout.
       }
       if (_videoFramesAdvanced(latest, afterFrames: afterFrames)) {
+        return latest;
+      }
+      if (allowCounterReset &&
+          afterFrames != null &&
+          latest?.frames != null &&
+          latest!.frames! > 0 &&
+          latest.frames! < afterFrames) {
+        // Some WebRTC builds restart the sender counter when replaceTrack()
+        // installs a new capture source while preserving the same Sender.
         return latest;
       }
       await Future<void>.delayed(const Duration(milliseconds: 100));
@@ -3066,6 +3242,9 @@ class RemoteSessionController extends ChangeNotifier {
     _displaySwitchRequestTimer = null;
     _mediaStatsTimer?.cancel();
     _mediaStatsTimer = null;
+    _windowsCaptureRecoveryTimer?.cancel();
+    _windowsCaptureRecoveryTimer = null;
+    _windowsCaptureRecoveryGeneration += 1;
     await _displayAddedSubscription?.cancel();
     _displayAddedSubscription = null;
     await _displayRemovedSubscription?.cancel();
@@ -3127,6 +3306,7 @@ class RemoteSessionController extends ChangeNotifier {
     _hostDisplaySwitchInProgress = false;
     _samplingMediaStats = false;
     _adaptiveQualityUpdateInProgress = false;
+    _windowsCaptureRecoveryInProgress = false;
     final adaptiveCompletion = _adaptiveQualityUpdateCompleter;
     if (adaptiveCompletion != null && !adaptiveCompletion.isCompleted) {
       adaptiveCompletion.complete();
@@ -3195,6 +3375,8 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<void> _disposeResources() async {
+    await _hostWindowLifecycleSubscription?.cancel();
+    _hostWindowLifecycleSubscription = null;
     await _closeSession(notifyPeer: true);
     if (_rendererReady) {
       await remoteRenderer.dispose();

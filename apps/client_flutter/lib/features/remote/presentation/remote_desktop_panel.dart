@@ -3,9 +3,11 @@ import 'dart:io';
 
 import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/remote_ime_input_adapter.dart';
+import 'package:cross_desktop_remote/core/platform/desktop_window_mode.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/desktop_mouse_click_tracker.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_composed_text_editor.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_desktop_geometry.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_display_adjustment.dart';
@@ -1391,6 +1393,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   final _desktopKeyboard = RemoteKeyboardTranslator();
   final RemoteImeInputAdapter _nativeIme = MethodChannelRemoteImeInputAdapter();
   final _pointerCoalescer = RemotePointerEventCoalescer();
+  final _desktopClickTracker = DesktopMouseClickTracker();
   final Set<int> _ignoredPointers = {};
   final Map<int, String> _mouseButtons = {};
   late final RemoteTouchGestureController _gestures =
@@ -1411,6 +1414,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   bool _switchOverlayVisible = false;
   bool _switchOverlaySlow = false;
   bool _lastDisplaySwitchPending = false;
+  bool _lastCanSendControl = false;
   bool _presentationGeometryLocked = false;
   int _presentationSwitchToken = 0;
   Size? _committedVideoSourceSize;
@@ -1462,6 +1466,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     _textController.addListener(_textChanged);
     _activeKeyboardMode = widget.inputSettings.keyboardMode;
     _lastDisplaySwitchPending = session.displaySwitchPending;
+    _lastCanSendControl = session.canSendControl;
     _committedVideoSourceSize =
         _committedFrameGeometrySourceSize() ?? _currentRendererSourceSize();
     _presentationGeometryLocked = _lastDisplaySwitchPending;
@@ -1472,6 +1477,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         _handleNativeImeEvent,
         onError: _handleNativeImeError,
       );
+    }
+    if (Platform.isWindows) {
+      unawaited(_loadDesktopMouseDoubleClickSettings());
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -1486,6 +1494,16 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         immediate: _pendingDisplayChangesAspectRatio(),
         rebuild: false,
       );
+    }
+  }
+
+  Future<void> _loadDesktopMouseDoubleClickSettings() async {
+    try {
+      final settings =
+          await PlatformDesktopWindowModeController.mouseDoubleClickSettings();
+      if (mounted) _desktopClickTracker.updateSettings(settings);
+    } catch (_) {
+      // The conservative defaults remain valid on older Windows runners.
     }
   }
 
@@ -1594,10 +1612,16 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   }
 
   void _handleDisplaySwitchState() {
+    final canSendControl = session.canSendControl;
+    if (_lastCanSendControl && !canSendControl) {
+      _desktopClickTracker.reset();
+    }
+    _lastCanSendControl = canSendControl;
     final pending = session.displaySwitchPending;
     if (pending == _lastDisplaySwitchPending) return;
     _lastDisplaySwitchPending = pending;
     if (pending) {
+      _desktopClickTracker.reset();
       final rendererSize = _currentRendererSourceSize();
       if (rendererSize != null) _committedVideoSourceSize = rendererSize;
       _presentationGeometryLocked = true;
@@ -1929,6 +1953,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     session.removeListener(_handleDisplaySwitchState);
     unawaited(_imeSubscription?.cancel());
     _dispatchGestureActions(_gestures.cancelAll(releaseDragLock: true));
+    _desktopClickTracker.reset();
     _flushPointerMotion();
     _releaseDesktopKeys();
     if ((_keyboardVisible &&
@@ -2379,6 +2404,13 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       final button = event.buttons & kSecondaryMouseButton != 0
           ? 'right'
           : 'left';
+      final clickCount = _desktopClickTracker.pointerDown(
+        pointer: event.pointer,
+        button: button,
+        displayId: session.renderedDisplayId ?? session.selectedDisplayId,
+        position: event.localPosition,
+        time: DateTime.now(),
+      );
       _mouseButtons[event.pointer] = button;
       _sendPointerNow(
         RemotePointerPacket(
@@ -2386,6 +2418,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
           x: normalized.dx,
           y: normalized.dy,
           button: button,
+          clickCount: clickCount,
         ),
       );
       return;
@@ -2412,6 +2445,10 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     if (_ignoredPointers.contains(event.pointer)) return;
     if (event.kind == PointerDeviceKind.mouse ||
         event.kind == PointerDeviceKind.trackpad) {
+      _desktopClickTracker.pointerMove(
+        pointer: event.pointer,
+        position: event.localPosition,
+      );
       final normalized = transform.normalize(event.localPosition);
       if (normalized != null) {
         _lastNormalizedPointer = normalized;
@@ -2441,6 +2478,11 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       final normalized =
           transform.normalize(event.localPosition) ?? _lastNormalizedPointer;
       final button = _mouseButtons.remove(event.pointer) ?? 'left';
+      final clickCount = _desktopClickTracker.pointerUp(
+        pointer: event.pointer,
+        position: event.localPosition,
+        time: DateTime.now(),
+      );
       if (normalized != null) {
         _sendPointerNow(
           RemotePointerPacket(
@@ -2448,6 +2490,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
             x: normalized.dx,
             y: normalized.dy,
             button: button,
+            clickCount: clickCount,
           ),
         );
       }
@@ -2469,6 +2512,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       final normalized =
           transform.normalize(event.localPosition) ?? _lastNormalizedPointer;
       final button = _mouseButtons.remove(event.pointer) ?? 'left';
+      final clickCount = _desktopClickTracker.pointerCancel(event.pointer);
       if (normalized != null) {
         _sendPointerNow(
           RemotePointerPacket(
@@ -2476,6 +2520,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
             x: normalized.dx,
             y: normalized.dy,
             button: button,
+            clickCount: clickCount,
           ),
         );
       }

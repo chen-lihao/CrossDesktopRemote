@@ -198,8 +198,11 @@ Win32Window::MessageHandler(HWND hwnd,
       return 0;
     }
     case WM_SIZE: {
-      RECT rect = GetClientArea();
-      if (child_content_ != nullptr) {
+      // A minimized top-level window reports a 0x0 client area. Keeping the
+      // last valid Flutter surface avoids destroying the compositor surface
+      // and returning to a stale frame after restore/maximize.
+      if (wparam != SIZE_MINIMIZED && child_content_ != nullptr) {
+        RECT rect = GetClientArea();
         // Size and position the child window.
         MoveWindow(child_content_, rect.left, rect.top, rect.right - rect.left,
                    rect.bottom - rect.top, TRUE);

@@ -6,6 +6,7 @@
 #include <flutter/method_channel.h>
 
 #include <memory>
+#include <string>
 
 #include "win32_window.h"
 #include "windows_host_bridge.h"
@@ -26,6 +27,10 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
+  void ScheduleFlutterRedraw();
+  void PerformFlutterRedraw();
+  void EmitWindowLifecycleEvent(const std::string& event);
+
   // The project to run.
   flutter::DartProject project_;
 
@@ -36,6 +41,8 @@ class FlutterWindow : public Win32Window {
       window_channel_;
   std::unique_ptr<WindowsHostBridge> host_bridge_;
   std::unique_ptr<WindowsLanDiscoveryBridge> lan_discovery_bridge_;
+  bool minimized_ = false;
+  UINT last_size_state_ = SIZE_RESTORED;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

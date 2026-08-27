@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 进入共享角色后自动上线并取得一次性连接码，验证通过前不采集屏幕，会话结束后控制端清空旧码、被控端自动补发新码。DNS-SD 负责发现被控设备，用户选择设备后采用其声明的局域网或公网信令地址。Mac→Windows 提供“本机输入法/被控端输入法”双模式，后者使用 USB HID/语义键映射由 Windows 系统输入法直接组词。Flutter 分析和 113 项测试通过，Windows MSVC 与双机实测待 Windows 设备验收。
+> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 进入共享角色后自动上线并取得一次性连接码，验证通过前不采集屏幕，会话结束后控制端清空旧码、被控端自动补发新码。DNS-SD 负责发现被控设备，用户选择设备后采用其声明的局域网或公网信令地址。Mac→Windows 提供“本机输入法/被控端输入法”双模式，后者使用 USB HID/语义键映射由 Windows 系统输入法直接组词。Flutter 分析和 115 项测试通过，Windows MSVC 与双机实测待 Windows 设备验收。
 
 ## 项目定位
 
@@ -240,6 +240,7 @@ Mac 选择“共享本机”后会自动上线并生成连接码；“在线等�
 - Mac 控制 Windows 可直接在远程工具栏或“输入设置与诊断”选择“被控端输入法”；可打印按键走 USB HID，Enter、Backspace、导航键等走稳定语义键映射，候选、选词、退格和中英文状态均由 Windows 输入法维护。该模式不远程调用私有 IME API，而是像本地物理键盘一样注入按键，由 Windows 当前激活的微软拼音/其他系统输入法处理；可在被控端用 `Win+Space` 切换输入法。“本机输入法”仍保留为 Unicode 文本、粘贴和表情兼容模式。
 - 同一输入代理已在 macOS 控制端启用，使系统拼音在本地完成组合和选词后直接向 Windows 被控端发送已提交 Unicode；无需打开“全局键盘”文本框。
 - 此路径只在 Windows/macOS 桌面端启用，不改变 iPad 的 UIKit IME、双键盘、触控和移动端全屏实现。
+- 桌面物理鼠标按系统双击时间和范围识别第二次点击，向 Mac 传递原生 `clickCount=2`；Windows 被控端按真实两组 down/up 让系统判定双击，不再额外注入一次点击。
 
 物理设备验收步骤见 [Windows 控制 Mac 验收](./docs/Windows控制Mac验收.md)。
 
@@ -253,6 +254,7 @@ Mac 选择“共享本机”后会自动上线并生成连接码；“在线等�
 - Windows默认仍以控制端启动；用户需要主动切换到“共享本机”。Runner 已使用 Windows 10+ DNS Service Discovery API 发布和浏览`_cdrremote._tcp.local`。发现对象是正在等待连接的被控设备，不是独立信令服务器目录；设备 TXT 会声明双方应使用的信令地址，用户点击设备后显式采用，且永久保留手动地址后备。多显示器事务仍待单屏实机闭环后启用。
 - macOS和Windows桌面端无论当前选择控制还是共享角色，局域网浏览都会持续运行；共享端进入“上线等待连接”后同时发布自身。列表按设备ID排除本机并去重，Windows空列表会显示浏览/发布/解析状态和最近DNS-SD错误，便于区分应用未启动、Windows专用网络/防火墙和网络禁用mDNS三类情况。
 - 进入共享角色会自动“上线等待连接”，只注册信令和局域网服务，不启动屏幕采集。等待期间可手动或按租约自动轮换连接码；连接成功后当前单次码锁定，断开后控制端清空旧码、被控端自动生成新码，避免误用已消费凭据。
+- Windows Runner 在最小化时保留最后一个有效 Flutter Surface，恢复、最大化、改尺寸和显示配置变化后立即加延迟双重重绘；若 650ms 后 RTP 编码帧仍未推进，则在同一 Sender 上热替换当前显示器采集轨道，保持信令、连接码和 DataChannel 不变。
 
 构建和物理检查步骤见 [Windows 被控端首轮验收](./docs/Windows被控端验收.md)。
 
@@ -322,7 +324,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；`HostPlatformAdapter`已接入Windows能力握手、显示器/DPI枚举、主屏采集和`SendInput`鼠标/扫描码/Unicode输入；桌面DNS-SD双工浏览/发布与Windows诊断、Windows单一Texture几何和原地会话修复已编码；`analyze`零告警、112项测试通过且1项按设计跳过 | Windows MSVC原生构建、Windows→Mac副屏几何/修复、Mac→Windows单屏/拼音/DNS-SD实机验收；随后实现Windows多显示器事务 |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；`HostPlatformAdapter`已接入Windows能力握手、显示器/DPI枚举、主屏采集和`SendInput`鼠标/扫描码/Unicode输入；桌面DNS-SD双工浏览/发布与Windows诊断、Windows单一Texture几何、系统双击和窗口/采集停滞恢复已编码；`analyze`零告警、115项测试通过且1项按设计跳过 | Windows MSVC原生构建、Windows→Mac双击与副屏几何、Mac→Windows窗口恢复/拼音/DNS-SD实机验收；随后实现Windows多显示器事务 |
 | Rust | `fmt`、Clippy、6 个 workspace test；macOS 动态库与 Android 三 ABI | 媒体、传输和安全 crate 仍是占位；平台发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1 基础消息、Buf lint、Java/Rust/Dart 生成和编译 | 业务协议需要随 M1/M2 增量完善并做兼容测试 |

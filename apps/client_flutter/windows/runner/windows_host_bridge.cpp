@@ -535,12 +535,9 @@ bool WindowsHostBridge::HandlePointer(const EncodableMap& arguments,
   bool pressed = false;
   bool released = false;
   if (phase == "down") {
-    const int click_count = static_cast<int>(
-        std::clamp<int64_t>(IntegerValue(arguments, "clickCount", 1), 1, 2));
-    if (click_count == 2) {
-      inputs.push_back(MouseInput(ButtonFlag(button, false)));
-      inputs.push_back(MouseInput(ButtonFlag(button, true)));
-    }
+    // Controllers send the real first and second down/up sequences. Windows
+    // derives a double click from their timing and location; synthesizing an
+    // extra click for clickCount=2 turns a valid double click into a triple.
     inputs.push_back(MouseInput(ButtonFlag(button, false)));
     pressed = true;
   } else if (phase == "up") {
