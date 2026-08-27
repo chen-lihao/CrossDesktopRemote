@@ -5,8 +5,9 @@
 
 #include <algorithm>
 #include <chrono>
-#include <optional>
 #include <iterator>
+#include <limits>
+#include <optional>
 #include <utility>
 
 #include <iphlpapi.h>
@@ -83,7 +84,7 @@ std::wstring ComputerHostName() {
 struct ActiveIPv4Address {
   IP4_ADDRESS value = 0;
   std::string text;
-  ULONG route_metric = MAXULONG;
+  ULONG route_metric = std::numeric_limits<ULONG>::max();
   bool physical_interface = false;
   bool private_address = false;
 };
