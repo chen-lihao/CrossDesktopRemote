@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/remote_ime_input_adapter.dart';
+import 'package:cross_desktop_remote/core/input/remote_shortcut_policy.dart';
 import 'package:cross_desktop_remote/core/platform/desktop_window_mode.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
@@ -1424,6 +1425,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   bool _systemKeyboardDocked = false;
   Offset _compactKeyboardOffset = Offset.zero;
   final Set<String> _compactModifiers = {};
+  final Set<PhysicalKeyboardKey> _primaryShortcutKeys = {};
   RemoteContentTransform? _latestTransform;
   Offset? _lastNormalizedPointer;
   Offset _desktopImeAnchor = const Offset(24, 24);
@@ -1707,9 +1709,11 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     final geometry = session.committedFrameGeometry;
     final renderedDisplayId = session.renderedDisplayId;
     if (geometry == null ||
-        !geometry.isValid ||
         renderedDisplayId == null ||
-        geometry.displayId != renderedDisplayId) {
+        !geometry.belongsTo(
+          displayId: renderedDisplayId,
+          generation: session.displayMediaGeneration,
+        )) {
       return null;
     }
     return geometry;
@@ -1767,6 +1771,11 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         fixedModifiers ?? _compactModifiers.toList(growable: false);
     session.sendKey(phase: 'down', key: key, modifiers: modifiers);
     session.sendKey(phase: 'up', key: key, modifiers: modifiers);
+    unawaited(HapticFeedback.selectionClick());
+  }
+
+  void _sendPrimaryShortcut(String key) {
+    unawaited(session.sendPrimaryShortcut(key));
     unawaited(HapticFeedback.selectionClick());
   }
 
@@ -1938,6 +1947,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   }
 
   void _releaseDesktopKeys() {
+    _primaryShortcutKeys.clear();
     for (final action in _desktopKeyboard.releaseAll()) {
       _dispatchKeyboardAction(action);
     }
@@ -2150,10 +2160,16 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                         offset: _compactKeyboardOffset,
                         child: _CompactRemoteKeyboard(
                           modifiers: _compactModifiers,
+                          primaryShortcutLabel:
+                              session.remotePrimaryShortcutLabel,
+                          commandLabel: RemoteShortcutPolicy.commandLabel(
+                            session.remoteHostPlatform,
+                          ),
                           onDragUpdate: (details) =>
                               _moveCompactKeyboard(details, constraints),
                           onModifierChanged: _toggleCompactModifier,
                           onKey: _sendCompactKey,
+                          onPrimaryShortcut: _sendPrimaryShortcut,
                           onSystemKeyboard: () =>
                               _changeKeyboardMode(RemoteKeyboardMode.system),
                           onClose: _hideKeyboard,
@@ -2711,6 +2727,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
 
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (!session.canSendControl) return KeyEventResult.ignored;
+    if (_handlePrimaryShortcut(event)) return KeyEventResult.handled;
     if (_remoteHostImeActive) {
       if (widget.desktopFullScreen &&
           event.logicalKey == LogicalKeyboardKey.escape) {
@@ -2797,6 +2814,27 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       }
     }
     return KeyEventResult.ignored;
+  }
+
+  bool _handlePrimaryShortcut(KeyEvent event) {
+    if (event is KeyUpEvent && _primaryShortcutKeys.remove(event.physicalKey)) {
+      return true;
+    }
+    final wireKey = RemoteShortcutPolicy.commonWireKey(event.logicalKey);
+    if (wireKey == null) return false;
+    final keyboard = HardwareKeyboard.instance;
+    final primaryPressed = RemoteShortcutPolicy.localPrimaryPressed(
+      platform: currentRemoteControllerPlatform(),
+      metaPressed: keyboard.isMetaPressed,
+      controlPressed: keyboard.isControlPressed,
+    );
+    if (!primaryPressed || keyboard.isAltPressed || keyboard.isShiftPressed) {
+      return false;
+    }
+    if (event is KeyDownEvent && _primaryShortcutKeys.add(event.physicalKey)) {
+      unawaited(session.sendPrimaryShortcut(wireKey));
+    }
+    return event is KeyDownEvent || event is KeyRepeatEvent;
   }
 
   List<String> _remoteModifiers(HardwareKeyboard keyboard) => <String>[
@@ -3049,17 +3087,23 @@ class _DisplaySwitchOverlay extends StatelessWidget {
 class _CompactRemoteKeyboard extends StatelessWidget {
   const _CompactRemoteKeyboard({
     required this.modifiers,
+    required this.primaryShortcutLabel,
+    required this.commandLabel,
     required this.onDragUpdate,
     required this.onModifierChanged,
     required this.onKey,
+    required this.onPrimaryShortcut,
     required this.onSystemKeyboard,
     required this.onClose,
   });
 
   final Set<String> modifiers;
+  final String primaryShortcutLabel;
+  final String commandLabel;
   final GestureDragUpdateCallback onDragUpdate;
   final ValueChanged<String> onModifierChanged;
   final void Function(String key, List<String>? modifiers) onKey;
+  final ValueChanged<String> onPrimaryShortcut;
   final VoidCallback onSystemKeyboard;
   final VoidCallback onClose;
 
@@ -3122,11 +3166,11 @@ class _CompactRemoteKeyboard extends StatelessWidget {
                   alignment: WrapAlignment.center,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    for (final item in const [
-                      ('command', '⌘'),
-                      ('control', 'Ctrl'),
-                      ('option', 'Option'),
-                      ('shift', '⇧'),
+                    for (final item in [
+                      ('command', commandLabel),
+                      const ('control', 'Ctrl'),
+                      const ('option', 'Option'),
+                      const ('shift', '⇧'),
                     ])
                       FilterChip(
                         label: Text(item.$2),
@@ -3183,29 +3227,29 @@ class _CompactRemoteKeyboard extends StatelessWidget {
                       onPressed: () => onKey('ArrowRight', null),
                     ),
                     _CompactKeyButton(
-                      label: '⌘A',
+                      label: '$primaryShortcutLabel+A',
                       tooltip: '全选',
-                      onPressed: () => onKey('KeyA', const ['command']),
+                      onPressed: () => onPrimaryShortcut('KeyA'),
                     ),
                     _CompactKeyButton(
-                      label: '⌘C',
+                      label: '$primaryShortcutLabel+C',
                       tooltip: '复制',
-                      onPressed: () => onKey('KeyC', const ['command']),
+                      onPressed: () => onPrimaryShortcut('KeyC'),
                     ),
                     _CompactKeyButton(
-                      label: '⌘V',
+                      label: '$primaryShortcutLabel+V',
                       tooltip: '粘贴',
-                      onPressed: () => onKey('KeyV', const ['command']),
+                      onPressed: () => onPrimaryShortcut('KeyV'),
                     ),
                     _CompactKeyButton(
-                      label: '⌘X',
+                      label: '$primaryShortcutLabel+X',
                       tooltip: '剪切',
-                      onPressed: () => onKey('KeyX', const ['command']),
+                      onPressed: () => onPrimaryShortcut('KeyX'),
                     ),
                     _CompactKeyButton(
-                      label: '⌘Z',
+                      label: '$primaryShortcutLabel+Z',
                       tooltip: '撤销',
-                      onPressed: () => onKey('KeyZ', const ['command']),
+                      onPressed: () => onPrimaryShortcut('KeyZ'),
                     ),
                   ],
                 ),

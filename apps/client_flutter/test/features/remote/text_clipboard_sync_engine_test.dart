@@ -45,6 +45,18 @@ void main() {
     expect(engine.observeLocalChange(snapshot(7, '连接前的私密文本')), isNull);
   });
 
+  test('explicit paste may publish the baseline with user intent', () {
+    final engine = TextClipboardSyncEngine(localIsController: true);
+    final baseline = snapshot(7, '准备粘贴的文本');
+    engine.observeBaseline(baseline);
+
+    final offer = engine.prepareExplicitOutbound(baseline);
+
+    expect(offer, isNotNull);
+    expect(offer?.hash, hashText('准备粘贴的文本'));
+    expect(engine.outboundOffer, same(offer));
+  });
+
   test('offer request chunks round trip and validates sha256', () {
     final sender = TextClipboardSyncEngine(localIsController: true);
     final receiver = TextClipboardSyncEngine(localIsController: false);
@@ -122,6 +134,37 @@ void main() {
     expect(
       () => receiver.acceptData(tampered),
       throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('applied acknowledgement releases an explicit paste gate', () async {
+    final gate = ClipboardApplyGate();
+    final offer = ClipboardOffer(
+      clipboardId: 'clipboard-1',
+      revision: 1,
+      hash: hashText('ready'),
+      size: 5,
+    );
+
+    final waiting = gate.waitFor(offer);
+    expect(gate.accept(clipboardAppliedMessage(offer)), isTrue);
+
+    expect(await waiting, isTrue);
+    expect(await gate.waitFor(offer), isTrue);
+  });
+
+  test('applied gate times out for legacy peers', () async {
+    final gate = ClipboardApplyGate();
+    final offer = ClipboardOffer(
+      clipboardId: 'clipboard-legacy',
+      revision: 1,
+      hash: hashText('legacy'),
+      size: 6,
+    );
+
+    expect(
+      await gate.waitFor(offer, timeout: const Duration(milliseconds: 1)),
+      isFalse,
     );
   });
 }

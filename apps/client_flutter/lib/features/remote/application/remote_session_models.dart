@@ -206,6 +206,22 @@ class RemoteFrameGeometry {
         (generation <= 0 || this.generation == generation);
   }
 
+  RemoteFrameGeometry withGeneration(int value) => RemoteFrameGeometry(
+    displayId: displayId,
+    generation: value,
+    logicalWidth: logicalWidth,
+    logicalHeight: logicalHeight,
+    captureWidth: captureWidth,
+    captureHeight: captureHeight,
+    encodedWidth: encodedWidth,
+    encodedHeight: encodedHeight,
+    activeContentX: activeContentX,
+    activeContentY: activeContentY,
+    activeContentWidth: activeContentWidth,
+    activeContentHeight: activeContentHeight,
+    rotation: rotation,
+  );
+
   Map<String, dynamic> toMessage() => {
     'displayId': displayId,
     'generation': generation,

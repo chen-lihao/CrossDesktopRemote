@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -67,6 +68,89 @@ class CompletedClipboardText {
   final String text;
 }
 
+Map<String, dynamic> clipboardAppliedMessage(ClipboardOffer offer) => {
+  'type': 'applied',
+  'version': clipboardWireVersion,
+  'clipboardId': offer.clipboardId,
+  'revision': offer.revision,
+  'hash': offer.hash,
+};
+
+/// Correlates an explicit paste with the remote native clipboard write.
+///
+/// An applied message may arrive before the UI starts waiting, so the latest
+/// successful signature is retained for the current session.
+class ClipboardApplyGate {
+  String? _lastAppliedSignature;
+  String? _waitingSignature;
+  Completer<bool>? _waiting;
+
+  Future<bool> waitFor(
+    ClipboardOffer offer, {
+    Duration timeout = const Duration(milliseconds: 300),
+  }) async {
+    final signature = _signature(offer);
+    if (_lastAppliedSignature == signature) return true;
+    if (_waitingSignature != signature) {
+      final previous = _waiting;
+      if (previous != null && !previous.isCompleted) previous.complete(false);
+      _waitingSignature = signature;
+      _waiting = Completer<bool>();
+    }
+    final completion = _waiting!;
+    final applied = await completion.future.timeout(
+      timeout,
+      onTimeout: () => false,
+    );
+    if (identical(_waiting, completion)) {
+      _waiting = null;
+      _waitingSignature = null;
+    }
+    return applied;
+  }
+
+  bool accept(Map<String, dynamic> message) {
+    if (message['type'] != 'applied' ||
+        message['version'] != clipboardWireVersion) {
+      return false;
+    }
+    final clipboardId = message['clipboardId'];
+    final revision = message['revision'];
+    final hash = message['hash'];
+    if (clipboardId is! String ||
+        clipboardId.isEmpty ||
+        revision is! num ||
+        revision < 0 ||
+        revision != revision.toInt() ||
+        hash is! String ||
+        !_sha256Pattern.hasMatch(hash)) {
+      return false;
+    }
+    final signature = '$clipboardId:${revision.toInt()}:$hash';
+    _lastAppliedSignature = signature;
+    final completion = _waiting;
+    if (_waitingSignature == signature &&
+        completion != null &&
+        !completion.isCompleted) {
+      completion.complete(true);
+    }
+    return true;
+  }
+
+  void reset() {
+    final completion = _waiting;
+    if (completion != null && !completion.isCompleted) {
+      completion.complete(false);
+    }
+    _waiting = null;
+    _waitingSignature = null;
+    _lastAppliedSignature = null;
+  }
+
+  static String _signature(ClipboardOffer offer) =>
+      '${offer.clipboardId}:${offer.revision}:${offer.hash}';
+}
+
 class _OutboundClipboardText {
   const _OutboundClipboardText({required this.offer, required this.bytes});
 
@@ -105,6 +189,7 @@ class TextClipboardSyncEngine {
   _InboundClipboardText? _inbound;
 
   ClipboardSyncMode get mode => _mode;
+  ClipboardOffer? get outboundOffer => _outbound?.offer;
 
   void setMode(ClipboardSyncMode value) {
     _mode = value;
@@ -145,6 +230,36 @@ class TextClipboardSyncEngine {
     _expectedEchoExpiresAt = null;
     if (!_mode.allowsOutbound(localIsController: localIsController)) {
       return null;
+    }
+    _localRevision += 1;
+    final offer = ClipboardOffer(
+      clipboardId: '${DateTime.now().microsecondsSinceEpoch}-$_localRevision',
+      revision: _localRevision,
+      hash: hash,
+      size: bytes.length,
+    );
+    _outbound = _OutboundClipboardText(offer: offer, bytes: bytes);
+    return offer;
+  }
+
+  /// Explicit paste is user consent to publish the current clipboard, even
+  /// when it was the baseline observed before the session connected.
+  ClipboardOffer? prepareExplicitOutbound(ClipboardSnapshot snapshot) {
+    _lastNativeRevision = snapshot.revision;
+    _expectedEchoHash = null;
+    _expectedEchoExpiresAt = null;
+    if (!snapshot.hasText || snapshot.tooLarge || snapshot.text == null) {
+      return null;
+    }
+    final bytes = Uint8List.fromList(utf8.encode(snapshot.text!));
+    if (bytes.length > maxTextClipboardBytes ||
+        !_mode.allowsOutbound(localIsController: localIsController)) {
+      return null;
+    }
+    final hash = hashBytes(bytes);
+    final existing = _outbound;
+    if (existing != null && existing.offer.hash == hash) {
+      return existing.offer;
     }
     _localRevision += 1;
     final offer = ClipboardOffer(

@@ -7,6 +7,7 @@ import 'package:cross_desktop_remote/core/clipboard/clipboard_platform_adapter.d
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
 import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/host_platform_adapter_factory.dart';
+import 'package:cross_desktop_remote/core/input/remote_shortcut_policy.dart';
 import 'package:cross_desktop_remote/core/protocol/wire_value_parsers.dart';
 import 'package:cross_desktop_remote/core/input/remote_text_chunks.dart';
 import 'package:cross_desktop_remote/core/platform/desktop_window_mode.dart';
@@ -127,6 +128,7 @@ class RemoteSessionController extends ChangeNotifier {
   final HostPlatformAdapter _hostPlatform;
   final ClipboardPlatformAdapter _clipboardPlatform;
   final TextClipboardSyncEngine _clipboardSync;
+  final ClipboardApplyGate _clipboardApplyGate = ClipboardApplyGate();
   final Stream<DesktopWindowLifecycleEvent> _hostWindowLifecycleEvents;
 
   /// Apple keeps the physically verified fixed 1080p ScreenCaptureKit canvas.
@@ -210,6 +212,7 @@ class RemoteSessionController extends ChangeNotifier {
   bool _supportsInvitationRotation = false;
   bool _remoteSupportsActiveContentGeometryV2 = false;
   bool _remoteSupportsTextClipboardV1 = false;
+  bool _remoteClipboardSupportsApplied = false;
   Completer<void>? _invitationRotationCompleter;
   Completer<Map<String, dynamic>>? _sessionRepairCompleter;
   String? _sessionRepairRequestId;
@@ -256,8 +259,16 @@ class RemoteSessionController extends ChangeNotifier {
   ClipboardSyncStatus get clipboardStatus => _clipboardStatus;
   String get clipboardStatusMessage => _clipboardStatusMessage;
   bool get clipboardSupported => _clipboardPlatform.supported;
+  String get remotePrimaryShortcutModifier =>
+      RemoteShortcutPolicy.remotePrimaryModifier(
+        remoteHostPlatform: _remoteHostPlatform,
+        controllerPlatform: currentRemoteControllerPlatform(),
+      );
+  String get remotePrimaryShortcutLabel =>
+      RemoteShortcutPolicy.primaryLabel(remotePrimaryShortcutModifier);
   bool get qualityPending => _qualityPending;
   bool get displaySwitchPending => _displaySwitchPending;
+  int get displayMediaGeneration => _displaySwitchGeneration;
   bool get sessionRepairPending => _sessionRepairPending;
   String? get pendingDisplayId => _pendingDisplayId;
   RemoteVideoFrameSize? get expectedVideoFrameSize => _expectedVideoFrameSize;
@@ -396,6 +407,7 @@ class RemoteSessionController extends ChangeNotifier {
       'type': 'hello',
       'version': clipboardWireVersion,
       'mode': value.name,
+      'supportsApplied': true,
     });
     _updateClipboardStatus();
     notifyListeners();
@@ -668,6 +680,48 @@ class RemoteSessionController extends ChangeNotifier {
     }
   }
 
+  Future<void> sendPrimaryShortcut(String key) async {
+    if (!RemoteShortcutPolicy.commonWireKeys.contains(key)) return;
+    if (!canSendControl) {
+      explainControlUnavailable();
+      return;
+    }
+    if (key == 'KeyV') await _prepareRemoteClipboardPaste();
+    if (!canSendControl) return;
+    final modifiers = [remotePrimaryShortcutModifier];
+    sendKey(phase: 'down', key: key, modifiers: modifiers);
+    sendKey(phase: 'up', key: key, modifiers: modifiers);
+  }
+
+  Future<void> _prepareRemoteClipboardPaste() async {
+    final channel = _clipboardChannel;
+    if (!_clipboardPlatform.supported ||
+        !_remoteSupportsTextClipboardV1 ||
+        !_remoteAllowsClipboardInbound ||
+        channel == null ||
+        channel.state != RTCDataChannelState.RTCDataChannelOpen) {
+      return;
+    }
+    try {
+      final snapshot = await _clipboardPlatform.readSnapshot();
+      if (snapshot.tooLarge) {
+        _setClipboardStatus(ClipboardSyncStatus.error, '文本超过 256 KiB，无法远程粘贴');
+        return;
+      }
+      final offer = _clipboardSync.prepareExplicitOutbound(snapshot);
+      if (offer == null) return;
+      _setClipboardStatus(ClipboardSyncStatus.sending, '正在准备远程粘贴');
+      _sendClipboard(offer.toMessage());
+      if (_remoteClipboardSupportsApplied) {
+        await _clipboardApplyGate.waitFor(offer);
+      }
+      _updateClipboardStatus();
+      notifyListeners();
+    } catch (error) {
+      _setClipboardStatus(ClipboardSyncStatus.error, '远程粘贴准备失败：$error');
+    }
+  }
+
   void selectDisplay(String displayId) {
     if (role != RemoteRole.controller ||
         !displays.any((display) => display.id == displayId)) {
@@ -689,6 +743,7 @@ class RemoteSessionController extends ChangeNotifier {
       }
       _displaySwitchPending = false;
       _pendingDisplayId = null;
+      _preserveRenderedGeometryForGeneration(generation);
       notifyListeners();
       _emitNotice('显示器切换超时，请重试', level: RemoteNoticeLevel.warning);
       _flushQueuedQualityRequest();
@@ -1247,9 +1302,12 @@ class RemoteSessionController extends ChangeNotifier {
           'type': 'hello',
           'version': clipboardWireVersion,
           'mode': _clipboardMode.name,
+          'supportsApplied': true,
         });
       } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
         _remoteClipboardMode = null;
+        _remoteClipboardSupportsApplied = false;
+        _clipboardApplyGate.reset();
       }
       _updateClipboardStatus();
       notifyListeners();
@@ -1274,6 +1332,7 @@ class RemoteSessionController extends ChangeNotifier {
             (mode) => mode.name == modeName,
             orElse: () => ClipboardSyncMode.disabled,
           );
+          _remoteClipboardSupportsApplied = decoded['supportsApplied'] == true;
           _updateClipboardStatus();
           notifyListeners();
           final queuedOffer = _queuedClipboardOffer;
@@ -1300,7 +1359,12 @@ class RemoteSessionController extends ChangeNotifier {
           if (completed == null) return;
           _clipboardSync.expectNativeEcho(completed.text);
           await _clipboardPlatform.writeText(completed.text);
+          _sendClipboard(clipboardAppliedMessage(completed.offer));
           _setClipboardStatus(ClipboardSyncStatus.ready, '已接收远程剪贴板文本');
+        case 'applied':
+          if (_clipboardApplyGate.accept(decoded)) {
+            _setClipboardStatus(ClipboardSyncStatus.ready, '远程剪贴板已写入');
+          }
       }
     } on FormatException catch (error) {
       _setClipboardStatus(
@@ -1511,6 +1575,9 @@ class RemoteSessionController extends ChangeNotifier {
           _pendingDisplayId = null;
           _displaySwitchInboundFramesBaseline = null;
           _videoGeometryState = RemoteVideoGeometryState.stable;
+          _preserveRenderedGeometryForGeneration(
+            generation > 0 ? generation : _displaySwitchGeneration,
+          );
           notifyListeners();
           final stage = message['stage'] as String?;
           final stageLabel = switch (stage) {
@@ -1563,8 +1630,11 @@ class RemoteSessionController extends ChangeNotifier {
         );
         if (!_displaySwitchPending) {
           _videoGeometryState = reportedGeometryState;
-          if (reportedFrameGeometry?.displayId ==
-              (_renderedDisplayId ?? _selectedDisplayId)) {
+          if (reportedFrameGeometry?.belongsTo(
+                displayId: _renderedDisplayId ?? _selectedDisplayId,
+                generation: _displaySwitchGeneration,
+              ) ==
+              true) {
             _committedFrameGeometry = reportedFrameGeometry;
           }
         }
@@ -1723,6 +1793,19 @@ class RemoteSessionController extends ChangeNotifier {
       _emitNotice('已切换远程显示器', level: RemoteNoticeLevel.success);
     }
     _flushQueuedQualityRequest();
+  }
+
+  void _preserveRenderedGeometryForGeneration(int generation) {
+    final geometry = _committedFrameGeometry;
+    final renderedDisplayId = _renderedDisplayId ?? _selectedDisplayId;
+    if (generation <= 0 ||
+        geometry == null ||
+        !geometry.isValid ||
+        geometry.displayId != renderedDisplayId ||
+        geometry.generation == generation) {
+      return;
+    }
+    _committedFrameGeometry = geometry.withGeneration(generation);
   }
 
   Future<void> _repairHostSession(Map<String, dynamic> message) async {
@@ -3527,9 +3610,11 @@ class RemoteSessionController extends ChangeNotifier {
     _remoteSupportsPhysicalKeyboard = false;
     _remoteSupportsActiveContentGeometryV2 = false;
     _remoteSupportsTextClipboardV1 = false;
+    _remoteClipboardSupportsApplied = false;
     _remoteClipboardMode = null;
     _queuedClipboardOffer = null;
     _clipboardSync.resetSession();
+    _clipboardApplyGate.reset();
     _lastHostCaptureFrameState = null;
     _hostInvitationExpiresAt = null;
     _hostInvitationCode = null;
