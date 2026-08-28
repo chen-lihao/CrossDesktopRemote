@@ -11,6 +11,7 @@ import 'package:cross_desktop_remote/features/remote/application/host_sharing_li
 import 'package:cross_desktop_remote/features/remote/application/host_invitation_lease_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/explicit_file_transfer_center.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_desktop_panel.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter/material.dart';
@@ -344,7 +345,20 @@ class _DevicesPageState extends State<DevicesPage> {
       RemoteNoticeLevel.warning => AppMessageLevel.warning,
       RemoteNoticeLevel.error => AppMessageLevel.error,
     };
-    AppMessenger.show(notice.message, level: level);
+    final incomingFileTransfer =
+        notice.message == '收到文件传输请求' &&
+        _session.pendingIncomingFileTransferCount > 0;
+    AppMessenger.show(
+      notice.message,
+      level: level,
+      actionLabel: incomingFileTransfer ? '查看' : null,
+      onAction: incomingFileTransfer
+          ? () {
+              if (!mounted) return;
+              showExplicitFileTransferCenter(context, _session);
+            }
+          : null,
+    );
   }
 
   Future<void> _connect({bool userInitiated = true}) async {
@@ -834,6 +848,13 @@ class _ConnectionCard extends StatelessWidget {
               const Divider(height: 1),
               const SizedBox(height: 16),
               _buildStatus(context),
+              if (role == RemoteRole.host &&
+                  session.localExplicitFileTransferSupported &&
+                  (session.remoteSupportsExplicitFileTransferV1 ||
+                      session.fileTransferTasks.isNotEmpty)) ...[
+                const SizedBox(height: 16),
+                HostFileTransferSection(session: session),
+              ],
               const SizedBox(height: 16),
               _buildActions(),
             ],
