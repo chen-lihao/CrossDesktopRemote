@@ -1712,7 +1712,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         renderedDisplayId == null ||
         !geometry.belongsTo(
           displayId: renderedDisplayId,
-          generation: session.displayMediaGeneration,
+          generation: session.committedDisplayGeneration,
         )) {
       return null;
     }

@@ -144,6 +144,12 @@ void main() {
       transform.normalize(const Offset(999.999, 270))!.dx,
       closeTo(1, 0.0001),
     );
+    expect(transform.normalize(const Offset(500, 0))!.dy, closeTo(0, 0.0001));
+    expect(
+      transform.normalize(const Offset(500, 539.999))!.dy,
+      closeTo(1, 0.0001),
+      reason: 'vertical pointer error must not accumulate near the bottom',
+    );
   });
 
   test('Windows texture crop paints the active region over the viewport', () {

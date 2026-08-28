@@ -192,7 +192,11 @@ class RemoteSessionController extends ChangeNotifier {
   int _inputPermissionPollAttempts = 0;
   int _motionEventsSinceProbe = 0;
   int _droppedMotionEvents = 0;
+  // `_displaySwitchGeneration` identifies the newest switch request. This
+  // committed generation advances only after the controller has observed a
+  // target video frame and atomically commits its display geometry.
   int _displaySwitchGeneration = 0;
+  int _committedDisplayGeneration = 0;
   int _geometryObservationToken = 0;
   int? _displaySwitchInboundFramesBaseline;
   double? _inputRoundTripMs;
@@ -268,7 +272,7 @@ class RemoteSessionController extends ChangeNotifier {
       RemoteShortcutPolicy.primaryLabel(remotePrimaryShortcutModifier);
   bool get qualityPending => _qualityPending;
   bool get displaySwitchPending => _displaySwitchPending;
-  int get displayMediaGeneration => _displaySwitchGeneration;
+  int get committedDisplayGeneration => _committedDisplayGeneration;
   bool get sessionRepairPending => _sessionRepairPending;
   String? get pendingDisplayId => _pendingDisplayId;
   RemoteVideoFrameSize? get expectedVideoFrameSize => _expectedVideoFrameSize;
@@ -743,7 +747,6 @@ class RemoteSessionController extends ChangeNotifier {
       }
       _displaySwitchPending = false;
       _pendingDisplayId = null;
-      _preserveRenderedGeometryForGeneration(generation);
       notifyListeners();
       _emitNotice('显示器切换超时，请重试', level: RemoteNoticeLevel.warning);
       _flushQueuedQualityRequest();
@@ -1575,9 +1578,6 @@ class RemoteSessionController extends ChangeNotifier {
           _pendingDisplayId = null;
           _displaySwitchInboundFramesBaseline = null;
           _videoGeometryState = RemoteVideoGeometryState.stable;
-          _preserveRenderedGeometryForGeneration(
-            generation > 0 ? generation : _displaySwitchGeneration,
-          );
           notifyListeners();
           final stage = message['stage'] as String?;
           final stageLabel = switch (stage) {
@@ -1632,7 +1632,7 @@ class RemoteSessionController extends ChangeNotifier {
           _videoGeometryState = reportedGeometryState;
           if (reportedFrameGeometry?.belongsTo(
                 displayId: _renderedDisplayId ?? _selectedDisplayId,
-                generation: _displaySwitchGeneration,
+                generation: _committedDisplayGeneration,
               ) ==
               true) {
             _committedFrameGeometry = reportedFrameGeometry;
@@ -1765,6 +1765,7 @@ class RemoteSessionController extends ChangeNotifier {
         ? rendererGeometry!
         : expected;
     _inboundVideoFrameSize = observedGeometry;
+    _committedDisplayGeneration = generation;
     _committedFrameGeometry =
         announcedGeometry ??
         _buildFrameGeometry(
@@ -1793,19 +1794,6 @@ class RemoteSessionController extends ChangeNotifier {
       _emitNotice('已切换远程显示器', level: RemoteNoticeLevel.success);
     }
     _flushQueuedQualityRequest();
-  }
-
-  void _preserveRenderedGeometryForGeneration(int generation) {
-    final geometry = _committedFrameGeometry;
-    final renderedDisplayId = _renderedDisplayId ?? _selectedDisplayId;
-    if (generation <= 0 ||
-        geometry == null ||
-        !geometry.isValid ||
-        geometry.displayId != renderedDisplayId ||
-        geometry.generation == generation) {
-      return;
-    }
-    _committedFrameGeometry = geometry.withGeneration(generation);
   }
 
   Future<void> _repairHostSession(Map<String, dynamic> message) async {
@@ -3650,6 +3638,7 @@ class RemoteSessionController extends ChangeNotifier {
     _automaticQualitySuppressedUntil = null;
     _connectionEstablished = false;
     _displaySwitchGeneration = 0;
+    _committedDisplayGeneration = 0;
     _geometryObservationToken += 1;
     _displaySwitchInboundFramesBaseline = null;
     _inputSequence = 0;
