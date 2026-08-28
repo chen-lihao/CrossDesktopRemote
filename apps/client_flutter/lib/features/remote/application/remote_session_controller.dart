@@ -17,6 +17,8 @@ import 'package:cross_desktop_remote/features/remote/application/remote_input_se
 import 'package:cross_desktop_remote/features/remote/application/remote_media_stats.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_quality_adaptation.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
+import 'package:cross_desktop_remote/features/remote/application/explicit_file_transfer_engine.dart';
+import 'package:cross_desktop_remote/features/remote/application/explicit_file_transfer_models.dart';
 import 'package:cross_desktop_remote/features/remote/application/text_clipboard_sync_engine.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -121,7 +123,10 @@ class RemoteSessionController extends ChangeNotifier {
        _clipboardSync = TextClipboardSyncEngine(
          localIsController: role == RemoteRole.controller,
          initialMode: initialClipboardMode,
-       );
+       ) {
+    _fileTransfer.addListener(_handleFileTransferChanged);
+    _fileTransferNoticeSubscription = _fileTransfer.notices.listen(_emitNotice);
+  }
 
   final RemoteRole role;
   final SignalingClient _signaling;
@@ -129,6 +134,7 @@ class RemoteSessionController extends ChangeNotifier {
   final ClipboardPlatformAdapter _clipboardPlatform;
   final TextClipboardSyncEngine _clipboardSync;
   final ClipboardApplyGate _clipboardApplyGate = ClipboardApplyGate();
+  final ExplicitFileTransferEngine _fileTransfer = ExplicitFileTransferEngine();
   final Stream<DesktopWindowLifecycleEvent> _hostWindowLifecycleEvents;
 
   /// Apple keeps the physically verified fixed 1080p ScreenCaptureKit canvas.
@@ -152,6 +158,8 @@ class RemoteSessionController extends ChangeNotifier {
   RTCDataChannel? _controlChannel;
   RTCDataChannel? _motionChannel;
   RTCDataChannel? _clipboardChannel;
+  RTCDataChannel? _fileTransferControlChannel;
+  RTCDataChannel? _fileTransferDataChannel;
   MediaStream? _localStream;
   RTCRtpSender? _videoSender;
   RTCRtpReceiver? _videoReceiver;
@@ -162,6 +170,7 @@ class RemoteSessionController extends ChangeNotifier {
   StreamSubscription<DesktopWindowLifecycleEvent>?
   _hostWindowLifecycleSubscription;
   StreamSubscription<ClipboardSnapshot>? _clipboardSubscription;
+  StreamSubscription<String>? _fileTransferNoticeSubscription;
   Timer? _displayRefreshTimer;
   Timer? _inputPermissionPollTimer;
   Timer? _qualityRequestTimer;
@@ -212,7 +221,9 @@ class RemoteSessionController extends ChangeNotifier {
   bool _supportsInvitationRotation = false;
   bool _remoteSupportsActiveContentGeometryV2 = false;
   bool _remoteSupportsTextClipboardV1 = false;
+  bool _remoteSupportsExplicitFileTransferV1 = false;
   bool _remoteClipboardSupportsApplied = false;
+  bool _explicitFileTransferTransportAttached = false;
   Completer<void>? _invitationRotationCompleter;
   Completer<Map<String, dynamic>>? _sessionRepairCompleter;
   String? _sessionRepairRequestId;
@@ -259,6 +270,18 @@ class RemoteSessionController extends ChangeNotifier {
   ClipboardSyncStatus get clipboardStatus => _clipboardStatus;
   String get clipboardStatusMessage => _clipboardStatusMessage;
   bool get clipboardSupported => _clipboardPlatform.supported;
+  bool get localExplicitFileTransferSupported =>
+      Platform.isMacOS || Platform.isWindows;
+  bool get remoteSupportsExplicitFileTransferV1 =>
+      _remoteSupportsExplicitFileTransferV1;
+  bool get explicitFileTransferReady =>
+      localExplicitFileTransferSupported &&
+      _remoteSupportsExplicitFileTransferV1 &&
+      _fileTransfer.transportReady;
+  List<ExplicitFileTransferTaskSnapshot> get fileTransferTasks =>
+      _fileTransfer.tasks;
+  int get pendingIncomingFileTransferCount =>
+      _fileTransfer.pendingIncomingCount;
   String get remotePrimaryShortcutModifier =>
       RemoteShortcutPolicy.remotePrimaryModifier(
         remoteHostPlatform: _remoteHostPlatform,
@@ -500,6 +523,7 @@ class RemoteSessionController extends ChangeNotifier {
         if (role == RemoteRole.controller && Platform.isWindows)
           'active-content-geometry-v2',
         if (_clipboardPlatform.supported) 'text-clipboard-v1',
+        if (localExplicitFileTransferSupported) 'explicit-file-transfer-v1',
       ];
       final endpoint = buildSignalingUri(
         serverUrl: serverUrl,
@@ -719,6 +743,33 @@ class RemoteSessionController extends ChangeNotifier {
     } catch (error) {
       _setClipboardStatus(ClipboardSyncStatus.error, '远程粘贴准备失败：$error');
     }
+  }
+
+  Future<String> sendExplicitFiles(List<String> paths) =>
+      _fileTransfer.sendFiles(paths);
+
+  Future<String> sendExplicitDirectory(String path) =>
+      _fileTransfer.sendDirectory(path);
+
+  Future<void> acceptExplicitFileTransfer(
+    String transferId,
+    String destinationRoot,
+  ) => _fileTransfer.accept(transferId, destinationRoot);
+
+  Future<void> rejectExplicitFileTransfer(String transferId) =>
+      _fileTransfer.reject(transferId);
+
+  Future<void> pauseExplicitFileTransfer(String transferId) =>
+      _fileTransfer.pause(transferId);
+
+  Future<void> resumeExplicitFileTransfer(String transferId) =>
+      _fileTransfer.resume(transferId);
+
+  Future<void> cancelExplicitFileTransfer(String transferId) =>
+      _fileTransfer.cancel(transferId);
+
+  void _handleFileTransferChanged() {
+    notifyListeners();
   }
 
   void selectDisplay(String displayId) {
@@ -1104,6 +1155,33 @@ class RemoteSessionController extends ChangeNotifier {
     _attachClipboardChannel(channel);
   }
 
+  Future<void> _ensureExplicitFileTransferDataChannels() async {
+    if (role != RemoteRole.host ||
+        !localExplicitFileTransferSupported ||
+        !_remoteSupportsExplicitFileTransferV1 ||
+        _peerConnection == null) {
+      return;
+    }
+    if (_fileTransferControlChannel == null) {
+      final control = await _peerConnection!.createDataChannel(
+        'file-transfer-control',
+        RTCDataChannelInit()
+          ..ordered = true
+          ..protocol = 'crossdesktop-explicit-file-transfer-control-v1',
+      );
+      _attachFileTransferControlChannel(control);
+    }
+    if (_fileTransferDataChannel == null) {
+      final data = await _peerConnection!.createDataChannel(
+        'file-transfer-data',
+        RTCDataChannelInit()
+          ..ordered = true
+          ..protocol = 'crossdesktop-explicit-file-transfer-data-v1',
+      );
+      _attachFileTransferDataChannel(data);
+    }
+  }
+
   void _markPeerConnectionConnected() {
     final recovered =
         _connectionEstablished &&
@@ -1249,6 +1327,20 @@ class RemoteSessionController extends ChangeNotifier {
         } else {
           unawaited(channel.close());
         }
+      case 'file-transfer-control':
+        if (localExplicitFileTransferSupported &&
+            _remoteSupportsExplicitFileTransferV1) {
+          _attachFileTransferControlChannel(channel);
+        } else {
+          unawaited(channel.close());
+        }
+      case 'file-transfer-data':
+        if (localExplicitFileTransferSupported &&
+            _remoteSupportsExplicitFileTransferV1) {
+          _attachFileTransferDataChannel(channel);
+        } else {
+          unawaited(channel.close());
+        }
       default:
         // Unknown channels must never replace the reliable control channel.
         unawaited(channel.close());
@@ -1314,6 +1406,57 @@ class RemoteSessionController extends ChangeNotifier {
       if (message.isBinary || message.text.length > 16 * 1024) return;
       unawaited(_handleClipboardMessage(message.text));
     };
+  }
+
+  void _attachFileTransferControlChannel(RTCDataChannel channel) {
+    _fileTransferControlChannel = channel;
+    channel.onDataChannelState = (_) {
+      _tryAttachExplicitFileTransferTransport();
+      notifyListeners();
+    };
+    channel.onMessage = (message) {
+      if (message.isBinary || message.text.length > 16 * 1024) return;
+      _fileTransfer.handleControlMessage(message.text);
+    };
+    _tryAttachExplicitFileTransferTransport();
+  }
+
+  void _attachFileTransferDataChannel(RTCDataChannel channel) {
+    _fileTransferDataChannel = channel;
+    channel.bufferedAmountLowThreshold = 4 * 16 * 1024;
+    channel.onDataChannelState = (_) {
+      _tryAttachExplicitFileTransferTransport();
+      notifyListeners();
+    };
+    channel.onMessage = (message) {
+      if (!message.isBinary || message.binary.length > 16 * 1024) return;
+      _fileTransfer.handleBinaryMessage(message.binary);
+    };
+    _tryAttachExplicitFileTransferTransport();
+  }
+
+  void _tryAttachExplicitFileTransferTransport() {
+    final control = _fileTransferControlChannel;
+    final data = _fileTransferDataChannel;
+    final open =
+        control?.state == RTCDataChannelState.RTCDataChannelOpen &&
+        data?.state == RTCDataChannelState.RTCDataChannelOpen;
+    if (!open) {
+      if (_explicitFileTransferTransportAttached) {
+        _explicitFileTransferTransportAttached = false;
+        _fileTransfer.detachTransport();
+      }
+      return;
+    }
+    if (_explicitFileTransferTransportAttached) return;
+    _explicitFileTransferTransportAttached = true;
+    _fileTransfer.attachTransport(
+      sendControl: (message) =>
+          control!.send(RTCDataChannelMessage(jsonEncode(message))),
+      sendBinary: (bytes) =>
+          data!.send(RTCDataChannelMessage.fromBinary(bytes)),
+      bufferedAmount: () => data!.getBufferedAmount(),
+    );
   }
 
   Future<void> _handleClipboardMessage(String payload) async {
@@ -2518,11 +2661,15 @@ class RemoteSessionController extends ChangeNotifier {
         _remoteSupportsTextClipboardV1 = peerCapabilities.contains(
           'text-clipboard-v1',
         );
+        _remoteSupportsExplicitFileTransferV1 = peerCapabilities.contains(
+          'explicit-file-transfer-v1',
+        );
         if (role == RemoteRole.host) {
           _remoteSupportsActiveContentGeometryV2 = peerCapabilities.contains(
             'active-content-geometry-v2',
           );
           await _ensureClipboardDataChannel();
+          await _ensureExplicitFileTransferDataChannels();
           await _authorizePeer();
         } else {
           _setState(RemoteSessionState.connecting, '连接码已验证，正在建立视频连接');
@@ -3546,6 +3693,12 @@ class RemoteSessionController extends ChangeNotifier {
     _motionChannel = null;
     await _clipboardChannel?.close();
     _clipboardChannel = null;
+    _fileTransfer.detachTransport();
+    _explicitFileTransferTransportAttached = false;
+    await _fileTransferControlChannel?.close();
+    _fileTransferControlChannel = null;
+    await _fileTransferDataChannel?.close();
+    _fileTransferDataChannel = null;
     _displayRefreshTimer?.cancel();
     _displayRefreshTimer = null;
     _inputPermissionPollTimer?.cancel();
@@ -3595,6 +3748,7 @@ class RemoteSessionController extends ChangeNotifier {
     _remoteSupportsPhysicalKeyboard = false;
     _remoteSupportsActiveContentGeometryV2 = false;
     _remoteSupportsTextClipboardV1 = false;
+    _remoteSupportsExplicitFileTransferV1 = false;
     _remoteClipboardSupportsApplied = false;
     _remoteClipboardMode = null;
     _queuedClipboardOffer = null;
@@ -3690,6 +3844,7 @@ class RemoteSessionController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _fileTransfer.removeListener(_handleFileTransferChanged);
     unawaited(_disposeResources());
     unawaited(_notices.close());
     super.dispose();
@@ -3700,7 +3855,10 @@ class RemoteSessionController extends ChangeNotifier {
     _hostWindowLifecycleSubscription = null;
     await _clipboardSubscription?.cancel();
     _clipboardSubscription = null;
+    await _fileTransferNoticeSubscription?.cancel();
+    _fileTransferNoticeSubscription = null;
     await _closeSession(notifyPeer: true);
+    _fileTransfer.dispose();
     if (_rendererReady) {
       await remoteRenderer.dispose();
       _rendererReady = false;

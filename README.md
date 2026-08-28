@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 进入共享角色后自动上线并取得一次性连接码。文件/剪贴板阶段 1 已完成 Protobuf、Rust 核心和窄 C ABI；阶段 2 已接入 macOS/Windows UTF-8 文本剪贴板、独立 WebRTC 通道、方向策略、revision/SHA-256 回环抑制和设置 UI。文件选择器、磁盘写入器、文件剪贴板与断点续传尚未接入。
+> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 进入共享角色后自动上线并取得一次性连接码。文件/剪贴板阶段 1～2 已完成协议、Rust 核心、文本剪贴板和策略 UI；阶段 3 已接入 macOS/Windows 显式文件/目录选择、接收确认、16 KiB WebRTC 分片、背压、暂停/恢复/取消、SHA-256、`.cdrpart` 原子落盘和会话内断线续传。Windows 双机物理验收与后续文件剪贴板尚未完成。
 
 ## 项目定位
 
@@ -81,7 +81,7 @@ flowchart LR
 - M1 Apple 原型由项目内维护的 `flutter_webrtc 1.6.0` fork 在原生层完成媒体与视频视图，Dart 只管理会话和小型控制消息；fork 明确约束 macOS SDR/Rec.709/Video-Range 采集，阶段结束后再根据性能数据决定继续维护或迁移到自有媒体适配器。
 - 视频走原生 GPU 采集、硬编、WebRTC、硬解和原生 Texture 路径。
 - 屏幕、输入、文件和剪贴板优先在两端 P2P 传输；TURN 只转发加密数据。
-- 文件/剪贴板字节停留在 Rust 和平台原生层，Flutter 只下发任务命令并接收有界进度；旧客户端缺少数据能力字段时仅关闭新增功能。
+- 生产目标仍是文件/剪贴板字节停留在 Rust 和平台原生层。阶段 3 桌面 MVP 因当前 `flutter_webrtc` DataChannel 只暴露 Dart API，使用独立应用服务转发有界 16 KiB 二进制帧，SHA-256 在工作 Isolate 执行且不进入 Widget 树；完成 20 GB 和输入 P95 门禁前需把磁盘数据泵下沉到 Rust/原生层。旧客户端缺少数据能力字段时仅关闭新增功能。
 - coturn 独立部署，不使用 Java 重写 STUN/TURN 数据面。
 
 ## 技术栈
@@ -325,8 +325,8 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；`HostPlatformAdapter`已接入Windows能力握手、显示器/DPI枚举、主屏采集和`SendInput`鼠标/扫描码/Unicode输入；桌面DNS-SD双工浏览/发布与Windows诊断、Windows单一Texture几何、系统双击和窗口/采集停滞恢复已编码；`analyze`零告警、115项测试通过且1项按设计跳过 | Windows MSVC原生构建、Windows→Mac双击与副屏几何、Mac→Windows窗口恢复/拼音/DNS-SD实机验收；随后实现Windows多显示器事务 |
-| Rust | `fmt`、Clippy；27个workspace单测；传输状态机、限额、Manifest/路径、恢复位图、SHA-256、WebRTC背压抽象与任务C ABI | `transfer-control`/`file-n`、平台文件 IO、断点续传和发布打包待接入 |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；桌面DNS-SD、显示几何和输入路径；macOS/Windows 文本剪贴板；显式文件/目录选择、接收确认、独立文件控制/数据通道、暂停/恢复/取消、`.cdrpart`原子落盘与会话内续传；`analyze`零告警、139项测试通过且1项按设计跳过，macOS/iOS Debug构建成功 | Windows MSVC构建和Mac↔Windows文件传输物理验收；20 GB、磁盘满、输入P95与应用重启后续传；随后实现文件剪贴板 |
+| Rust | `fmt`、Clippy；27个workspace单测；传输状态机、限额、Manifest/路径、恢复位图、SHA-256、WebRTC背压抽象与任务C ABI | 桌面MVP磁盘数据泵仍在Dart应用服务；下沉Rust/原生层和发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1基础消息、剪贴板/文件传输协议、显式能力协商和旧客户端降级；Buf lint、Java/Rust/Dart生成和编译 | 平台互操作、模糊测试和breaking基线待增加 |
 | Infrastructure | PostgreSQL、Redis、coturn Compose 均健康 | 当前仅本地开发配置；生产密钥、TLS、高可用尚未配置 |
