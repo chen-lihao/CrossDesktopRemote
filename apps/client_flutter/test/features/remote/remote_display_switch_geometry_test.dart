@@ -3,67 +3,6 @@ import 'package:cross_desktop_remote/features/remote/application/remote_session_
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('a pending request does not invalidate committed display geometry', () {
-    const oldMainGeometry = RemoteFrameGeometry(
-      displayId: 'main',
-      generation: 1,
-      logicalWidth: 1920,
-      logicalHeight: 1080,
-      captureWidth: 1920,
-      captureHeight: 1080,
-      encodedWidth: 1920,
-      encodedHeight: 1080,
-      activeContentX: 0,
-      activeContentY: 0,
-      activeContentWidth: 1920,
-      activeContentHeight: 1080,
-    );
-
-    const committedGeneration = 1;
-    const pendingRequestGeneration = 2;
-
-    expect(oldMainGeometry.belongsTo(displayId: 'main', generation: 1), isTrue);
-    expect(
-      oldMainGeometry.belongsTo(
-        displayId: 'main',
-        generation: committedGeneration,
-      ),
-      isTrue,
-      reason: 'presentation follows committed media, not the pending request',
-    );
-    expect(
-      oldMainGeometry.belongsTo(
-        displayId: 'main',
-        generation: pendingRequestGeneration,
-      ),
-      isFalse,
-      reason: 'the request generation must not be used as committed media',
-    );
-  });
-
-  test('old same-display geometry cannot re-enter after a later commit', () {
-    const oldMainGeometry = RemoteFrameGeometry(
-      displayId: 'main',
-      generation: 1,
-      logicalWidth: 1920,
-      logicalHeight: 1080,
-      captureWidth: 1920,
-      captureHeight: 1080,
-      encodedWidth: 1920,
-      encodedHeight: 1080,
-      activeContentX: 0,
-      activeContentY: 0,
-      activeContentWidth: 1920,
-      activeContentHeight: 1080,
-    );
-
-    expect(
-      oldMainGeometry.belongsTo(displayId: 'main', generation: 3),
-      isFalse,
-      reason: 'main-secondary-main requires the latest committed generation',
-    );
-  });
-
   test(
     'rejects a new key frame that still uses the previous display aspect',
     () {

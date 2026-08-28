@@ -1709,11 +1709,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     final geometry = session.committedFrameGeometry;
     final renderedDisplayId = session.renderedDisplayId;
     if (geometry == null ||
+        !geometry.isValid ||
         renderedDisplayId == null ||
-        !geometry.belongsTo(
-          displayId: renderedDisplayId,
-          generation: session.committedDisplayGeneration,
-        )) {
+        geometry.displayId != renderedDisplayId) {
       return null;
     }
     return geometry;

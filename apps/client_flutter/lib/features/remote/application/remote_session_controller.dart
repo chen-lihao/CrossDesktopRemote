@@ -192,11 +192,7 @@ class RemoteSessionController extends ChangeNotifier {
   int _inputPermissionPollAttempts = 0;
   int _motionEventsSinceProbe = 0;
   int _droppedMotionEvents = 0;
-  // `_displaySwitchGeneration` identifies the newest switch request. This
-  // committed generation advances only after the controller has observed a
-  // target video frame and atomically commits its display geometry.
   int _displaySwitchGeneration = 0;
-  int _committedDisplayGeneration = 0;
   int _geometryObservationToken = 0;
   int? _displaySwitchInboundFramesBaseline;
   double? _inputRoundTripMs;
@@ -272,7 +268,6 @@ class RemoteSessionController extends ChangeNotifier {
       RemoteShortcutPolicy.primaryLabel(remotePrimaryShortcutModifier);
   bool get qualityPending => _qualityPending;
   bool get displaySwitchPending => _displaySwitchPending;
-  int get committedDisplayGeneration => _committedDisplayGeneration;
   bool get sessionRepairPending => _sessionRepairPending;
   String? get pendingDisplayId => _pendingDisplayId;
   RemoteVideoFrameSize? get expectedVideoFrameSize => _expectedVideoFrameSize;
@@ -1630,11 +1625,8 @@ class RemoteSessionController extends ChangeNotifier {
         );
         if (!_displaySwitchPending) {
           _videoGeometryState = reportedGeometryState;
-          if (reportedFrameGeometry?.belongsTo(
-                displayId: _renderedDisplayId ?? _selectedDisplayId,
-                generation: _committedDisplayGeneration,
-              ) ==
-              true) {
+          if (reportedFrameGeometry?.displayId ==
+              (_renderedDisplayId ?? _selectedDisplayId)) {
             _committedFrameGeometry = reportedFrameGeometry;
           }
         }
@@ -1765,7 +1757,6 @@ class RemoteSessionController extends ChangeNotifier {
         ? rendererGeometry!
         : expected;
     _inboundVideoFrameSize = observedGeometry;
-    _committedDisplayGeneration = generation;
     _committedFrameGeometry =
         announcedGeometry ??
         _buildFrameGeometry(
@@ -3638,7 +3629,6 @@ class RemoteSessionController extends ChangeNotifier {
     _automaticQualitySuppressedUntil = null;
     _connectionEstablished = false;
     _displaySwitchGeneration = 0;
-    _committedDisplayGeneration = 0;
     _geometryObservationToken += 1;
     _displaySwitchInboundFramesBaseline = null;
     _inputSequence = 0;
