@@ -29,6 +29,32 @@ void main() {
       endpoint.queryParameters['capabilities'],
       'active-content-geometry-v2',
     );
+    expect(endpoint.queryParametersAll['capability'], const [
+      'active-content-geometry-v2',
+    ]);
+  });
+
+  test('encodes multiple capabilities as repeated query parameters', () {
+    final endpoint = buildSignalingUri(
+      serverUrl: 'ws://192.168.1.8:8080/ws/signaling',
+      roomCode: '123456',
+      role: RemoteRole.controller,
+      clientPlatform: 'Windows',
+      clientCapabilities: const [
+        'active-content-geometry-v2',
+        'text-clipboard-v1',
+      ],
+    );
+
+    expect(
+      endpoint.queryParameters['capabilities'],
+      'active-content-geometry-v2',
+    );
+    expect(endpoint.queryParametersAll['capability'], const [
+      'active-content-geometry-v2',
+      'text-clipboard-v1',
+    ]);
+    expect(endpoint.toString(), isNot(contains('%2C')));
   });
 
   test('allows a version two host to request a server-owned invitation', () {

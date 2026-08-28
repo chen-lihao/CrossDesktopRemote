@@ -270,7 +270,7 @@ Mac 选择“共享本机”后会自动上线并生成连接码；“在线等�
 - 切屏采集门禁以候选流创建时的 `mach_absolute_time` 对比帧 `displayTime`，拒绝排队旧帧；流身份、generation、可用 PixelBuffer 和目标输出尺寸是硬条件。`contentRect` 缺失或比例异常只记诊断并立即使用完整规范 Buffer，不再等待第二帧或固定 450ms；最长预热 5 秒，SCK 提前报错则立即失败。
 - iPad 的画布几何与解码器尺寸分离提交：切屏开始时锁定上一幅稳定 `sourceSize/contentRect`；目标屏宽高比不同时立即显示完全不透明遮罩，同宽高比快速切换才保留 120ms 延迟；本次请求后的首个新解码帧到达后原子提交协议几何，Texture 尺寸、关键帧计数和宽高比只用于后台诊断，不再否决正常媒体。切屏期间输入被阻止，避免旧坐标变换作用到目标屏。
 - iPad 只保留一个呈现变换：外层画布负责 `contain/cover`、居中、裁剪和指针归一化，内层 RTC Texture 只铺满该矩形；已提交的目标显示器尺寸优先于解码器过渡尺寸，避免 Sidecar 返回主屏后再次 `contain` 产生大面积黑边。
-- Windows控制端通过信令协商`active-content-geometry-v2`：Mac 把稳定编码画布内真实的 Sidecar 活动区域上报给控制端，原生`Texture`先裁去画布留黑，再由同一个`RemoteContentTransform`决定最大化适应、居中和指针归一化；不再让`RTCVideoView`内部执行第二次contain/cover。iPad不声明该能力，继续使用已验收的Apple归一化路径。
+- Windows控制端通过信令协商`active-content-geometry-v2`：多个客户端能力使用重复`capability`查询参数传输，首个能力同时保留在旧`capabilities`参数中用于旧服务降级；Java服务合并新旧格式，并兼容已发布客户端的`%2C`编码列表。Mac 把稳定编码画布内真实的 Sidecar 活动区域上报给控制端，原生`Texture`先裁去画布留黑，再由同一个`RemoteContentTransform`决定最大化适应、居中和指针归一化；不再让`RTCVideoView`内部执行第二次contain/cover。iPad不声明该能力，继续使用已验收的Apple归一化路径。
 - 远程工具栏刷新按钮用于原地修复当前会话：被控端释放残留按键/鼠标、复查输入权限、同步显示器和画质并请求新关键帧，桌面控制端只重绑现有纹理；WebSocket、PeerConnection、Track、Sender和DataChannel均保持。显示器列表刷新作为显示器菜单中的独立操作保留。
 - 显示器协议分别携带逻辑尺寸、采集像素尺寸和点像素比例：远程输入继续使用逻辑坐标，视频画质与 WebRTC 适配使用实际像素。macOS 14+ 通过 `SCContentFilter.contentRect × pointPixelScale` 采集，旧系统回退到 `CGDisplayPixelsWide/High`，避免把 Sidecar 的逻辑尺寸放大成模糊视频。
 - 自动画质默认从 1080p30/7 Mbps 开始，以 1 秒区间统计观察丢包、RTT、可用出站带宽、编码耗时、掉帧、冻结和拥塞原因；连续 2 个坏样本降档，连续 10 个好样本且至少稳定 15 秒才升档。档位依次为 1080p60、1080p30、720p60、720p30，切换失败会回滚；手动画质不被自动策略覆盖。显示器事务期间冻结自动档，事务结束后 5 秒内的切屏抖动不参与档位判断。

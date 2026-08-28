@@ -1,8 +1,12 @@
 package com.crossdesktopremote.controlplane.signaling;
 
 import java.io.IOException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -52,7 +56,12 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		var roomCode = query.getFirst("room");
 		var role = SignalingRole.parse(query.getFirst("role"));
 		var platform = normalizedPlatform(query.getFirst("platform"));
-		var clientCapabilities = normalizedCapabilities(query.getFirst("capabilities"));
+		var capabilityValues = new ArrayList<String>();
+		var repeatedCapabilities = query.get("capability");
+		if (repeatedCapabilities != null) capabilityValues.addAll(repeatedCapabilities);
+		var legacyCapabilities = query.getFirst("capabilities");
+		if (StringUtils.hasText(legacyCapabilities)) capabilityValues.add(legacyCapabilities);
+		var clientCapabilities = normalizedCapabilities(capabilityValues);
 		if (role.isEmpty() ||
 				(role.get() == SignalingRole.CONTROLLER && !StringUtils.hasText(roomCode))) {
 			session.close(CloseStatus.BAD_DATA.withReason("Invalid room or role"));
@@ -217,14 +226,23 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		return normalized.matches("[a-z0-9_-]{1,32}") ? normalized : "unknown";
 	}
 
-	private Set<String> normalizedCapabilities(String value) {
-		if (!StringUtils.hasText(value)) return Set.of();
+	private Set<String> normalizedCapabilities(List<String> values) {
+		if (values == null || values.isEmpty()) return Set.of();
 		var capabilities = new HashSet<String>();
-		for (var candidate : value.split(",")) {
-			var normalized = candidate.trim().toLowerCase();
-			if (normalized.matches("[a-z0-9_-]{1,64}")) {
-				capabilities.add(normalized);
-				if (capabilities.size() >= 16) break;
+		for (var value : values) {
+			if (!StringUtils.hasText(value)) continue;
+			String decoded;
+			try {
+				decoded = URLDecoder.decode(value, StandardCharsets.UTF_8);
+			} catch (IllegalArgumentException ignored) {
+				continue;
+			}
+			for (var candidate : decoded.split(",")) {
+				var normalized = candidate.trim().toLowerCase();
+				if (normalized.matches("[a-z0-9_-]{1,64}")) {
+					capabilities.add(normalized);
+					if (capabilities.size() >= 16) return Set.copyOf(capabilities);
+				}
 			}
 		}
 		return Set.copyOf(capabilities);

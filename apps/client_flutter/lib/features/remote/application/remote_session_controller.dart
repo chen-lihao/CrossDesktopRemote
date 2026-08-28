@@ -2509,6 +2509,12 @@ class RemoteSessionController extends ChangeNotifier {
             (message['peerCapabilities'] as List<dynamic>? ?? const [])
                 .whereType<String>()
                 .toSet();
+        if (kDebugMode) {
+          debugPrint(
+            'CrossDesktopRemote peer capabilities: '
+            '${peerCapabilities.toList()..sort()}',
+          );
+        }
         _remoteSupportsTextClipboardV1 = peerCapabilities.contains(
           'text-clipboard-v1',
         );

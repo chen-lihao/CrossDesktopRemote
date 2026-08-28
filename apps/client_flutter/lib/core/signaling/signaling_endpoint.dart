@@ -27,6 +27,12 @@ Uri buildSignalingUri({
     throw const FormatException('连接码必须是 6 位数字');
   }
 
+  final capabilities = clientCapabilities
+      .map((value) => value.trim().toLowerCase())
+      .where((value) => value.isNotEmpty)
+      .toSet()
+      .toList(growable: false);
+
   return baseUri.replace(
     queryParameters: {
       ...baseUri.queryParameters,
@@ -35,8 +41,11 @@ Uri buildSignalingUri({
       'protocol': '2',
       if (clientPlatform.trim().isNotEmpty)
         'platform': clientPlatform.trim().toLowerCase(),
-      if (clientCapabilities.isNotEmpty)
-        'capabilities': clientCapabilities.join(','),
+      // Keep the first capability for servers that only understand the legacy
+      // singular value. New servers consume every repeated capability entry,
+      // avoiding delimiter encoding differences between Dart and Spring.
+      if (capabilities.isNotEmpty) 'capabilities': capabilities.first,
+      if (capabilities.isNotEmpty) 'capability': capabilities,
     },
   );
 }
