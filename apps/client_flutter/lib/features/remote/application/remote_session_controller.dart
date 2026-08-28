@@ -5,6 +5,7 @@ import 'dart:math' as math;
 
 import 'package:cross_desktop_remote/core/clipboard/clipboard_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
+import 'package:cross_desktop_remote/core/files/explicit_file_transfer_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/host_platform_adapter_factory.dart';
 import 'package:cross_desktop_remote/core/input/remote_shortcut_policy.dart';
@@ -33,6 +34,18 @@ enum RemoteSessionState {
   reconnecting,
   disconnected,
   failed,
+}
+
+ClipboardSyncMode _platformClipboardMode(
+  ClipboardSyncMode requested,
+  RemoteRole role,
+) {
+  if (!Platform.isIOS || requested == ClipboardSyncMode.disabled) {
+    return requested;
+  }
+  return role == RemoteRole.controller
+      ? ClipboardSyncMode.controllerToHost
+      : ClipboardSyncMode.hostToController;
 }
 
 class _RtcVideoProgress {
@@ -108,6 +121,7 @@ class RemoteSessionController extends ChangeNotifier {
     SignalingClient? signalingClient,
     HostPlatformAdapter? hostPlatformAdapter,
     ClipboardPlatformAdapter? clipboardPlatformAdapter,
+    ExplicitFileTransferPlatformAdapter? fileTransferPlatformAdapter,
     Stream<DesktopWindowLifecycleEvent>? hostWindowLifecycleEvents,
     RemoteQualityProfile initialQuality = RemoteQualityProfile.automatic,
     ClipboardSyncMode initialClipboardMode = ClipboardSyncMode.bidirectional,
@@ -118,11 +132,14 @@ class RemoteSessionController extends ChangeNotifier {
        _hostWindowLifecycleEvents =
            hostWindowLifecycleEvents ??
            PlatformDesktopWindowModeController.lifecycleEvents,
+       _fileTransferPlatform =
+           fileTransferPlatformAdapter ??
+           createExplicitFileTransferPlatformAdapter(),
        _selectedQuality = initialQuality,
-       _clipboardMode = initialClipboardMode,
+       _clipboardMode = _platformClipboardMode(initialClipboardMode, role),
        _clipboardSync = TextClipboardSyncEngine(
          localIsController: role == RemoteRole.controller,
-         initialMode: initialClipboardMode,
+         initialMode: _platformClipboardMode(initialClipboardMode, role),
        ) {
     _fileTransfer.addListener(_handleFileTransferChanged);
     _fileTransferNoticeSubscription = _fileTransfer.notices.listen(_emitNotice);
@@ -132,9 +149,11 @@ class RemoteSessionController extends ChangeNotifier {
   final SignalingClient _signaling;
   final HostPlatformAdapter _hostPlatform;
   final ClipboardPlatformAdapter _clipboardPlatform;
+  final ExplicitFileTransferPlatformAdapter _fileTransferPlatform;
   final TextClipboardSyncEngine _clipboardSync;
   final ClipboardApplyGate _clipboardApplyGate = ClipboardApplyGate();
   final ExplicitFileTransferEngine _fileTransfer = ExplicitFileTransferEngine();
+  final Map<String, List<String>> _stagedOutgoingFiles = {};
   final Stream<DesktopWindowLifecycleEvent> _hostWindowLifecycleEvents;
 
   /// Apple keeps the physically verified fixed 1080p ScreenCaptureKit canvas.
@@ -271,7 +290,13 @@ class RemoteSessionController extends ChangeNotifier {
   String get clipboardStatusMessage => _clipboardStatusMessage;
   bool get clipboardSupported => _clipboardPlatform.supported;
   bool get localExplicitFileTransferSupported =>
-      Platform.isMacOS || Platform.isWindows;
+      _fileTransferPlatform.supported;
+  bool get explicitFileTransferDirectorySelectionSupported =>
+      _fileTransferPlatform.supportsDirectorySelection;
+  bool get explicitFileTransferUsesManagedReceiveStorage =>
+      _fileTransferPlatform.usesManagedReceiveStorage;
+  bool get explicitFileTransferReceivedExportSupported =>
+      _fileTransferPlatform.supportsReceivedExport;
   bool get remoteSupportsExplicitFileTransferV1 =>
       _remoteSupportsExplicitFileTransferV1;
   bool get explicitFileTransferReady =>
@@ -407,6 +432,10 @@ class RemoteSessionController extends ChangeNotifier {
       _updateClipboardStatus();
       return;
     }
+    if (!_clipboardPlatform.automaticMonitoringSupported) {
+      _updateClipboardStatus();
+      return;
+    }
     try {
       _clipboardSync.observeBaseline(await _clipboardPlatform.readSnapshot());
       _clipboardSubscription = _clipboardPlatform.changes.listen(
@@ -422,13 +451,14 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   void setClipboardMode(ClipboardSyncMode value) {
-    if (_clipboardMode == value) return;
-    _clipboardMode = value;
-    _clipboardSync.setMode(value);
+    final effectiveMode = _platformClipboardMode(value, role);
+    if (_clipboardMode == effectiveMode) return;
+    _clipboardMode = effectiveMode;
+    _clipboardSync.setMode(effectiveMode);
     _sendClipboard({
       'type': 'hello',
       'version': clipboardWireVersion,
-      'mode': value.name,
+      'mode': effectiveMode.name,
       'supportsApplied': true,
     });
     _updateClipboardStatus();
@@ -490,7 +520,9 @@ class RemoteSessionController extends ChangeNotifier {
       _clipboardStatusMessage = '远程设备已关闭剪贴板同步';
     } else {
       _clipboardStatus = ClipboardSyncStatus.ready;
-      _clipboardStatusMessage = '剪贴板同步已就绪 · ${_clipboardMode.label}';
+      _clipboardStatusMessage = _clipboardPlatform.automaticMonitoringSupported
+          ? '剪贴板同步已就绪 · ${_clipboardMode.label}'
+          : '点击远程粘贴时读取 iPad 剪贴板';
     }
   }
 
@@ -748,13 +780,69 @@ class RemoteSessionController extends ChangeNotifier {
   Future<String> sendExplicitFiles(List<String> paths) =>
       _fileTransfer.sendFiles(paths);
 
+  Future<String?> pickAndSendExplicitFiles() async {
+    final paths = await _fileTransferPlatform.pickOutgoingFiles();
+    if (paths.isEmpty) return null;
+    try {
+      final transferId = await _fileTransfer.sendFiles(paths);
+      _stagedOutgoingFiles[transferId] = List.unmodifiable(paths);
+      _handleFileTransferChanged();
+      return transferId;
+    } catch (_) {
+      await _fileTransferPlatform.cleanupOutgoingFiles(paths);
+      rethrow;
+    }
+  }
+
   Future<String> sendExplicitDirectory(String path) =>
-      _fileTransfer.sendDirectory(path);
+      _fileTransferPlatform.supportsDirectorySelection
+      ? _fileTransfer.sendDirectory(path)
+      : throw UnsupportedError('iPad 暂不支持直接发送目录');
 
   Future<void> acceptExplicitFileTransfer(
     String transferId,
     String destinationRoot,
   ) => _fileTransfer.accept(transferId, destinationRoot);
+
+  Future<void> acceptExplicitFileTransferToManagedStorage(
+    String transferId,
+  ) async {
+    final destination = await _fileTransferPlatform.createReceiveDirectory(
+      transferId,
+    );
+    await _fileTransfer.accept(transferId, destination);
+  }
+
+  Future<void> exportExplicitFileTransfer(String transferId) async {
+    await _fileTransferPlatform.exportReceivedFiles(
+      await _completedIncomingTransferPaths(transferId),
+    );
+  }
+
+  Future<void> shareExplicitFileTransfer(String transferId) async {
+    await _fileTransferPlatform.shareReceivedFiles(
+      await _completedIncomingTransferPaths(transferId),
+    );
+  }
+
+  Future<List<String>> _completedIncomingTransferPaths(
+    String transferId,
+  ) async {
+    final task = _fileTransfer.tasks
+        .where((item) => item.id == transferId)
+        .firstOrNull;
+    if (task == null ||
+        !task.isIncoming ||
+        task.state != ExplicitFileTransferState.completed ||
+        task.destinationRoot == null) {
+      throw StateError('文件尚未接收完成');
+    }
+    final paths = await Directory(task.destinationRoot!).list().map((entity) {
+      return entity.path;
+    }).toList();
+    if (paths.isEmpty) throw StateError('接收目录中没有可导出的文件');
+    return paths;
+  }
 
   Future<void> rejectExplicitFileTransfer(String transferId) =>
       _fileTransfer.reject(transferId);
@@ -769,6 +857,15 @@ class RemoteSessionController extends ChangeNotifier {
       _fileTransfer.cancel(transferId);
 
   void _handleFileTransferChanged() {
+    for (final entry in _stagedOutgoingFiles.entries.toList(growable: false)) {
+      final task = _fileTransfer.tasks
+          .where((item) => item.id == entry.key)
+          .firstOrNull;
+      if (task == null || !task.canCancel) {
+        _stagedOutgoingFiles.remove(entry.key);
+        unawaited(_fileTransferPlatform.cleanupOutgoingFiles(entry.value));
+      }
+    }
     notifyListeners();
   }
 
@@ -3845,6 +3942,10 @@ class RemoteSessionController extends ChangeNotifier {
   @override
   void dispose() {
     _fileTransfer.removeListener(_handleFileTransferChanged);
+    for (final paths in _stagedOutgoingFiles.values) {
+      unawaited(_fileTransferPlatform.cleanupOutgoingFiles(paths));
+    }
+    _stagedOutgoingFiles.clear();
     unawaited(_disposeResources());
     unawaited(_notices.close());
     super.dispose();

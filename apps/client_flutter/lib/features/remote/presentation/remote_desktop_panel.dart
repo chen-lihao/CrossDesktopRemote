@@ -3255,8 +3255,8 @@ class _CompactRemoteKeyboard extends StatelessWidget {
                       onPressed: () => onPrimaryShortcut('KeyC'),
                     ),
                     _CompactKeyButton(
-                      label: '$primaryShortcutLabel+V',
-                      tooltip: '粘贴',
+                      label: Platform.isIOS ? '粘贴' : '$primaryShortcutLabel+V',
+                      tooltip: Platform.isIOS ? '读取当前 iPad 剪贴板并粘贴到远程设备' : '粘贴',
                       onPressed: () => onPrimaryShortcut('KeyV'),
                     ),
                     _CompactKeyButton(

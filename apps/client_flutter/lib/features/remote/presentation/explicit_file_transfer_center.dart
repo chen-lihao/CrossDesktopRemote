@@ -60,13 +60,14 @@ Future<void> showExplicitFileTransferCenter(
                       icon: const Icon(Icons.file_upload_outlined),
                       label: const Text('发送文件'),
                     ),
-                    OutlinedButton.icon(
-                      onPressed: session.explicitFileTransferReady
-                          ? () => _selectAndSendDirectory(context, session)
-                          : null,
-                      icon: const Icon(Icons.drive_folder_upload_outlined),
-                      label: const Text('发送目录'),
-                    ),
+                    if (session.explicitFileTransferDirectorySelectionSupported)
+                      OutlinedButton.icon(
+                        onPressed: session.explicitFileTransferReady
+                            ? () => _selectAndSendDirectory(context, session)
+                            : null,
+                        icon: const Icon(Icons.drive_folder_upload_outlined),
+                        label: const Text('发送目录'),
+                      ),
                   ],
                 ),
                 const Divider(height: 28),
@@ -243,7 +244,9 @@ class ExplicitFileTransferTaskTile extends StatelessWidget {
             if (task.destinationRoot case final destination?) ...[
               const SizedBox(height: 6),
               Text(
-                '保存位置：$destination',
+                session.explicitFileTransferUsesManagedReceiveStorage
+                    ? '已保存到应用暂存区；请导出到“文件”或通过分享保存。'
+                    : '保存位置：$destination',
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodySmall,
@@ -269,7 +272,34 @@ class ExplicitFileTransferTaskTile extends StatelessWidget {
                   FilledButton(
                     key: ValueKey('acceptExplicitFileTransfer-${task.id}'),
                     onPressed: () => _acceptTransfer(context),
-                    child: const Text('选择保存位置并接收'),
+                    child: Text(
+                      session.explicitFileTransferUsesManagedReceiveStorage
+                          ? '接收到应用暂存区'
+                          : '选择保存位置并接收',
+                    ),
+                  ),
+                ],
+              ),
+            ] else if (task.isIncoming &&
+                task.state == ExplicitFileTransferState.completed &&
+                session.explicitFileTransferReceivedExportSupported) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    key: ValueKey('shareExplicitFileTransfer-${task.id}'),
+                    onPressed: () => _shareTransfer(context),
+                    icon: const Icon(Icons.ios_share_outlined),
+                    label: const Text('分享…'),
+                  ),
+                  FilledButton.icon(
+                    key: ValueKey('exportExplicitFileTransfer-${task.id}'),
+                    onPressed: () => _exportTransfer(context),
+                    icon: const Icon(Icons.folder_outlined),
+                    label: const Text('导出到“文件”'),
                   ),
                 ],
               ),
@@ -313,6 +343,13 @@ class ExplicitFileTransferTaskTile extends StatelessWidget {
 
   Future<void> _acceptTransfer(BuildContext context) async {
     try {
+      if (session.explicitFileTransferUsesManagedReceiveStorage) {
+        await session.acceptExplicitFileTransferToManagedStorage(task.id);
+        if (context.mounted) {
+          AppMessenger.show('已开始接收，完成后可导出或分享');
+        }
+        return;
+      }
       final destination =
           await (destinationPicker ??
               () => getDirectoryPath(confirmButtonText: '保存到此处'))();
@@ -327,6 +364,29 @@ class ExplicitFileTransferTaskTile extends StatelessWidget {
       }
     }
   }
+
+  Future<void> _exportTransfer(BuildContext context) async {
+    try {
+      await session.exportExplicitFileTransfer(task.id);
+      if (context.mounted) {
+        AppMessenger.show('已完成系统文件导出', level: AppMessageLevel.success);
+      }
+    } catch (error) {
+      if (context.mounted) {
+        AppMessenger.show('导出文件失败：$error', level: AppMessageLevel.error);
+      }
+    }
+  }
+
+  Future<void> _shareTransfer(BuildContext context) async {
+    try {
+      await session.shareExplicitFileTransfer(task.id);
+    } catch (error) {
+      if (context.mounted) {
+        AppMessenger.show('分享文件失败：$error', level: AppMessageLevel.error);
+      }
+    }
+  }
 }
 
 Future<void> _selectAndSendFiles(
@@ -334,6 +394,14 @@ Future<void> _selectAndSendFiles(
   RemoteSessionController session,
 ) async {
   try {
+    if (!session.explicitFileTransferDirectorySelectionSupported) {
+      final transferId = await session.pickAndSendExplicitFiles();
+      if (transferId == null) return;
+      if (context.mounted) {
+        AppMessenger.show('已发送文件清单，等待对方确认');
+      }
+      return;
+    }
     final selected = await openFiles();
     if (selected.isEmpty) return;
     await session.sendExplicitFiles(
@@ -369,7 +437,9 @@ Future<void> _selectAndSendDirectory(
 
 String _transferAvailabilityMessage(RemoteSessionController session) {
   if (session.explicitFileTransferReady) {
-    return '可以双向发送文件或目录；接收方选择保存位置后开始传输。';
+    return session.explicitFileTransferUsesManagedReceiveStorage
+        ? '选择文件可发送；接收文件先进入应用暂存区，完成后由你导出或分享。'
+        : '可以双向发送文件或目录；接收方选择保存位置后开始传输。';
   }
   if (session.remoteSupportsExplicitFileTransferV1) {
     return '文件通道正在建立，请稍候。';

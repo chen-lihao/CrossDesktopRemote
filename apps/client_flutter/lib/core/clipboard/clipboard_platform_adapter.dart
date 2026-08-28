@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -36,6 +37,7 @@ class ClipboardSnapshot {
 
 abstract interface class ClipboardPlatformAdapter {
   bool get supported;
+  bool get automaticMonitoringSupported;
   Stream<ClipboardSnapshot> get changes;
   Future<ClipboardSnapshot> readSnapshot();
   Future<ClipboardSnapshot> writeText(String text);
@@ -64,6 +66,9 @@ class MethodChannelClipboardPlatformAdapter
   bool get supported => Platform.isMacOS || Platform.isWindows;
 
   @override
+  bool get automaticMonitoringSupported => true;
+
+  @override
   Stream<ClipboardSnapshot> get changes =>
       _eventChannel.receiveBroadcastStream().map(ClipboardSnapshot.fromMap);
 
@@ -82,11 +87,70 @@ class MethodChannelClipboardPlatformAdapter
   }
 }
 
+typedef ClipboardTextReader = Future<String?> Function();
+typedef ClipboardTextWriter = Future<void> Function(String text);
+
+/// iOS/iPadOS must only inspect the pasteboard after an explicit user action.
+/// This adapter intentionally exposes no background change stream.
+class UserInitiatedClipboardPlatformAdapter
+    implements ClipboardPlatformAdapter {
+  UserInitiatedClipboardPlatformAdapter({
+    ClipboardTextReader? readText,
+    ClipboardTextWriter? writeText,
+  }) : _readText = readText ?? _readSystemText,
+       _writeText = writeText ?? _writeSystemText;
+
+  final ClipboardTextReader _readText;
+  final ClipboardTextWriter _writeText;
+  int _revision = 0;
+
+  @override
+  bool get supported => true;
+
+  @override
+  bool get automaticMonitoringSupported => false;
+
+  @override
+  Stream<ClipboardSnapshot> get changes => const Stream.empty();
+
+  @override
+  Future<ClipboardSnapshot> readSnapshot() async {
+    final text = await _readText();
+    return _snapshot(text);
+  }
+
+  @override
+  Future<ClipboardSnapshot> writeText(String text) async {
+    await _writeText(text);
+    return _snapshot(text);
+  }
+
+  ClipboardSnapshot _snapshot(String? text) {
+    final bytes = text == null ? 0 : utf8.encode(text).length;
+    return ClipboardSnapshot(
+      revision: ++_revision,
+      hasText: text != null,
+      tooLarge: bytes > maxTextClipboardBytes,
+      utf8Bytes: bytes,
+      text: bytes > maxTextClipboardBytes ? null : text,
+    );
+  }
+
+  static Future<String?> _readSystemText() async =>
+      (await Clipboard.getData('text/plain'))?.text;
+
+  static Future<void> _writeSystemText(String text) =>
+      Clipboard.setData(ClipboardData(text: text));
+}
+
 class UnsupportedClipboardPlatformAdapter implements ClipboardPlatformAdapter {
   const UnsupportedClipboardPlatformAdapter();
 
   @override
   bool get supported => false;
+
+  @override
+  bool get automaticMonitoringSupported => false;
 
   @override
   Stream<ClipboardSnapshot> get changes => const Stream.empty();
@@ -106,5 +170,6 @@ ClipboardPlatformAdapter createClipboardPlatformAdapter() {
   if (Platform.isMacOS || Platform.isWindows) {
     return MethodChannelClipboardPlatformAdapter();
   }
+  if (Platform.isIOS) return UserInitiatedClipboardPlatformAdapter();
   return const UnsupportedClipboardPlatformAdapter();
 }

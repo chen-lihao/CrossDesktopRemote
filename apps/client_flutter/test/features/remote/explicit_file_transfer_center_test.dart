@@ -73,6 +73,57 @@ void main() {
     expect(session.acceptedTransferId, 'incoming-1');
     expect(session.acceptedDestination, '/receive/files');
   });
+
+  testWidgets('iPad accepts into managed storage without a directory picker', (
+    tester,
+  ) async {
+    final session = _FakeFileTransferSession(
+      tasks: [_incomingTask()],
+      managedReceiveStorage: true,
+    );
+    addTearDown(session.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: HostFileTransferSection(session: session)),
+      ),
+    );
+
+    expect(find.text('接收到应用暂存区'), findsOneWidget);
+    await tester.tap(find.text('接收到应用暂存区'));
+    await tester.pump();
+
+    expect(session.managedAcceptedTransferId, 'incoming-1');
+  });
+
+  testWidgets('iPad completed receive exposes export and share actions', (
+    tester,
+  ) async {
+    final session = _FakeFileTransferSession(
+      tasks: [_completedIncomingTask()],
+      managedReceiveStorage: true,
+    );
+    addTearDown(session.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: HostFileTransferSection(session: session)),
+      ),
+    );
+
+    await tester.tap(find.text('打开传输中心'));
+    await tester.pumpAndSettle();
+    expect(find.text('导出到“文件”'), findsOneWidget);
+    expect(find.text('分享…'), findsOneWidget);
+
+    await tester.tap(find.text('导出到“文件”'));
+    await tester.pump();
+    expect(session.exportedTransferId, 'incoming-completed');
+
+    await tester.tap(find.text('分享…'));
+    await tester.pump();
+    expect(session.sharedTransferId, 'incoming-completed');
+  });
 }
 
 ExplicitFileTransferTaskSnapshot _incomingTask() {
@@ -98,19 +149,48 @@ ExplicitFileTransferTaskSnapshot _incomingTask() {
   );
 }
 
+ExplicitFileTransferTaskSnapshot _completedIncomingTask() {
+  return ExplicitFileTransferTaskSnapshot(
+    id: 'incoming-completed',
+    direction: ExplicitFileTransferDirection.incoming,
+    state: ExplicitFileTransferState.completed,
+    entries: const [
+      ExplicitFileTransferEntry(
+        index: 0,
+        relativePath: 'report.pdf',
+        kind: ExplicitFileEntryKind.file,
+        sizeBytes: 4096,
+        modifiedAtUnixMs: 0,
+        sha256Hex:
+            '0000000000000000000000000000000000000000000000000000000000000000',
+      ),
+    ],
+    transferredBytes: 4096,
+    totalBytes: 4096,
+    createdAt: DateTime.fromMillisecondsSinceEpoch(0),
+    destinationRoot: '/managed/incoming/incoming-completed',
+  );
+}
+
 class _FakeFileTransferSession extends RemoteSessionController {
-  _FakeFileTransferSession({required this.tasks})
-    : super(
-        role: RemoteRole.host,
-        hostPlatformAdapter: const UnsupportedHostPlatformAdapter(),
-        clipboardPlatformAdapter: const UnsupportedClipboardPlatformAdapter(),
-        hostWindowLifecycleEvents: const Stream.empty(),
-      );
+  _FakeFileTransferSession({
+    required this.tasks,
+    this.managedReceiveStorage = false,
+  }) : super(
+         role: RemoteRole.host,
+         hostPlatformAdapter: const UnsupportedHostPlatformAdapter(),
+         clipboardPlatformAdapter: const UnsupportedClipboardPlatformAdapter(),
+         hostWindowLifecycleEvents: const Stream.empty(),
+       );
 
   final List<ExplicitFileTransferTaskSnapshot> tasks;
+  final bool managedReceiveStorage;
   String? rejectedTransferId;
   String? acceptedTransferId;
   String? acceptedDestination;
+  String? managedAcceptedTransferId;
+  String? exportedTransferId;
+  String? sharedTransferId;
 
   @override
   bool get localExplicitFileTransferSupported => true;
@@ -120,6 +200,17 @@ class _FakeFileTransferSession extends RemoteSessionController {
 
   @override
   bool get explicitFileTransferReady => true;
+
+  @override
+  bool get explicitFileTransferDirectorySelectionSupported =>
+      !managedReceiveStorage;
+
+  @override
+  bool get explicitFileTransferUsesManagedReceiveStorage =>
+      managedReceiveStorage;
+
+  @override
+  bool get explicitFileTransferReceivedExportSupported => managedReceiveStorage;
 
   @override
   List<ExplicitFileTransferTaskSnapshot> get fileTransferTasks => tasks;
@@ -140,5 +231,22 @@ class _FakeFileTransferSession extends RemoteSessionController {
   ) async {
     acceptedTransferId = transferId;
     acceptedDestination = destinationRoot;
+  }
+
+  @override
+  Future<void> acceptExplicitFileTransferToManagedStorage(
+    String transferId,
+  ) async {
+    managedAcceptedTransferId = transferId;
+  }
+
+  @override
+  Future<void> exportExplicitFileTransfer(String transferId) async {
+    exportedTransferId = transferId;
+  }
+
+  @override
+  Future<void> shareExplicitFileTransfer(String transferId) async {
+    sharedTransferId = transferId;
   }
 }

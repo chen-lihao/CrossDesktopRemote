@@ -154,32 +154,52 @@ class SettingsPage extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  if (Platform.isMacOS || Platform.isWindows) ...[
+                  if (session.clipboardSupported) ...[
                     _SettingsSection(
                       title: '数据交换',
                       icon: Icons.content_paste_go_outlined,
                       children: [
-                        ListTile(
-                          title: const Text('文本剪贴板'),
-                          subtitle: Text(
-                            settings.clipboardSyncMode.description,
+                        if (Platform.isIOS)
+                          SwitchListTile(
+                            title: const Text('用户触发式文本粘贴'),
+                            subtitle: const Text(
+                              '仅在你点击远程键盘的“粘贴”时读取 iPad 剪贴板，并只发送到被控端',
+                            ),
+                            value:
+                                settings.clipboardSyncMode !=
+                                ClipboardSyncMode.disabled,
+                            onChanged: (enabled) => unawaited(
+                              settings.setClipboardSyncMode(
+                                enabled
+                                    ? ClipboardSyncMode.controllerToHost
+                                    : ClipboardSyncMode.disabled,
+                              ),
+                            ),
+                          )
+                        else
+                          ListTile(
+                            title: const Text('文本剪贴板'),
+                            subtitle: Text(
+                              settings.clipboardSyncMode.description,
+                            ),
+                            trailing: DropdownButton<ClipboardSyncMode>(
+                              value: settings.clipboardSyncMode,
+                              onChanged: (value) {
+                                if (value != null) {
+                                  unawaited(
+                                    settings.setClipboardSyncMode(value),
+                                  );
+                                }
+                              },
+                              items: [
+                                for (final mode in ClipboardSyncMode.values)
+                                  DropdownMenuItem(
+                                    value: mode,
+                                    child: Text(mode.label),
+                                  ),
+                              ],
+                            ),
                           ),
-                          trailing: DropdownButton<ClipboardSyncMode>(
-                            value: settings.clipboardSyncMode,
-                            onChanged: (value) {
-                              if (value != null) {
-                                unawaited(settings.setClipboardSyncMode(value));
-                              }
-                            },
-                            items: [
-                              for (final mode in ClipboardSyncMode.values)
-                                DropdownMenuItem(
-                                  value: mode,
-                                  child: Text(mode.label),
-                                ),
-                            ],
-                          ),
-                        ),
                         ListTile(
                           leading: Icon(
                             session.clipboardStatus == ClipboardSyncStatus.error
@@ -192,10 +212,18 @@ class SettingsPage extends StatelessWidget {
                           title: const Text('剪贴板状态'),
                           subtitle: Text(session.clipboardStatusMessage),
                         ),
-                        const ListTile(
+                        ListTile(
                           leading: Icon(Icons.shield_outlined),
-                          title: Text('仅同步新复制的 UTF-8 文本'),
-                          subtitle: Text('不同步连接前的历史内容；单条上限 256 KiB；不写入会话记录'),
+                          title: Text(
+                            Platform.isIOS
+                                ? '不会在后台读取 iPad 剪贴板'
+                                : '仅同步新复制的 UTF-8 文本',
+                          ),
+                          subtitle: Text(
+                            Platform.isIOS
+                                ? '必须由用户点击粘贴；单条上限 256 KiB；不写入会话记录'
+                                : '不同步连接前的历史内容；单条上限 256 KiB；不写入会话记录',
+                          ),
                         ),
                       ],
                     ),

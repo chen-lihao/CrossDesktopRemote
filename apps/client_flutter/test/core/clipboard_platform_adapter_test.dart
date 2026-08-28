@@ -51,4 +51,31 @@ void main() {
     expect((await adapter.writeText('你好')).text, '你好');
     expect(calls.map((call) => call.method), ['getSnapshot', 'writeText']);
   });
+
+  test(
+    'user initiated adapter never monitors and reads only on demand',
+    () async {
+      var reads = 0;
+      var written = '';
+      final adapter = UserInitiatedClipboardPlatformAdapter(
+        readText: () async {
+          reads += 1;
+          return 'iPad 粘贴';
+        },
+        writeText: (text) async => written = text,
+      );
+
+      expect(adapter.automaticMonitoringSupported, isFalse);
+      expect(await adapter.changes.isEmpty, isTrue);
+      expect(reads, 0);
+
+      final snapshot = await adapter.readSnapshot();
+      expect(reads, 1);
+      expect(snapshot.text, 'iPad 粘贴');
+    expect(snapshot.utf8Bytes, 11);
+
+      await adapter.writeText('remote');
+      expect(written, 'remote');
+    },
+  );
 }
