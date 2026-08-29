@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 进入共享角色后自动上线并取得一次性连接码。文件/剪贴板阶段 1～5 已接入协议与Rust核心、桌面文本剪贴板、Mac/Windows/iPad显式文件传输、iPad用户授权边界，以及Mac↔Windows文件剪贴板物化与延迟呈现。Windows/iPad双机物理验收仍未完成。
+> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 进入共享角色后自动上线并取得一次性连接码。文件/剪贴板阶段 1～5 已接入协议与Rust核心、桌面文本剪贴板、Mac/Windows/iPad显式文件传输、iPad用户授权边界，以及Mac↔Windows文件剪贴板安全物化与系统粘贴。Windows/iPad双机物理验收仍未完成。
 
 ## 项目定位
 
@@ -325,7 +325,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；桌面DNS-SD、统一跨平台切屏事务、非阻塞显示几何和输入路径；macOS/Windows文本与文件剪贴板；Mac/Windows/iPad显式文件通道和传输中心；iPad用户触发式粘贴、文件安全暂存、接收后导出/分享；文件剪贴板后台物化、Windows OLE delayed rendering、macOS file promise、粘贴进度与完成后继续粘贴；暂停/恢复/取消、`.cdrpart`原子落盘与会话内续传；`analyze`零告警、171项测试通过且1项按设计跳过，macOS Debug构建成功 | Windows MSVC构建、Windows/iPad各30次主副屏往返和Mac/Windows/iPad双机文件/剪贴板物理验收；20 GB、磁盘满、输入P95与应用重启后续传 |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；桌面DNS-SD、统一跨平台切屏事务、非阻塞显示几何和输入路径；macOS/Windows文本与文件剪贴板；Mac/Windows/iPad显式文件通道和传输中心；iPad用户触发式粘贴、文件安全暂存、接收后导出/分享；文件剪贴板后台物化、Windows OLE delayed rendering、macOS已物化文件URL、粘贴进度与完成后继续粘贴；暂停/恢复/取消、`.cdrpart`原子落盘与会话内续传；`analyze`零告警、172项测试通过且1项按设计跳过，macOS Debug构建成功 | Windows MSVC构建、Windows/iPad各30次主副屏往返和Mac/Windows/iPad双机文件/剪贴板物理验收；20 GB、磁盘满、输入P95与应用重启后续传 |
 | Rust | `fmt`、Clippy；27个workspace单测；传输状态机、限额、Manifest/路径、恢复位图、SHA-256、WebRTC背压抽象与任务C ABI | 桌面MVP磁盘数据泵仍在Dart应用服务；下沉Rust/原生层和发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、邀请/来源两级限流、`retryAfter` 和 9 个测试 | 身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1基础消息、剪贴板/文件传输协议、显式能力协商和旧客户端降级；Buf lint、Java/Rust/Dart生成和编译 | 平台互操作、模糊测试和breaking基线待增加 |

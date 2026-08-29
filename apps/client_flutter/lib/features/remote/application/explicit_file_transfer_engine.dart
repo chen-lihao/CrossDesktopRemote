@@ -778,9 +778,13 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
       task
         ..state = ExplicitFileTransferState.completed
         ..transferredBytes = task.totalBytes
-        ..message = '文件传输完成';
+        ..message = task.isClipboard ? '文件剪贴板缓存已就绪' : '文件传输完成';
       await _sendCompleted(task);
-      _notice('文件已保存到 ${task.destinationRoot}');
+      _notice(
+        task.isClipboard
+            ? '文件剪贴板缓存已就绪，粘贴位置由目标应用决定'
+            : '文件已保存到 ${task.destinationRoot}',
+      );
     }
     _notify();
   }
@@ -789,9 +793,13 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     if (task.entries.any((entry) => entry.isFile)) return;
     task
       ..state = ExplicitFileTransferState.completed
-      ..message = '空目录传输完成';
+      ..message = task.isClipboard ? '文件剪贴板缓存已就绪' : '空目录传输完成';
     await _sendCompleted(task);
-    _notice('目录已保存到 ${task.destinationRoot}');
+    _notice(
+      task.isClipboard
+          ? '文件剪贴板缓存已就绪，粘贴位置由目标应用决定'
+          : '目录已保存到 ${task.destinationRoot}',
+    );
   }
 
   Future<void> _finalizeCompletePartials(_MutableTransferTask task) async {
@@ -1357,6 +1365,8 @@ class _MutableTransferTask {
   final Map<int, Set<int>> remoteCompletedBlocks = {};
   final Set<int> resumeEntriesReceived = {};
   final Map<int, _ReceiveEntry> receiveEntries = {};
+
+  bool get isClipboard => purpose == ExplicitFileTransferPurpose.clipboard;
 
   ExplicitFileTransferTaskSnapshot get snapshot =>
       ExplicitFileTransferTaskSnapshot(

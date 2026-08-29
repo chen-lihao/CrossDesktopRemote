@@ -124,6 +124,27 @@ void main() {
     await tester.pump();
     expect(session.sharedTransferId, 'incoming-completed');
   });
+
+  testWidgets('clipboard receive hides its internal cache directory', (
+    tester,
+  ) async {
+    final session = _FakeFileTransferSession(
+      tasks: [_completedClipboardTask()],
+    );
+    addTearDown(session.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: HostFileTransferSection(session: session)),
+      ),
+    );
+
+    await tester.tap(find.text('打开传输中心'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('/tmp/clipboard-cache'), findsNothing);
+    expect(find.text('已安全缓存；最终位置由目标应用在粘贴时决定。'), findsOneWidget);
+  });
 }
 
 ExplicitFileTransferTaskSnapshot _incomingTask() {
@@ -169,6 +190,31 @@ ExplicitFileTransferTaskSnapshot _completedIncomingTask() {
     totalBytes: 4096,
     createdAt: DateTime.fromMillisecondsSinceEpoch(0),
     destinationRoot: '/managed/incoming/incoming-completed',
+  );
+}
+
+ExplicitFileTransferTaskSnapshot _completedClipboardTask() {
+  return ExplicitFileTransferTaskSnapshot(
+    id: 'clipboard-completed',
+    direction: ExplicitFileTransferDirection.incoming,
+    state: ExplicitFileTransferState.completed,
+    purpose: ExplicitFileTransferPurpose.clipboard,
+    entries: const [
+      ExplicitFileTransferEntry(
+        index: 0,
+        relativePath: 'clipboard.txt',
+        kind: ExplicitFileEntryKind.file,
+        sizeBytes: 9,
+        modifiedAtUnixMs: 0,
+        sha256Hex:
+            '0000000000000000000000000000000000000000000000000000000000000000',
+      ),
+    ],
+    transferredBytes: 9,
+    totalBytes: 9,
+    createdAt: DateTime.fromMillisecondsSinceEpoch(0),
+    destinationRoot: '/tmp/clipboard-cache',
+    message: '文件剪贴板缓存已就绪',
   );
 }
 

@@ -244,7 +244,9 @@ class ExplicitFileTransferTaskTile extends StatelessWidget {
             if (task.destinationRoot case final destination?) ...[
               const SizedBox(height: 6),
               Text(
-                session.explicitFileTransferUsesManagedReceiveStorage
+                task.isClipboard
+                    ? '已安全缓存；最终位置由目标应用在粘贴时决定。'
+                    : session.explicitFileTransferUsesManagedReceiveStorage
                     ? '已保存到应用暂存区；请导出到“文件”或通过分享保存。'
                     : '保存位置：$destination',
                 maxLines: 2,

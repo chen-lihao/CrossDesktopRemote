@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <string>
 #include <utility>
 #include <variant>

@@ -89,6 +89,20 @@ void main() {
     );
     expect(incoming.isClipboard, isTrue);
     expect(incoming.message, '正在准备文件剪贴板');
+
+    final cache = await Directory(
+      '${sandbox.path}${Platform.pathSeparator}clipboard-cache',
+    ).create();
+    await receiver.accept(transferId, cache.path);
+    await _waitFor(
+      () =>
+          receiver.tasks.singleWhere((task) => task.id == transferId).state ==
+          ExplicitFileTransferState.completed,
+    );
+    final completed = receiver.tasks.singleWhere(
+      (task) => task.id == transferId,
+    );
+    expect(completed.message, '文件剪贴板缓存已就绪');
   });
 
   test('resumes from a .cdrpart after transport reconnects', () async {
