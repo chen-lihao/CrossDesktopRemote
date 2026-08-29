@@ -3,7 +3,7 @@ import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('iOS controller advertises only crop-aware geometry v3', () {
+  test('iOS and Windows controllers share the same switch capabilities', () {
     final capabilities = buildRemoteClientCapabilities(
       role: RemoteRole.controller,
       platform: 'ios',
@@ -11,13 +11,23 @@ void main() {
       explicitFileTransferSupported: true,
     );
 
+    final windowsCapabilities = buildRemoteClientCapabilities(
+      role: RemoteRole.controller,
+      platform: 'windows',
+      clipboardSupported: true,
+      explicitFileTransferSupported: true,
+    );
+
+    expect(capabilities, windowsCapabilities);
+    expect(capabilities, contains(displaySwitchTransactionV1Capability));
+    expect(capabilities, contains(activeContentGeometryV2Capability));
     expect(capabilities, contains(activeContentGeometryV3Capability));
-    expect(capabilities, isNot(contains(activeContentGeometryV2Capability)));
+    expect(capabilities, contains(textureCropRenderingV1Capability));
     expect(capabilities, contains(textClipboardV1Capability));
     expect(capabilities, contains(explicitFileTransferV1Capability));
   });
 
-  test('Windows controller keeps v2 fallback and advertises v3', () {
+  test('crop-aware controllers retain the legacy geometry fallback', () {
     final capabilities = buildRemoteClientCapabilities(
       role: RemoteRole.controller,
       platform: 'windows',
@@ -26,8 +36,10 @@ void main() {
     );
 
     expect(capabilities, [
+      displaySwitchTransactionV1Capability,
       activeContentGeometryV2Capability,
       activeContentGeometryV3Capability,
+      textureCropRenderingV1Capability,
     ]);
   });
 
@@ -40,10 +52,10 @@ void main() {
       enableIosGeometryV3: false,
     );
 
-    expect(capabilities, isEmpty);
+    expect(capabilities, [displaySwitchTransactionV1Capability]);
   });
 
-  test('host and unsupported controllers do not advertise geometry', () {
+  test('host does not advertise controller capabilities', () {
     expect(
       buildRemoteClientCapabilities(
         role: RemoteRole.host,
@@ -53,6 +65,9 @@ void main() {
       ),
       isEmpty,
     );
+  });
+
+  test('legacy renderers still use the unified display transaction', () {
     expect(
       buildRemoteClientCapabilities(
         role: RemoteRole.controller,
@@ -60,7 +75,7 @@ void main() {
         clipboardSupported: false,
         explicitFileTransferSupported: false,
       ),
-      isEmpty,
+      [displaySwitchTransactionV1Capability],
     );
   });
 

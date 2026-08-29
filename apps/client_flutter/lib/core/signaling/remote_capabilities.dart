@@ -2,6 +2,8 @@ import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 
 const activeContentGeometryV2Capability = 'active-content-geometry-v2';
 const activeContentGeometryV3Capability = 'active-content-geometry-v3';
+const displaySwitchTransactionV1Capability = 'display-switch-transaction-v1';
+const textureCropRenderingV1Capability = 'texture-crop-rendering-v1';
 const textClipboardV1Capability = 'text-clipboard-v1';
 const explicitFileTransferV1Capability = 'explicit-file-transfer-v1';
 const iosActiveContentGeometryV3Enabled = bool.fromEnvironment(
@@ -17,9 +19,9 @@ bool usesCropAwareRemoteTexture(String platform) {
 
 /// Builds the capabilities that are safe for the local presentation stack.
 ///
-/// Geometry v3 means the controller paints the decoder texture through the
-/// same active-content rectangle that it uses for absolute pointer input.
-/// Windows also retains v2 while older hosts are still in circulation.
+/// Display switching is one shared transaction on every controller. Platform
+/// detection only describes the renderer boundary; it never changes the
+/// transaction state machine or its media acknowledgement rules.
 List<String> buildRemoteClientCapabilities({
   required RemoteRole role,
   required String platform,
@@ -30,12 +32,14 @@ List<String> buildRemoteClientCapabilities({
   final capabilities = <String>[];
   final normalizedPlatform = platform.trim().toLowerCase();
   if (role == RemoteRole.controller) {
-    if (normalizedPlatform == 'windows') {
+    capabilities.add(displaySwitchTransactionV1Capability);
+    final cropAware =
+        normalizedPlatform == 'windows' ||
+        (normalizedPlatform == 'ios' && enableIosGeometryV3);
+    if (cropAware) {
       capabilities.add(activeContentGeometryV2Capability);
-    }
-    if (normalizedPlatform == 'windows' ||
-        (normalizedPlatform == 'ios' && enableIosGeometryV3)) {
       capabilities.add(activeContentGeometryV3Capability);
+      capabilities.add(textureCropRenderingV1Capability);
     }
   }
   if (clipboardSupported) capabilities.add(textClipboardV1Capability);

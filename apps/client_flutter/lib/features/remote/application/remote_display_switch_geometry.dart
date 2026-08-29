@@ -1,5 +1,10 @@
+import 'package:cross_desktop_remote/features/remote/application/remote_display_switch_coordinator.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 
+/// Observes post-commit presentation convergence for diagnostics only.
+///
+/// This result must never gate or roll back a display-switch transaction;
+/// [RemoteDisplaySwitchCoordinator] owns that platform-independent contract.
 class RemoteVideoGeometryGate {
   RemoteVideoGeometryGate({
     required this.target,
