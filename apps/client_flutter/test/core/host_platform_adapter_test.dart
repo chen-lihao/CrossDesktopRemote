@@ -114,6 +114,48 @@ void main() {
     expect(state.sourceId, 'sidecar');
   });
 
+  test('capture readiness is bound to generation and active content', () {
+    const state = HostCaptureFrameState(
+      sequence: 8,
+      sourceId: 'sidecar',
+      width: 1920,
+      height: 1080,
+      captureGeneration: 5,
+      gateStatus: 'ready',
+      rejectionReason: '',
+      staleFrameCount: 0,
+      wrongSizeCount: 0,
+      missingContentMetadataCount: 0,
+      contentAspectMismatchCount: 0,
+      normalizationFailureCount: 0,
+      bufferWidth: 1920,
+      bufferHeight: 1080,
+      activeContentX: 0,
+      activeContentY: 0,
+      activeContentWidth: 1920,
+      activeContentHeight: 1000,
+    );
+
+    expect(
+      state.isReadyAfter(
+        sequence: 7,
+        targetSourceId: 'sidecar',
+        targetCaptureGeneration: 5,
+        requireActiveContent: true,
+      ),
+      isTrue,
+    );
+    expect(
+      state.isReadyAfter(
+        sequence: 7,
+        targetSourceId: 'sidecar',
+        targetCaptureGeneration: 4,
+        requireActiveContent: true,
+      ),
+      isFalse,
+    );
+  });
+
   test(
     'unsupported adapter exposes capabilities without native calls',
     () async {

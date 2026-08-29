@@ -6,6 +6,7 @@ import 'package:cross_desktop_remote/core/input/remote_ime_input_adapter.dart';
 import 'package:cross_desktop_remote/core/input/remote_shortcut_policy.dart';
 import 'package:cross_desktop_remote/core/platform/desktop_window_mode.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
+import 'package:cross_desktop_remote/core/signaling/remote_capabilities.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/desktop_mouse_click_tracker.dart';
@@ -388,6 +389,10 @@ Future<void> _showRemoteDisplayAdjustment(
                         '${session.expectedVideoFrameSize?.label ?? 'Unknown'} / '
                         '${session.outboundVideoFrameSize?.label ?? 'Unknown'} / '
                         '${session.inboundVideoFrameSize?.label ?? 'Unknown'}',
+                  ),
+                  _ColorDiagnosticRow(
+                    label: '控制端已提交画面几何',
+                    value: session.committedFrameGeometry?.label ?? 'Unknown',
                   ),
                   _ColorDiagnosticRow(
                     label: '逻辑坐标 / 采集像素',
@@ -1447,6 +1452,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   final Set<String> _compactModifiers = {};
   final Set<PhysicalKeyboardKey> _primaryShortcutKeys = {};
   RemoteContentTransform? _latestTransform;
+  String? _lastPresentationGeometryDiagnostic;
   Offset? _lastNormalizedPointer;
   Offset _desktopImeAnchor = const Offset(24, 24);
 
@@ -1643,6 +1649,14 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     if (pending == _lastDisplaySwitchPending) return;
     _lastDisplaySwitchPending = pending;
     if (pending) {
+      _longPressTimer?.cancel();
+      _pointerFlushTimer?.cancel();
+      _pointerFlushTimer = null;
+      _pointerCoalescer.clear();
+      _gestures.cancelAll(releaseDragLock: true);
+      _ignoredPointers.clear();
+      _mouseButtons.clear();
+      _lastNormalizedPointer = null;
       _desktopClickTracker.reset();
       final rendererSize = _currentRendererSourceSize();
       if (rendererSize != null) _committedVideoSourceSize = rendererSize;
@@ -2048,6 +2062,12 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                   ),
           );
           _latestTransform = transform;
+          _logPresentationGeometry(
+            transform: transform,
+            viewportSize: Size(constraints.maxWidth, viewportHeight),
+            rendererSize: rendererSize,
+            frameGeometry: frameGeometry,
+          );
           return Focus(
             focusNode: _hardwareFocus,
             autofocus: true,
@@ -2079,8 +2099,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                           child: child!,
                         );
                       },
-                      child: Platform.isWindows
-                          ? _WindowsRemoteVideoTexture(
+                      child:
+                          usesCropAwareRemoteTexture(Platform.operatingSystem)
+                          ? _RemoteVideoTexture(
                               renderer: session.remoteRenderer,
                               encodedSize: transform.sourceSize,
                               visibleSourceRect: transform.sourceRect,
@@ -2088,9 +2109,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                           : RTCVideoView(
                               session.remoteRenderer,
                               key: const ValueKey('remoteVideoView'),
-                              // Apple keeps the physically verified native
-                              // video path. Windows bypasses this inner fit so
-                              // rendering and pointer input share one geometry.
+                              // Other controllers retain the legacy view until
+                              // their native texture path is physically tested.
                               objectFit: RTCVideoViewObjectFit
                                   .RTCVideoViewObjectFitCover,
                             ),
@@ -2222,6 +2242,33 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         },
       ),
     );
+  }
+
+  void _logPresentationGeometry({
+    required RemoteContentTransform transform,
+    required Size viewportSize,
+    required Size rendererSize,
+    required RemoteFrameGeometry? frameGeometry,
+  }) {
+    if (!kDebugMode) return;
+    String sizeLabel(Size size) =>
+        '${size.width.toStringAsFixed(0)}x${size.height.toStringAsFixed(0)}';
+    String rectLabel(Rect rect) =>
+        '${rect.left.toStringAsFixed(1)},${rect.top.toStringAsFixed(1)} '
+        '${rect.width.toStringAsFixed(1)}x${rect.height.toStringAsFixed(1)}';
+    final diagnostic =
+        'platform=${Platform.operatingSystem} '
+        'display=${frameGeometry?.displayId ?? session.renderedDisplayId ?? 'unknown'} '
+        'generation=${frameGeometry?.generation ?? 0} '
+        'renderer=${sizeLabel(rendererSize)} '
+        'encoded=${sizeLabel(transform.sourceSize)} '
+        'active=${rectLabel(transform.activeContentRect)} '
+        'source=${rectLabel(transform.sourceRect)} '
+        'destination=${rectLabel(transform.destinationRect)} '
+        'viewport=${sizeLabel(viewportSize)}';
+    if (diagnostic == _lastPresentationGeometryDiagnostic) return;
+    _lastPresentationGeometryDiagnostic = diagnostic;
+    debugPrint('CrossDesktopRemote presentation geometry: $diagnostic');
   }
 
   Widget _buildDesktopImeProxy(BoxConstraints constraints) {
@@ -2995,8 +3042,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   }
 }
 
-class _WindowsRemoteVideoTexture extends StatelessWidget {
-  const _WindowsRemoteVideoTexture({
+class _RemoteVideoTexture extends StatelessWidget {
+  const _RemoteVideoTexture({
     required this.renderer,
     required this.encodedSize,
     required this.visibleSourceRect,

@@ -14,6 +14,7 @@ import 'package:cross_desktop_remote/core/input/remote_text_chunks.dart';
 import 'package:cross_desktop_remote/core/platform/desktop_window_mode.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_client.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
+import 'package:cross_desktop_remote/core/signaling/remote_capabilities.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_input_sequence_guard.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_media_stats.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_quality_adaptation.dart';
@@ -238,7 +239,8 @@ class RemoteSessionController extends ChangeNotifier {
   String? _hostInvitationCode;
   String? _hostInvitationLeaseId;
   bool _supportsInvitationRotation = false;
-  bool _remoteSupportsActiveContentGeometryV2 = false;
+  bool _remoteSupportsActiveContentGeometry = false;
+  int _remoteActiveContentGeometryVersion = 0;
   bool _remoteSupportsTextClipboardV1 = false;
   bool _remoteSupportsExplicitFileTransferV1 = false;
   bool _remoteClipboardSupportsApplied = false;
@@ -322,6 +324,10 @@ class RemoteSessionController extends ChangeNotifier {
   RemoteVideoFrameSize? get outboundVideoFrameSize => _outboundVideoFrameSize;
   RemoteVideoFrameSize? get inboundVideoFrameSize => _inboundVideoFrameSize;
   RemoteFrameGeometry? get committedFrameGeometry => _committedFrameGeometry;
+  bool get requiresActiveContentGeometryV3 =>
+      role == RemoteRole.controller &&
+      Platform.isIOS &&
+      usesCropAwareRemoteTexture(Platform.operatingSystem);
   RemoteVideoGeometryState get videoGeometryState => _videoGeometryState;
   double? get inputRoundTripMs => _inputRoundTripMs;
   int get droppedMotionEvents => _droppedMotionEvents;
@@ -551,12 +557,12 @@ class RemoteSessionController extends ChangeNotifier {
     _emitNotice('正在连接远程设备');
 
     try {
-      final clientCapabilities = <String>[
-        if (role == RemoteRole.controller && Platform.isWindows)
-          'active-content-geometry-v2',
-        if (_clipboardPlatform.supported) 'text-clipboard-v1',
-        if (localExplicitFileTransferSupported) 'explicit-file-transfer-v1',
-      ];
+      final clientCapabilities = buildRemoteClientCapabilities(
+        role: role,
+        platform: Platform.operatingSystem,
+        clipboardSupported: _clipboardPlatform.supported,
+        explicitFileTransferSupported: localExplicitFileTransferSupported,
+      );
       final endpoint = buildSignalingUri(
         serverUrl: serverUrl,
         roomCode: roomCode,
@@ -1860,9 +1866,12 @@ class RemoteSessionController extends ChangeNotifier {
         final reportedGeometryState = RemoteVideoGeometryState.fromWireValue(
           message['geometryState'] as String?,
         );
-        final reportedFrameGeometry = remoteFrameGeometryFromValue(
-          message['frameGeometry'],
-        );
+        final reportedGeometryVersion =
+            (message['activeContentGeometryVersion'] as num?)?.toInt() ?? 0;
+        final reportedFrameGeometry =
+            requiresActiveContentGeometryV3 && reportedGeometryVersion < 3
+            ? null
+            : remoteFrameGeometryFromValue(message['frameGeometry']);
         if (!_displaySwitchPending) {
           _videoGeometryState = reportedGeometryState;
           if (reportedFrameGeometry?.displayId ==
@@ -1945,6 +1954,23 @@ class RemoteSessionController extends ChangeNotifier {
     final announcedGeometry = remoteFrameGeometryFromValue(
       message['frameGeometry'],
     );
+    final announcedGeometryVersion =
+        (message['activeContentGeometryVersion'] as num?)?.toInt() ?? 0;
+    if (requiresActiveContentGeometryV3 &&
+        (announcedGeometryVersion < 3 || announcedGeometry == null)) {
+      _displaySwitchInboundFramesBaseline = null;
+      _sendControl({
+        'type': 'display-switch-rejected',
+        'version': 3,
+        'displayId': displayId,
+        'generation': generation,
+        'code': 'FRAME_GEOMETRY_MISSING',
+        'stage': 'rendererGeometryStable',
+        'message': '目标画面缺少有效区域几何，已保留原画面',
+      });
+      _emitNotice('目标画面几何尚未就绪，已保留原画面', level: RemoteNoticeLevel.warning);
+      return;
+    }
     if (announcedGeometry != null &&
         !announcedGeometry.belongsTo(
           displayId: displayId,
@@ -1965,6 +1991,7 @@ class RemoteSessionController extends ChangeNotifier {
 
     final inboundProgress = await _waitForInboundVideoProgress(
       afterFrames: _displaySwitchInboundFramesBaseline,
+      expectedSize: announcedGeometry?.encodedSize,
     );
     if (generation > 0 && generation < _displaySwitchGeneration) return;
 
@@ -2224,7 +2251,8 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<_RtcVideoProgress?> _waitForInboundVideoProgress({
-    int? afterFrames,
+    required int? afterFrames,
+    RemoteVideoFrameSize? expectedSize,
     int attempts = 30,
   }) async {
     _RtcVideoProgress? latest;
@@ -2239,7 +2267,12 @@ class RemoteSessionController extends ChangeNotifier {
       if (latest?.size.isValid == true) {
         _inboundVideoFrameSize = latest!.size;
       }
-      if (_videoFramesAdvanced(progress, afterFrames: afterFrames)) {
+      final geometryReady =
+          expectedSize?.isValid != true ||
+          (latest?.size.isValid == true &&
+              latest!.size.approximatelyMatches(expectedSize!));
+      if (geometryReady &&
+          _videoFramesAdvanced(progress, afterFrames: afterFrames)) {
         notifyListeners();
         return latest;
       }
@@ -2515,6 +2548,7 @@ class RemoteSessionController extends ChangeNotifier {
     required int generation,
     RemoteVideoFrameSize? captureSize,
     RemoteVideoFrameSize? encodedSize,
+    int? captureGeneration,
   }) {
     if (display == null) return null;
     final capture = captureSize?.isValid == true
@@ -2531,6 +2565,9 @@ class RemoteSessionController extends ChangeNotifier {
     final nativeGeometry = _lastHostCaptureFrameState;
     if (nativeGeometry != null &&
         nativeGeometry.sourceId == display.id &&
+        (captureGeneration == null ||
+            captureGeneration <= 0 ||
+            nativeGeometry.captureGeneration == captureGeneration) &&
         nativeGeometry.hasValidActiveContent) {
       final scaleX = encoded.width / nativeGeometry.width;
       final scaleY = encoded.height / nativeGeometry.height;
@@ -2587,6 +2624,8 @@ class RemoteSessionController extends ChangeNotifier {
       'adaptiveTier': _qualityAdaptation.tier.name,
       'maxBitrate': target.maxBitrate,
       'maxFramerate': target.maxFramerate,
+      if (_remoteActiveContentGeometryVersion > 0)
+        'activeContentGeometryVersion': _remoteActiveContentGeometryVersion,
       if (geometry != null) 'frameGeometry': geometry.toMessage(),
     });
   }
@@ -2762,9 +2801,11 @@ class RemoteSessionController extends ChangeNotifier {
           'explicit-file-transfer-v1',
         );
         if (role == RemoteRole.host) {
-          _remoteSupportsActiveContentGeometryV2 = peerCapabilities.contains(
-            'active-content-geometry-v2',
+          _remoteActiveContentGeometryVersion = activeContentGeometryVersion(
+            peerCapabilities,
           );
+          _remoteSupportsActiveContentGeometry =
+              _remoteActiveContentGeometryVersion > 0;
           await _ensureClipboardDataChannel();
           await _ensureExplicitFileTransferDataChannels();
           await _authorizePeer();
@@ -2925,7 +2966,7 @@ class RemoteSessionController extends ChangeNotifier {
         'mandatory': {
           'frameRate': _sessionCaptureFrameRate.toDouble(),
           'targetLongEdge': _sessionCaptureLongEdge,
-          if (_remoteSupportsActiveContentGeometryV2)
+          if (_remoteSupportsActiveContentGeometry)
             'preserveVisibleContentGeometry': true,
         },
       },
@@ -2938,6 +2979,8 @@ class RemoteSessionController extends ChangeNotifier {
   Future<_CaptureFrameWaitResult> _waitForCaptureFirstFrame({
     required String sourceId,
     required int afterSequence,
+    int? captureGeneration,
+    bool requireActiveContent = false,
     int attempts = 30,
   }) async {
     if (!_hostPlatform.capabilities.captureFrameReadiness) {
@@ -2952,6 +2995,8 @@ class RemoteSessionController extends ChangeNotifier {
         if (state.isReadyAfter(
           sequence: afterSequence,
           targetSourceId: sourceId,
+          targetCaptureGeneration: captureGeneration,
+          requireActiveContent: requireActiveContent,
         )) {
           _lastHostCaptureFrameState = state;
           return _CaptureFrameWaitResult(ready: true, lastState: state);
@@ -3173,6 +3218,7 @@ class RemoteSessionController extends ChangeNotifier {
     }
 
     _hostDisplaySwitchInProgress = true;
+    await _releaseHostPointerButtons();
     _mediaStatsAccumulator.reset();
     _geometryObservationToken += 1;
     _videoGeometryState = RemoteVideoGeometryState.adapting;
@@ -3251,6 +3297,7 @@ class RemoteSessionController extends ChangeNotifier {
         final captureWait = await _waitForCaptureFirstFrame(
           sourceId: displayId,
           afterSequence: captureBaseline?.sequence ?? 0,
+          requireActiveContent: _remoteSupportsActiveContentGeometry,
         );
         if (!captureWait.ready) {
           throw _DisplaySwitchFailure(
@@ -3273,6 +3320,8 @@ class RemoteSessionController extends ChangeNotifier {
         final captureWait = await _waitForCaptureFirstFrame(
           sourceId: displayId,
           afterSequence: captureBaseline?.sequence ?? 0,
+          captureGeneration: captureConfiguration?.captureGeneration,
+          requireActiveContent: _remoteSupportsActiveContentGeometry,
           attempts: 12,
         );
         if (!captureWait.ready) {
@@ -3642,11 +3691,14 @@ class RemoteSessionController extends ChangeNotifier {
       generation: generation,
       captureSize: captureSize,
       encodedSize: outbound ?? expected,
+      captureGeneration: captureConfiguration?.captureGeneration,
     );
     if (geometry != null) _committedFrameGeometry = geometry;
     _sendControl({
       'type': 'display-selected',
-      'version': 2,
+      'version': _remoteSupportsActiveContentGeometry ? 3 : 2,
+      if (_remoteActiveContentGeometryVersion > 0)
+        'activeContentGeometryVersion': _remoteActiveContentGeometryVersion,
       'displayId': displayId,
       'generation': generation,
       if (captureConfiguration != null) ...{
@@ -3843,7 +3895,8 @@ class RemoteSessionController extends ChangeNotifier {
     _remoteDeviceId = null;
     _remoteHostPlatform = null;
     _remoteSupportsPhysicalKeyboard = false;
-    _remoteSupportsActiveContentGeometryV2 = false;
+    _remoteSupportsActiveContentGeometry = false;
+    _remoteActiveContentGeometryVersion = 0;
     _remoteSupportsTextClipboardV1 = false;
     _remoteSupportsExplicitFileTransferV1 = false;
     _remoteClipboardSupportsApplied = false;

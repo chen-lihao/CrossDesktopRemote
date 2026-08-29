@@ -146,7 +146,7 @@ void main() {
     );
   });
 
-  test('Windows texture crop paints the active region over the viewport', () {
+  test('native texture crop paints the active region over the viewport', () {
     final layout = RemoteTextureCropLayout.forViewport(
       encodedSize: const Size(1920, 1080),
       visibleSourceRect: const Rect.fromLTWH(160, 108, 1600, 864),
@@ -157,5 +157,31 @@ void main() {
     expect(layout.fullTextureRect.top, closeTo(-67.5, 0.001));
     expect(layout.fullTextureRect.width, closeTo(1200, 0.001));
     expect(layout.fullTextureRect.height, closeTo(675, 0.001));
+  });
+
+  test('bottom encoder padding is excluded from paint and direct touch', () {
+    const encoded = Size(1920, 1080);
+    const active = Rect.fromLTWH(0, 0, 1920, 1000);
+    const viewport = Size(960, 500);
+    final transform = RemoteContentTransform.forViewport(
+      sourceSize: encoded,
+      activeContentRect: active,
+      viewportSize: viewport,
+      fit: BoxFit.contain,
+    );
+    final layout = RemoteTextureCropLayout.forViewport(
+      encodedSize: encoded,
+      visibleSourceRect: transform.sourceRect,
+      viewportSize: transform.destinationRect.size,
+    );
+
+    expect(transform.destinationRect, const Rect.fromLTWH(0, 0, 960, 500));
+    expect(layout.fullTextureRect.top, 0);
+    expect(layout.fullTextureRect.height, 540);
+    expect(transform.normalize(const Offset(480, 0)), const Offset(.5, 0));
+    expect(
+      transform.normalize(const Offset(480, 499.999))!.dy,
+      closeTo(1, 0.0001),
+    );
   });
 }

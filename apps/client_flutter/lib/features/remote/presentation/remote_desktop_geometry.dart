@@ -103,9 +103,9 @@ class RemoteContentTransform {
 }
 
 /// Layout for painting the complete decoder texture behind a clipped viewport
-/// so [visibleSourceRect] is the only visible portion. This prevents the
-/// Windows Flutter texture from applying a second, renderer-owned aspect fit
-/// after [RemoteContentTransform] has already committed display geometry.
+/// so [visibleSourceRect] is the only visible portion. This keeps native
+/// decoder textures on Windows and iOS on the exact same geometry contract as
+/// absolute pointer input, without a second renderer-owned aspect fit.
 class RemoteTextureCropLayout {
   const RemoteTextureCropLayout({required this.fullTextureRect});
 

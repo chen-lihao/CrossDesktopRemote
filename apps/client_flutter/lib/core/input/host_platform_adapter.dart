@@ -155,11 +155,20 @@ class HostCaptureFrameState {
       activeContentX + activeContentWidth <= width + 1 &&
       activeContentY + activeContentHeight <= height + 1;
 
-  bool isReadyAfter({required int sequence, required String targetSourceId}) {
+  bool isReadyAfter({
+    required int sequence,
+    required String targetSourceId,
+    int? targetCaptureGeneration,
+    bool requireActiveContent = false,
+  }) {
     return this.sequence > sequence &&
         sourceId == targetSourceId &&
         width > 0 &&
-        height > 0;
+        height > 0 &&
+        (targetCaptureGeneration == null ||
+            targetCaptureGeneration <= 0 ||
+            captureGeneration == targetCaptureGeneration) &&
+        (!requireActiveContent || hasValidActiveContent);
   }
 
   String get gateDiagnosticSummary {
