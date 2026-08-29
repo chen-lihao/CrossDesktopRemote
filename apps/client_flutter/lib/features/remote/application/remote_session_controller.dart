@@ -24,6 +24,7 @@ import 'package:cross_desktop_remote/features/remote/application/remote_quality_
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/application/explicit_file_transfer_engine.dart';
 import 'package:cross_desktop_remote/features/remote/application/explicit_file_transfer_models.dart';
+import 'package:cross_desktop_remote/features/remote/application/file_clipboard_sync_engine.dart';
 import 'package:cross_desktop_remote/features/remote/application/text_clipboard_sync_engine.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -156,8 +157,16 @@ class RemoteSessionController extends ChangeNotifier {
   final ExplicitFileTransferPlatformAdapter _fileTransferPlatform;
   final TextClipboardSyncEngine _clipboardSync;
   final ClipboardApplyGate _clipboardApplyGate = ClipboardApplyGate();
+  final FileClipboardApplyGate _fileClipboardApplyGate =
+      FileClipboardApplyGate();
+  final FileClipboardEchoGuard _fileClipboardEchoGuard =
+      FileClipboardEchoGuard();
   final ExplicitFileTransferEngine _fileTransfer = ExplicitFileTransferEngine();
   final Map<String, List<String>> _stagedOutgoingFiles = {};
+  final Set<String> _acceptingFileClipboardTransfers = {};
+  final Set<String> _materializingFileClipboardTransfers = {};
+  final Set<String> _appliedFileClipboardTransfers = {};
+  final Set<String> _clipboardReceiveDirectories = {};
   final Stream<DesktopWindowLifecycleEvent> _hostWindowLifecycleEvents;
 
   /// Apple keeps the physically verified fixed 1080p ScreenCaptureKit canvas.
@@ -246,6 +255,7 @@ class RemoteSessionController extends ChangeNotifier {
   int _remoteActiveContentGeometryVersion = 0;
   bool _remoteSupportsTextClipboardV1 = false;
   bool _remoteSupportsExplicitFileTransferV1 = false;
+  bool _remoteSupportsFileClipboardV1 = false;
   bool _remoteClipboardSupportsApplied = false;
   bool _explicitFileTransferTransportAttached = false;
   Completer<void>? _invitationRotationCompleter;
@@ -255,6 +265,12 @@ class RemoteSessionController extends ChangeNotifier {
   ClipboardSyncMode _clipboardMode;
   ClipboardSyncMode? _remoteClipboardMode;
   ClipboardOffer? _queuedClipboardOffer;
+  int _lastFileClipboardRevision = -1;
+  String? _lastFileClipboardSignature;
+  String? _lastFileClipboardTransferId;
+  String? _fileClipboardPasteTransferId;
+  bool _fileClipboardPastePreparing = false;
+  bool _synchronizingFileClipboardTransfers = false;
   ClipboardSyncStatus _clipboardStatus = ClipboardSyncStatus.unavailable;
   String _clipboardStatusMessage = '当前平台不支持';
   RemoteQualityProfile? _queuedQualityProfile;
@@ -299,6 +315,9 @@ class RemoteSessionController extends ChangeNotifier {
   ClipboardSyncStatus get clipboardStatus => _clipboardStatus;
   String get clipboardStatusMessage => _clipboardStatusMessage;
   bool get clipboardSupported => _clipboardPlatform.supported;
+  bool get fileClipboardSupported =>
+      _clipboardPlatform.fileClipboardSupported &&
+      localExplicitFileTransferSupported;
   bool get localExplicitFileTransferSupported =>
       _fileTransferPlatform.supported;
   bool get explicitFileTransferDirectorySelectionSupported =>
@@ -309,12 +328,39 @@ class RemoteSessionController extends ChangeNotifier {
       _fileTransferPlatform.supportsReceivedExport;
   bool get remoteSupportsExplicitFileTransferV1 =>
       _remoteSupportsExplicitFileTransferV1;
+  bool get remoteSupportsFileClipboardV1 => _remoteSupportsFileClipboardV1;
+  bool get fileClipboardReady =>
+      fileClipboardSupported &&
+      _remoteSupportsFileClipboardV1 &&
+      explicitFileTransferReady &&
+      _clipboardChannel?.state == RTCDataChannelState.RTCDataChannelOpen;
   bool get explicitFileTransferReady =>
       localExplicitFileTransferSupported &&
       _remoteSupportsExplicitFileTransferV1 &&
       _fileTransfer.transportReady;
   List<ExplicitFileTransferTaskSnapshot> get fileTransferTasks =>
       _fileTransfer.tasks;
+  ExplicitFileTransferTaskSnapshot? get fileClipboardPasteTask {
+    final transferId = _fileClipboardPasteTransferId;
+    if (transferId == null) return null;
+    return _fileTransfer.tasks
+        .where((task) => task.id == transferId)
+        .firstOrNull;
+  }
+
+  bool get fileClipboardPastePending =>
+      _fileClipboardPastePreparing || _fileClipboardPasteTransferId != null;
+  String get fileClipboardPasteStatus {
+    if (_fileClipboardPastePreparing) return '正在分析文件剪贴板';
+    final task = fileClipboardPasteTask;
+    if (task == null) return '';
+    final progress = task.progress;
+    final progressLabel = progress == null
+        ? ''
+        : ' ${(progress * 100).toStringAsFixed(0)}%';
+    return '正在传输文件剪贴板$progressLabel · ${task.state.label}';
+  }
+
   int get pendingIncomingFileTransferCount =>
       _fileTransfer.pendingIncomingCount;
   String get remotePrimaryShortcutModifier =>
@@ -470,12 +516,23 @@ class RemoteSessionController extends ChangeNotifier {
       'version': clipboardWireVersion,
       'mode': effectiveMode.name,
       'supportsApplied': true,
+      'supportsFileClipboard': fileClipboardSupported,
     });
     _updateClipboardStatus();
     notifyListeners();
   }
 
   void _handleLocalClipboardChange(ClipboardSnapshot snapshot) {
+    if (snapshot.hasFiles) {
+      if (_fileClipboardEchoGuard.consumeIfExpected(snapshot)) {
+        _lastFileClipboardRevision = snapshot.revision;
+        _updateClipboardStatus();
+        notifyListeners();
+        return;
+      }
+      unawaited(_publishLocalFileClipboard(snapshot));
+      return;
+    }
     final offer = _clipboardSync.observeLocalChange(snapshot);
     if (snapshot.tooLarge) {
       _setClipboardStatus(ClipboardSyncStatus.error, '文本超过 256 KiB，未同步');
@@ -500,6 +557,50 @@ class RemoteSessionController extends ChangeNotifier {
     _updateClipboardStatus();
   }
 
+  Future<String?> _publishLocalFileClipboard(
+    ClipboardSnapshot snapshot, {
+    bool explicitPaste = false,
+  }) async {
+    if (!snapshot.hasFiles ||
+        !_clipboardMode.allowsOutbound(
+          localIsController: role == RemoteRole.controller,
+        )) {
+      return null;
+    }
+    if (!fileClipboardReady || !_remoteAllowsClipboardInbound) {
+      if (explicitPaste) {
+        _emitNotice('远程设备尚未就绪或不支持文件剪贴板', level: RemoteNoticeLevel.warning);
+      }
+      return null;
+    }
+    final signature = snapshot.filePaths.join('\u0000');
+    if (_lastFileClipboardSignature == signature &&
+        _lastFileClipboardTransferId != null) {
+      _lastFileClipboardRevision = snapshot.revision;
+      return _lastFileClipboardTransferId;
+    }
+    if (!explicitPaste && snapshot.revision == _lastFileClipboardRevision) {
+      return _lastFileClipboardTransferId;
+    }
+    _lastFileClipboardRevision = snapshot.revision;
+    _lastFileClipboardSignature = signature;
+    _setClipboardStatus(ClipboardSyncStatus.sending, '正在后台同步文件剪贴板');
+    try {
+      final transferId = await _fileTransfer.sendFiles(
+        snapshot.filePaths,
+        purpose: ExplicitFileTransferPurpose.clipboard,
+      );
+      _lastFileClipboardTransferId = transferId;
+      notifyListeners();
+      return transferId;
+    } catch (error) {
+      _lastFileClipboardSignature = null;
+      _lastFileClipboardTransferId = null;
+      _setClipboardStatus(ClipboardSyncStatus.error, '文件剪贴板同步失败：$error');
+      return null;
+    }
+  }
+
   bool get _remoteAllowsClipboardInbound {
     final remoteMode = _remoteClipboardMode;
     return remoteMode != null &&
@@ -521,7 +622,8 @@ class RemoteSessionController extends ChangeNotifier {
     } else if (_clipboardMode == ClipboardSyncMode.disabled) {
       _clipboardStatus = ClipboardSyncStatus.disabled;
       _clipboardStatusMessage = _clipboardStatus.label;
-    } else if (!_remoteSupportsTextClipboardV1 ||
+    } else if ((!_remoteSupportsTextClipboardV1 &&
+            !_remoteSupportsFileClipboardV1) ||
         _clipboardChannel?.state != RTCDataChannelState.RTCDataChannelOpen) {
       _clipboardStatus = ClipboardSyncStatus.waitingForPeer;
       _clipboardStatusMessage = _clipboardStatus.label;
@@ -532,6 +634,7 @@ class RemoteSessionController extends ChangeNotifier {
       _clipboardStatus = ClipboardSyncStatus.ready;
       _clipboardStatusMessage = _clipboardPlatform.automaticMonitoringSupported
           ? '剪贴板同步已就绪 · ${_clipboardMode.label}'
+                '${fileClipboardReady ? ' · 支持文件' : ''}'
           : '点击远程粘贴时读取 iPad 剪贴板';
     }
   }
@@ -566,6 +669,7 @@ class RemoteSessionController extends ChangeNotifier {
         platform: Platform.operatingSystem,
         clipboardSupported: _clipboardPlatform.supported,
         explicitFileTransferSupported: localExplicitFileTransferSupported,
+        fileClipboardSupported: fileClipboardSupported,
       );
       final endpoint = buildSignalingUri(
         serverUrl: serverUrl,
@@ -751,30 +855,38 @@ class RemoteSessionController extends ChangeNotifier {
       explainControlUnavailable();
       return;
     }
-    if (key == 'KeyV') await _prepareRemoteClipboardPaste();
+    if (key == 'KeyV' && !await _prepareRemoteClipboardPaste()) return;
     if (!canSendControl) return;
     final modifiers = [remotePrimaryShortcutModifier];
     sendKey(phase: 'down', key: key, modifiers: modifiers);
     sendKey(phase: 'up', key: key, modifiers: modifiers);
   }
 
-  Future<void> _prepareRemoteClipboardPaste() async {
+  Future<bool> _prepareRemoteClipboardPaste() async {
     final channel = _clipboardChannel;
     if (!_clipboardPlatform.supported ||
-        !_remoteSupportsTextClipboardV1 ||
-        !_remoteAllowsClipboardInbound ||
         channel == null ||
         channel.state != RTCDataChannelState.RTCDataChannelOpen) {
-      return;
+      return true;
     }
     try {
       final snapshot = await _clipboardPlatform.readSnapshot();
+      if (snapshot.hasFiles) {
+        if (!_remoteAllowsClipboardInbound) {
+          _emitNotice('远程设备当前不允许接收剪贴板', level: RemoteNoticeLevel.warning);
+          return false;
+        }
+        return await _prepareRemoteFileClipboardPaste(snapshot);
+      }
+      if (!_remoteSupportsTextClipboardV1 || !_remoteAllowsClipboardInbound) {
+        return true;
+      }
       if (snapshot.tooLarge) {
         _setClipboardStatus(ClipboardSyncStatus.error, '文本超过 256 KiB，无法远程粘贴');
-        return;
+        return false;
       }
       final offer = _clipboardSync.prepareExplicitOutbound(snapshot);
-      if (offer == null) return;
+      if (offer == null) return true;
       _setClipboardStatus(ClipboardSyncStatus.sending, '正在准备远程粘贴');
       _sendClipboard(offer.toMessage());
       if (_remoteClipboardSupportsApplied) {
@@ -782,8 +894,44 @@ class RemoteSessionController extends ChangeNotifier {
       }
       _updateClipboardStatus();
       notifyListeners();
+      return true;
     } catch (error) {
       _setClipboardStatus(ClipboardSyncStatus.error, '远程粘贴准备失败：$error');
+      return false;
+    }
+  }
+
+  Future<bool> _prepareRemoteFileClipboardPaste(
+    ClipboardSnapshot snapshot,
+  ) async {
+    if (!fileClipboardReady) {
+      _emitNotice('远程设备不支持文件剪贴板，请使用“文件传输”', level: RemoteNoticeLevel.warning);
+      return false;
+    }
+    _fileClipboardPastePreparing = true;
+    notifyListeners();
+    try {
+      final transferId = await _publishLocalFileClipboard(
+        snapshot,
+        explicitPaste: true,
+      );
+      if (transferId == null) return false;
+      _fileClipboardPasteTransferId = transferId;
+      _fileClipboardPastePreparing = false;
+      _emitNotice('正在传输文件，完成后将自动继续粘贴');
+      notifyListeners();
+      final applied = await _fileClipboardApplyGate.waitFor(transferId);
+      if (!applied) {
+        _emitNotice('文件剪贴板未能写入远程系统，已取消本次粘贴', level: RemoteNoticeLevel.error);
+        return false;
+      }
+      _emitNotice('文件已就绪，正在继续远程粘贴', level: RemoteNoticeLevel.success);
+      return true;
+    } finally {
+      _fileClipboardPastePreparing = false;
+      _fileClipboardPasteTransferId = null;
+      _updateClipboardStatus();
+      notifyListeners();
     }
   }
 
@@ -876,7 +1024,67 @@ class RemoteSessionController extends ChangeNotifier {
         unawaited(_fileTransferPlatform.cleanupOutgoingFiles(entry.value));
       }
     }
+    unawaited(_synchronizeFileClipboardTransfers());
     notifyListeners();
+  }
+
+  Future<void> _synchronizeFileClipboardTransfers() async {
+    if (_synchronizingFileClipboardTransfers) return;
+    _synchronizingFileClipboardTransfers = true;
+    try {
+      for (final task in _fileTransfer.tasks) {
+        if (!task.isClipboard) continue;
+        if (task.isIncoming && task.awaitsAcceptance) {
+          if (!_remoteSupportsFileClipboardV1 ||
+              !_clipboardPlatform.fileClipboardSupported) {
+            await _fileTransfer.reject(task.id);
+            continue;
+          }
+          if (!_acceptingFileClipboardTransfers.add(task.id)) continue;
+          try {
+            final destination = await _fileTransferPlatform
+                .createClipboardReceiveDirectory(task.id);
+            _clipboardReceiveDirectories.add(destination);
+            await _fileTransfer.accept(task.id, destination);
+            _setClipboardStatus(ClipboardSyncStatus.receiving, '正在后台接收文件剪贴板');
+          } catch (error) {
+            _emitNotice('文件剪贴板接收失败：$error', level: RemoteNoticeLevel.error);
+          } finally {
+            _acceptingFileClipboardTransfers.remove(task.id);
+          }
+          continue;
+        }
+        if (task.isIncoming &&
+            task.state == ExplicitFileTransferState.completed &&
+            !_appliedFileClipboardTransfers.contains(task.id) &&
+            _materializingFileClipboardTransfers.add(task.id)) {
+          try {
+            final paths = await _completedIncomingTransferPaths(task.id);
+            _fileClipboardEchoGuard.expect(paths);
+            await _clipboardPlatform.writeFiles(paths);
+            _appliedFileClipboardTransfers.add(task.id);
+            _sendClipboard(fileClipboardAppliedMessage(task.id));
+            _setClipboardStatus(ClipboardSyncStatus.ready, '远程文件已写入系统剪贴板');
+          } catch (error) {
+            _emitNotice('写入系统文件剪贴板失败：$error', level: RemoteNoticeLevel.error);
+          } finally {
+            _materializingFileClipboardTransfers.remove(task.id);
+          }
+          continue;
+        }
+        if (!task.isIncoming &&
+            {
+              ExplicitFileTransferState.failed,
+              ExplicitFileTransferState.rejected,
+              ExplicitFileTransferState.cancelled,
+            }.contains(task.state)) {
+          _fileClipboardApplyGate.fail(task.id);
+        }
+      }
+    } finally {
+      _synchronizingFileClipboardTransfers = false;
+      notifyListeners();
+    }
   }
 
   void selectDisplay(String displayId) {
@@ -1248,7 +1456,7 @@ class RemoteSessionController extends ChangeNotifier {
   Future<void> _ensureClipboardDataChannel() async {
     if (role != RemoteRole.host ||
         !_clipboardPlatform.supported ||
-        !_remoteSupportsTextClipboardV1 ||
+        (!_remoteSupportsTextClipboardV1 && !_remoteSupportsFileClipboardV1) ||
         _clipboardChannel != null ||
         _peerConnection == null) {
       return;
@@ -1429,7 +1637,9 @@ class RemoteSessionController extends ChangeNotifier {
       case 'input-motion':
         _attachMotionChannel(channel);
       case 'clipboard':
-        if (_clipboardPlatform.supported && _remoteSupportsTextClipboardV1) {
+        if (_clipboardPlatform.supported &&
+            (_remoteSupportsTextClipboardV1 ||
+                _remoteSupportsFileClipboardV1)) {
           _attachClipboardChannel(channel);
         } else {
           unawaited(channel.close());
@@ -1500,11 +1710,13 @@ class RemoteSessionController extends ChangeNotifier {
           'version': clipboardWireVersion,
           'mode': _clipboardMode.name,
           'supportsApplied': true,
+          'supportsFileClipboard': fileClipboardSupported,
         });
       } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
         _remoteClipboardMode = null;
         _remoteClipboardSupportsApplied = false;
         _clipboardApplyGate.reset();
+        _fileClipboardApplyGate.reset();
       }
       _updateClipboardStatus();
       notifyListeners();
@@ -1612,6 +1824,10 @@ class RemoteSessionController extends ChangeNotifier {
         case 'applied':
           if (_clipboardApplyGate.accept(decoded)) {
             _setClipboardStatus(ClipboardSyncStatus.ready, '远程剪贴板已写入');
+          }
+        case 'file-applied':
+          if (_fileClipboardApplyGate.accept(decoded)) {
+            _setClipboardStatus(ClipboardSyncStatus.ready, '远程文件剪贴板已写入');
           }
       }
     } on FormatException catch (error) {
@@ -2845,7 +3061,10 @@ class RemoteSessionController extends ChangeNotifier {
           'text-clipboard-v1',
         );
         _remoteSupportsExplicitFileTransferV1 = peerCapabilities.contains(
-          'explicit-file-transfer-v1',
+          explicitFileTransferV1Capability,
+        );
+        _remoteSupportsFileClipboardV1 = peerCapabilities.contains(
+          fileClipboardV1Capability,
         );
         if (role == RemoteRole.host) {
           _remoteActiveContentGeometryVersion = activeContentGeometryVersion(
@@ -3981,11 +4200,22 @@ class RemoteSessionController extends ChangeNotifier {
     _remoteActiveContentGeometryVersion = 0;
     _remoteSupportsTextClipboardV1 = false;
     _remoteSupportsExplicitFileTransferV1 = false;
+    _remoteSupportsFileClipboardV1 = false;
     _remoteClipboardSupportsApplied = false;
     _remoteClipboardMode = null;
     _queuedClipboardOffer = null;
     _clipboardSync.resetSession();
     _clipboardApplyGate.reset();
+    _fileClipboardApplyGate.reset();
+    _fileClipboardEchoGuard.reset();
+    _lastFileClipboardRevision = -1;
+    _lastFileClipboardSignature = null;
+    _lastFileClipboardTransferId = null;
+    _fileClipboardPasteTransferId = null;
+    _fileClipboardPastePreparing = false;
+    _acceptingFileClipboardTransfers.clear();
+    _materializingFileClipboardTransfers.clear();
+    _appliedFileClipboardTransfers.clear();
     _lastHostCaptureFrameState = null;
     _hostInvitationExpiresAt = null;
     _hostInvitationCode = null;
@@ -4079,6 +4309,12 @@ class RemoteSessionController extends ChangeNotifier {
       unawaited(_fileTransferPlatform.cleanupOutgoingFiles(paths));
     }
     _stagedOutgoingFiles.clear();
+    for (final directory in _clipboardReceiveDirectories) {
+      unawaited(
+        _fileTransferPlatform.cleanupClipboardReceiveDirectory(directory),
+      );
+    }
+    _clipboardReceiveDirectories.clear();
     unawaited(_disposeResources());
     unawaited(_notices.close());
     super.dispose();

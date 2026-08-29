@@ -175,8 +175,8 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       lan_discovery_bridge_->HandleWindowMessage(message)) {
     return 0;
   }
-  if (clipboard_bridge_) {
-    clipboard_bridge_->HandleWindowMessage(message);
+  if (clipboard_bridge_ && clipboard_bridge_->HandleWindowMessage(message)) {
+    return 0;
   }
 
   // Give Flutter, including plugins, an opportunity to handle window messages.

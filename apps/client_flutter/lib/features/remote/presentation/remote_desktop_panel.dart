@@ -768,6 +768,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
                       inputSettings,
                       desktopFullScreen: true,
                     ),
+                    _FileClipboardPasteProgress(session: widget.session),
                     Expanded(
                       child: _buildRemoteSurface(
                         inputSettings,
@@ -788,6 +789,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
                     inputSettings,
                     desktopFullScreen: false,
                   ),
+                  _FileClipboardPasteProgress(session: widget.session),
                   SizedBox(
                     height: viewportHeight,
                     child: _buildRemoteSurface(
@@ -955,6 +957,7 @@ class _FullScreenRemoteDesktopPageState
                   isFullScreen: true,
                 ),
               ),
+              _FileClipboardPasteProgress(session: widget.session),
               Expanded(
                 child: _RemoteDesktopSurface(
                   key: _surfaceKey,
@@ -975,6 +978,44 @@ class _FullScreenRemoteDesktopPageState
           ),
         ),
       ),
+    );
+  }
+}
+
+class _FileClipboardPasteProgress extends StatelessWidget {
+  const _FileClipboardPasteProgress({required this.session});
+
+  final RemoteSessionController session;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: session,
+      builder: (context, _) {
+        if (!session.fileClipboardPastePending) {
+          return const SizedBox.shrink();
+        }
+        final progress = session.fileClipboardPasteTask?.progress;
+        final colorScheme = Theme.of(context).colorScheme;
+        return Material(
+          color: colorScheme.primaryContainer,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            child: Row(
+              children: [
+                const Icon(Icons.content_paste_go_outlined, size: 18),
+                const SizedBox(width: 10),
+                Expanded(child: Text(session.fileClipboardPasteStatus)),
+                const SizedBox(width: 12),
+                SizedBox(
+                  width: 120,
+                  child: LinearProgressIndicator(value: progress),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }

@@ -103,7 +103,7 @@ class HostFileTransferSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final pendingTasks = session.fileTransferTasks
-        .where((task) => task.awaitsAcceptance)
+        .where((task) => task.awaitsAcceptance && !task.isClipboard)
         .toList(growable: false);
     final colorScheme = Theme.of(context).colorScheme;
     return DecoratedBox(

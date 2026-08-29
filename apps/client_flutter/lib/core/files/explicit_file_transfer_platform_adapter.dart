@@ -11,6 +11,8 @@ abstract interface class ExplicitFileTransferPlatformAdapter {
   Future<List<String>> pickOutgoingFiles();
   Future<void> cleanupOutgoingFiles(List<String> paths);
   Future<String> createReceiveDirectory(String transferId);
+  Future<String> createClipboardReceiveDirectory(String transferId);
+  Future<void> cleanupClipboardReceiveDirectory(String path);
   Future<void> exportReceivedFiles(List<String> paths);
   Future<void> shareReceivedFiles(List<String> paths);
 }
@@ -42,6 +44,20 @@ class DesktopExplicitFileTransferPlatformAdapter
   @override
   Future<String> createReceiveDirectory(String transferId) {
     throw UnsupportedError('Desktop receive directory is selected by the user');
+  }
+
+  @override
+  Future<String> createClipboardReceiveDirectory(String transferId) async {
+    final safeId = transferId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    return (await Directory.systemTemp.createTemp(
+      'crossdesktop-file-clipboard-$safeId-',
+    )).path;
+  }
+
+  @override
+  Future<void> cleanupClipboardReceiveDirectory(String path) async {
+    final directory = Directory(path);
+    if (await directory.exists()) await directory.delete(recursive: true);
   }
 
   @override
@@ -105,6 +121,14 @@ class IosExplicitFileTransferPlatformAdapter
   }
 
   @override
+  Future<String> createClipboardReceiveDirectory(String transferId) {
+    throw UnsupportedError('iPad 暂不支持系统文件剪贴板');
+  }
+
+  @override
+  Future<void> cleanupClipboardReceiveDirectory(String path) async {}
+
+  @override
   Future<void> exportReceivedFiles(List<String> paths) => _channel.invokeMethod(
     'exportReceivedFiles',
     <String, Object>{'paths': paths},
@@ -145,6 +169,13 @@ class UnsupportedExplicitFileTransferPlatformAdapter
   @override
   Future<String> createReceiveDirectory(String transferId) async =>
       _unsupported();
+
+  @override
+  Future<String> createClipboardReceiveDirectory(String transferId) async =>
+      _unsupported();
+
+  @override
+  Future<void> cleanupClipboardReceiveDirectory(String path) async {}
 
   @override
   Future<void> exportReceivedFiles(List<String> paths) async => _unsupported();

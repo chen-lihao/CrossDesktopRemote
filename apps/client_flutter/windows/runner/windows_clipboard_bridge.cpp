@@ -5,9 +5,11 @@
 
 #include <cstdint>
 #include <cstring>
+#include <shellapi.h>
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace {
 
@@ -19,6 +21,7 @@ constexpr char kMethodChannel[] =
 constexpr char kEventChannel[] =
     "com.crossdesktopremote.cross_desktop_remote/clipboard_events";
 constexpr size_t kMaximumTextBytes = 256 * 1024;
+constexpr size_t kMaximumClipboardFiles = 1024;
 
 std::string Utf8FromWide(const std::wstring& value) {
   if (value.empty()) return {};
@@ -84,9 +87,30 @@ WindowsClipboardBridge::~WindowsClipboardBridge() {
 }
 
 bool WindowsClipboardBridge::HandleWindowMessage(UINT message) {
-  if (message != WM_CLIPBOARDUPDATE) return false;
-  EmitSnapshot();
-  return false;
+  switch (message) {
+    case WM_RENDERFORMAT:
+      return RenderDelayedFiles();
+    case WM_RENDERALLFORMATS:
+      if (!delayed_file_paths_.empty() && GetClipboardOwner() == window_ &&
+          OpenClipboardWithRetry()) {
+        RenderDelayedFiles();
+        CloseClipboard();
+      }
+      return true;
+    case WM_DESTROYCLIPBOARD:
+      delayed_file_paths_.clear();
+      return false;
+    case WM_CLIPBOARDUPDATE:
+      if (event_sink_) {
+        event_sink_->Success(
+            delayed_file_paths_.empty()
+                ? Snapshot()
+                : FileSnapshot(delayed_file_paths_, "ole-delayed-rendering"));
+      }
+      return false;
+    default:
+      return false;
+  }
 }
 
 void WindowsClipboardBridge::HandleMethodCall(
@@ -96,13 +120,50 @@ void WindowsClipboardBridge::HandleMethodCall(
     result->Success(Snapshot());
     return;
   }
-  if (call.method_name() != "writeText") {
+  if (call.method_name() != "writeText" &&
+      call.method_name() != "writeFiles") {
     result->NotImplemented();
     return;
   }
   const auto* arguments = std::get_if<EncodableMap>(call.arguments());
   if (arguments == nullptr) {
     result->Error("invalid_clipboard_text", "Expected an argument map");
+    return;
+  }
+  if (call.method_name() == "writeFiles") {
+    const auto entry = arguments->find(EncodableValue("paths"));
+    const auto* encoded_paths =
+        entry == arguments->end()
+            ? nullptr
+            : std::get_if<flutter::EncodableList>(&entry->second);
+    if (encoded_paths == nullptr || encoded_paths->empty() ||
+        encoded_paths->size() > kMaximumClipboardFiles) {
+      result->Error("invalid_clipboard_files",
+                    "Expected 1-1024 UTF-8 file paths");
+      return;
+    }
+    std::vector<std::wstring> paths;
+    for (const auto& encoded : *encoded_paths) {
+      const auto* utf8_path = std::get_if<std::string>(&encoded);
+      const std::wstring path =
+          utf8_path == nullptr ? std::wstring() : WideFromUtf8(*utf8_path);
+      if (path.empty() ||
+          GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        result->Error("invalid_clipboard_files",
+                      "A clipboard file no longer exists");
+        return;
+      }
+      paths.push_back(path);
+    }
+    if (!OpenClipboardWithRetry()) {
+      result->Error("clipboard_busy", "The Windows clipboard is busy");
+      return;
+    }
+    EmptyClipboard();
+    delayed_file_paths_ = paths;
+    SetClipboardData(CF_HDROP, nullptr);
+    CloseClipboard();
+    result->Success(FileSnapshot(paths, "ole-delayed-rendering"));
     return;
   }
   const auto entry = arguments->find(EncodableValue("text"));
@@ -128,6 +189,7 @@ void WindowsClipboardBridge::HandleMethodCall(
     return;
   }
   EmptyClipboard();
+  delayed_file_paths_.clear();
   const size_t allocation_size = (wide.size() + 1) * sizeof(wchar_t);
   HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, allocation_size);
   if (memory == nullptr) {
@@ -158,6 +220,32 @@ void WindowsClipboardBridge::HandleMethodCall(
 EncodableValue WindowsClipboardBridge::Snapshot() {
   const int64_t revision =
       static_cast<int64_t>(GetClipboardSequenceNumber());
+  if (IsClipboardFormatAvailable(CF_HDROP) && OpenClipboardWithRetry()) {
+    const HDROP drop = reinterpret_cast<HDROP>(GetClipboardData(CF_HDROP));
+    flutter::EncodableList paths;
+    if (drop != nullptr) {
+      const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+      for (UINT index = 0; index < count && index < kMaximumClipboardFiles;
+           ++index) {
+        const UINT length = DragQueryFileW(drop, index, nullptr, 0);
+        std::wstring path(static_cast<size_t>(length) + 1, L'\0');
+        if (DragQueryFileW(drop, index, path.data(), length + 1) > 0) {
+          path.resize(length);
+          paths.emplace_back(Utf8FromWide(path));
+        }
+      }
+    }
+    CloseClipboard();
+    if (!paths.empty()) {
+      return EncodableValue(EncodableMap{
+          {EncodableValue("revision"), EncodableValue(revision)},
+          {EncodableValue("hasText"), EncodableValue(false)},
+          {EncodableValue("tooLarge"), EncodableValue(false)},
+          {EncodableValue("utf8Bytes"), EncodableValue(int32_t{0})},
+          {EncodableValue("filePaths"), EncodableValue(paths)},
+      });
+    }
+  }
   if (!IsClipboardFormatAvailable(CF_UNICODETEXT) ||
       !OpenClipboardWithRetry()) {
     return EncodableValue(EncodableMap{
@@ -187,6 +275,55 @@ EncodableValue WindowsClipboardBridge::Snapshot() {
     value[EncodableValue("text")] = EncodableValue(text);
   }
   return EncodableValue(value);
+}
+
+EncodableValue WindowsClipboardBridge::FileSnapshot(
+    const std::vector<std::wstring>& paths, const char* delivery) {
+  flutter::EncodableList encoded_paths;
+  for (const auto& path : paths) {
+    encoded_paths.emplace_back(Utf8FromWide(path));
+  }
+  return EncodableValue(EncodableMap{
+      {EncodableValue("revision"),
+       EncodableValue(static_cast<int64_t>(GetClipboardSequenceNumber()))},
+      {EncodableValue("hasText"), EncodableValue(false)},
+      {EncodableValue("tooLarge"), EncodableValue(false)},
+      {EncodableValue("utf8Bytes"), EncodableValue(int32_t{0})},
+      {EncodableValue("filePaths"), EncodableValue(encoded_paths)},
+      {EncodableValue("fileDelivery"), EncodableValue(std::string(delivery))},
+  });
+}
+
+bool WindowsClipboardBridge::RenderDelayedFiles() {
+  if (delayed_file_paths_.empty()) return false;
+  size_t characters = 1;
+  for (const auto& path : delayed_file_paths_) characters += path.size() + 1;
+  const size_t allocation_size =
+      sizeof(DROPFILES) + characters * sizeof(wchar_t);
+  HGLOBAL memory =
+      GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, allocation_size);
+  if (memory == nullptr) return false;
+  auto* drop = static_cast<DROPFILES*>(GlobalLock(memory));
+  if (drop == nullptr) {
+    GlobalFree(memory);
+    return false;
+  }
+  drop->pFiles = static_cast<DWORD>(sizeof(DROPFILES));
+  drop->fWide = TRUE;
+  auto* destination = reinterpret_cast<wchar_t*>(
+      reinterpret_cast<BYTE*>(drop) + sizeof(DROPFILES));
+  for (const auto& path : delayed_file_paths_) {
+    std::memcpy(destination, path.c_str(),
+                (path.size() + 1) * sizeof(wchar_t));
+    destination += path.size() + 1;
+  }
+  *destination = L'\0';
+  GlobalUnlock(memory);
+  if (SetClipboardData(CF_HDROP, memory) == nullptr) {
+    GlobalFree(memory);
+    return false;
+  }
+  return true;
 }
 
 bool WindowsClipboardBridge::OpenClipboardWithRetry() {

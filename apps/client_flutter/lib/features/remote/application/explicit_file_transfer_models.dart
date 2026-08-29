@@ -1,5 +1,17 @@
 enum ExplicitFileTransferDirection { outgoing, incoming }
 
+enum ExplicitFileTransferPurpose {
+  explicit,
+  clipboard;
+
+  static ExplicitFileTransferPurpose fromWire(Object? value) => switch (value) {
+    'clipboard' => ExplicitFileTransferPurpose.clipboard,
+    _ => ExplicitFileTransferPurpose.explicit,
+  };
+
+  String get wireName => name;
+}
+
 enum ExplicitFileTransferState {
   preparing,
   offered,
@@ -102,6 +114,7 @@ class ExplicitFileTransferTaskSnapshot {
     required this.transferredBytes,
     required this.totalBytes,
     required this.createdAt,
+    this.purpose = ExplicitFileTransferPurpose.explicit,
     this.destinationRoot,
     this.message,
   });
@@ -113,10 +126,12 @@ class ExplicitFileTransferTaskSnapshot {
   final int transferredBytes;
   final int totalBytes;
   final DateTime createdAt;
+  final ExplicitFileTransferPurpose purpose;
   final String? destinationRoot;
   final String? message;
 
   bool get isIncoming => direction == ExplicitFileTransferDirection.incoming;
+  bool get isClipboard => purpose == ExplicitFileTransferPurpose.clipboard;
   bool get awaitsAcceptance =>
       isIncoming && state == ExplicitFileTransferState.awaitingAcceptance;
   bool get canPause => state == ExplicitFileTransferState.transferring;

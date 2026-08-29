@@ -1,6 +1,7 @@
 import Cocoa
 import ApplicationServices
 import FlutterMacOS
+import UniformTypeIdentifiers
 import dnssd
 
 func crossDesktopRemoteAbsolutePointerPosition(
@@ -469,6 +470,7 @@ private final class AppleClipboardBridge: NSObject, FlutterStreamHandler {
   private var eventSink: FlutterEventSink?
   private var pollTimer: Timer?
   private var lastChangeCount = NSPasteboard.general.changeCount
+  private var filePromiseDelegates: [AppleFilePromiseDelegate] = []
 
   init(binaryMessenger: FlutterBinaryMessenger) {
     methodChannel = FlutterMethodChannel(
@@ -502,12 +504,54 @@ private final class AppleClipboardBridge: NSObject, FlutterStreamHandler {
           return
         }
         let pasteboard = NSPasteboard.general
+        self.filePromiseDelegates.removeAll()
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
           result(FlutterError(code: "clipboard_write_failed", message: "Unable to write the macOS clipboard", details: nil))
           return
         }
         result(self.snapshot())
+      case "writeFiles":
+        guard
+          let arguments = call.arguments as? [String: Any],
+          let paths = arguments["paths"] as? [String],
+          !paths.isEmpty
+        else {
+          result(FlutterError(code: "invalid_clipboard_files", message: "Expected a non-empty file path list", details: nil))
+          return
+        }
+        let fileManager = FileManager.default
+        let urls = paths.compactMap { path -> URL? in
+          guard path.hasPrefix("/"), fileManager.fileExists(atPath: path) else { return nil }
+          return URL(fileURLWithPath: path).standardizedFileURL
+        }
+        guard urls.count == paths.count else {
+          result(FlutterError(code: "invalid_clipboard_files", message: "A clipboard file no longer exists", details: nil))
+          return
+        }
+        let pasteboard = NSPasteboard.general
+        let delegates = urls.map(AppleFilePromiseDelegate.init(sourceURL:))
+        let providers = delegates.map { delegate in
+          NSFilePromiseProvider(
+            fileType: delegate.fileTypeIdentifier,
+            delegate: delegate
+          )
+        }
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects(providers) else {
+          result(FlutterError(code: "clipboard_write_failed", message: "Unable to write file promises to the macOS clipboard", details: nil))
+          return
+        }
+        self.filePromiseDelegates = delegates
+        self.lastChangeCount = pasteboard.changeCount
+        result([
+          "revision": pasteboard.changeCount,
+          "hasText": false,
+          "tooLarge": false,
+          "utf8Bytes": 0,
+          "filePaths": urls.map(\.path),
+          "fileDelivery": "file-promise",
+        ])
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -544,6 +588,22 @@ private final class AppleClipboardBridge: NSObject, FlutterStreamHandler {
 
   private func snapshot() -> [String: Any] {
     let pasteboard = NSPasteboard.general
+    let filePaths = (pasteboard.readObjects(
+      forClasses: [NSURL.self],
+      options: [.urlReadingFileURLsOnly: true]
+    ) ?? []).compactMap { value -> String? in
+      guard let url = value as? URL, url.isFileURL else { return nil }
+      return url.standardizedFileURL.path
+    }
+    if !filePaths.isEmpty {
+      return [
+        "revision": pasteboard.changeCount,
+        "hasText": false,
+        "tooLarge": false,
+        "utf8Bytes": 0,
+        "filePaths": filePaths,
+      ]
+    }
     guard let text = pasteboard.string(forType: .string) else {
       return [
         "revision": pasteboard.changeCount,
@@ -563,6 +623,62 @@ private final class AppleClipboardBridge: NSObject, FlutterStreamHandler {
       value["text"] = text
     }
     return value
+  }
+}
+
+private final class AppleFilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
+  let sourceURL: URL
+  let fileTypeIdentifier: String
+  private let queue: OperationQueue
+
+  init(sourceURL: URL) {
+    self.sourceURL = sourceURL
+    var isDirectory: ObjCBool = false
+    FileManager.default.fileExists(
+      atPath: sourceURL.path,
+      isDirectory: &isDirectory
+    )
+    if isDirectory.boolValue {
+      fileTypeIdentifier = UTType.folder.identifier
+    } else if let type = UTType(filenameExtension: sourceURL.pathExtension) {
+      fileTypeIdentifier = type.identifier
+    } else {
+      fileTypeIdentifier = UTType.data.identifier
+    }
+    queue = OperationQueue()
+    queue.name = "CrossDesktopRemote.FilePromise.\(UUID().uuidString)"
+    queue.maxConcurrentOperationCount = 1
+    super.init()
+  }
+
+  func filePromiseProvider(
+    _ filePromiseProvider: NSFilePromiseProvider,
+    fileNameForType fileType: String
+  ) -> String {
+    sourceURL.lastPathComponent
+  }
+
+  func filePromiseProvider(
+    _ filePromiseProvider: NSFilePromiseProvider,
+    writePromiseTo url: URL,
+    completionHandler: @escaping (Error?) -> Void
+  ) {
+    let destination = url.appendingPathComponent(
+      sourceURL.lastPathComponent,
+      isDirectory: fileTypeIdentifier == UTType.folder.identifier
+    )
+    do {
+      try FileManager.default.copyItem(at: sourceURL, to: destination)
+      completionHandler(nil)
+    } catch {
+      completionHandler(error)
+    }
+  }
+
+  func operationQueue(
+    for filePromiseProvider: NSFilePromiseProvider
+  ) -> OperationQueue {
+    queue
   }
 }
 

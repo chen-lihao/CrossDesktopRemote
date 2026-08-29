@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:cross_desktop_remote/core/files/explicit_file_transfer_platform_adapter.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -48,4 +50,15 @@ void main() {
       ]);
     },
   );
+
+  test('desktop file clipboard uses an isolated temporary directory', () async {
+    const adapter = DesktopExplicitFileTransferPlatformAdapter();
+    final path = await adapter.createClipboardReceiveDirectory('transfer-1');
+    addTearDown(() => adapter.cleanupClipboardReceiveDirectory(path));
+
+    expect(await Directory(path).exists(), isTrue);
+    expect(path, contains('crossdesktop-file-clipboard-transfer-1-'));
+    await adapter.cleanupClipboardReceiveDirectory(path);
+    expect(await Directory(path).exists(), isFalse);
+  });
 }

@@ -54,6 +54,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
       .where(
         (task) =>
             task.direction == ExplicitFileTransferDirection.incoming &&
+            task.purpose == ExplicitFileTransferPurpose.explicit &&
             task.state == ExplicitFileTransferState.awaitingAcceptance,
       )
       .length;
@@ -93,17 +94,28 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     _notify();
   }
 
-  Future<String> sendFiles(List<String> paths) async {
+  Future<String> sendFiles(
+    List<String> paths, {
+    ExplicitFileTransferPurpose purpose = ExplicitFileTransferPurpose.explicit,
+  }) async {
     if (paths.isEmpty) throw ArgumentError.value(paths, 'paths', '未选择文件');
-    return _prepareAndOffer(paths, includeDirectories: false);
+    return _prepareAndOffer(
+      paths,
+      includeDirectories: purpose == ExplicitFileTransferPurpose.clipboard,
+      purpose: purpose,
+    );
   }
 
-  Future<String> sendDirectory(String path) async =>
-      _prepareAndOffer([path], includeDirectories: true);
+  Future<String> sendDirectory(String path) async => _prepareAndOffer(
+    [path],
+    includeDirectories: true,
+    purpose: ExplicitFileTransferPurpose.explicit,
+  );
 
   Future<String> _prepareAndOffer(
     List<String> paths, {
     required bool includeDirectories,
+    required ExplicitFileTransferPurpose purpose,
   }) async {
     if (!transportReady) {
       throw StateError('远程设备尚未就绪或不支持文件传输');
@@ -114,6 +126,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
       direction: ExplicitFileTransferDirection.outgoing,
       state: ExplicitFileTransferState.preparing,
       createdAt: DateTime.now(),
+      purpose: purpose,
       message: '正在读取文件信息并计算 SHA-256',
     );
     _tasks[id] = task;
@@ -330,6 +343,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
       transferId: id,
       entryCount: entryCount,
       totalBytes: totalBytes,
+      purpose: ExplicitFileTransferPurpose.fromWire(message['purpose']),
     );
   }
 
@@ -372,6 +386,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     final existing = _tasks[id];
     if (existing != null) {
       if (existing.direction != ExplicitFileTransferDirection.incoming ||
+          existing.purpose != assembly.purpose ||
           !_sameManifest(existing, assembly)) {
         await _sendTransferError(existing, '重连后文件清单发生变化');
         return;
@@ -404,11 +419,16 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
       direction: ExplicitFileTransferDirection.incoming,
       state: ExplicitFileTransferState.awaitingAcceptance,
       createdAt: DateTime.now(),
+      purpose: assembly.purpose,
       entries: List.unmodifiable(assembly.entries),
       totalBytes: assembly.totalBytes,
-      message: '请选择接收目录并确认',
+      message: assembly.purpose == ExplicitFileTransferPurpose.clipboard
+          ? '正在准备文件剪贴板'
+          : '请选择接收目录并确认',
     );
-    _notice('收到文件传输请求');
+    if (assembly.purpose == ExplicitFileTransferPurpose.explicit) {
+      _notice('收到文件传输请求');
+    }
     _notify();
   }
 
@@ -1009,6 +1029,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
       'transferId': task.id,
       'entryCount': task.entries.length,
       'totalBytes': task.totalBytes,
+      'purpose': task.purpose.wireName,
     });
     var sequence = 0;
     var batch = <Map<String, dynamic>>[];
@@ -1317,6 +1338,7 @@ class _MutableTransferTask {
     required this.direction,
     required this.state,
     required this.createdAt,
+    this.purpose = ExplicitFileTransferPurpose.explicit,
     this.entries = const [],
     this.totalBytes = 0,
     this.message,
@@ -1325,6 +1347,7 @@ class _MutableTransferTask {
   final String id;
   final ExplicitFileTransferDirection direction;
   final DateTime createdAt;
+  final ExplicitFileTransferPurpose purpose;
   ExplicitFileTransferState state;
   List<ExplicitFileTransferEntry> entries;
   int totalBytes;
@@ -1344,6 +1367,7 @@ class _MutableTransferTask {
         transferredBytes: transferredBytes,
         totalBytes: totalBytes,
         createdAt: createdAt,
+        purpose: purpose,
         destinationRoot: destinationRoot,
         message: message,
       );
@@ -1354,11 +1378,13 @@ class _IncomingManifestAssembly {
     required this.transferId,
     required this.entryCount,
     required this.totalBytes,
+    required this.purpose,
   });
 
   final String transferId;
   final int entryCount;
   final int totalBytes;
+  final ExplicitFileTransferPurpose purpose;
   final List<ExplicitFileTransferEntry> entries = [];
   int nextSequence = 0;
 }

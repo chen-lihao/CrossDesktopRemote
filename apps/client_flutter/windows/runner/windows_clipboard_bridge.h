@@ -8,6 +8,8 @@
 #include <flutter/method_channel.h>
 
 #include <memory>
+#include <string>
+#include <vector>
 #include <windows.h>
 
 class WindowsClipboardBridge {
@@ -28,6 +30,9 @@ class WindowsClipboardBridge {
       const flutter::MethodCall<EncodableValue>& call,
       std::unique_ptr<FlutterResult> result);
   EncodableValue Snapshot();
+  EncodableValue FileSnapshot(const std::vector<std::wstring>& paths,
+                              const char* delivery);
+  bool RenderDelayedFiles();
   bool OpenClipboardWithRetry();
   void EmitSnapshot();
 
@@ -35,6 +40,7 @@ class WindowsClipboardBridge {
   std::unique_ptr<flutter::MethodChannel<EncodableValue>> method_channel_;
   std::unique_ptr<flutter::EventChannel<EncodableValue>> event_channel_;
   std::unique_ptr<flutter::EventSink<EncodableValue>> event_sink_;
+  std::vector<std::wstring> delayed_file_paths_;
 };
 
 #endif  // RUNNER_WINDOWS_CLIPBOARD_BRIDGE_H_

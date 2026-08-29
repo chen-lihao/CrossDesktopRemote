@@ -12,6 +12,7 @@ class ClipboardSnapshot {
     required this.hasText,
     required this.tooLarge,
     required this.utf8Bytes,
+    this.filePaths = const [],
     this.text,
   });
 
@@ -24,6 +25,10 @@ class ClipboardSnapshot {
       hasText: value['hasText'] == true,
       tooLarge: value['tooLarge'] == true,
       utf8Bytes: (value['utf8Bytes'] as num?)?.toInt() ?? 0,
+      filePaths: (value['filePaths'] as List<dynamic>? ?? const [])
+          .whereType<String>()
+          .where((path) => path.isNotEmpty)
+          .toList(growable: false),
       text: value['text'] as String?,
     );
   }
@@ -32,15 +37,20 @@ class ClipboardSnapshot {
   final bool hasText;
   final bool tooLarge;
   final int utf8Bytes;
+  final List<String> filePaths;
   final String? text;
+
+  bool get hasFiles => filePaths.isNotEmpty;
 }
 
 abstract interface class ClipboardPlatformAdapter {
   bool get supported;
+  bool get fileClipboardSupported;
   bool get automaticMonitoringSupported;
   Stream<ClipboardSnapshot> get changes;
   Future<ClipboardSnapshot> readSnapshot();
   Future<ClipboardSnapshot> writeText(String text);
+  Future<ClipboardSnapshot> writeFiles(List<String> paths);
 }
 
 class MethodChannelClipboardPlatformAdapter
@@ -66,6 +76,9 @@ class MethodChannelClipboardPlatformAdapter
   bool get supported => Platform.isMacOS || Platform.isWindows;
 
   @override
+  bool get fileClipboardSupported => supported;
+
+  @override
   bool get automaticMonitoringSupported => true;
 
   @override
@@ -83,6 +96,16 @@ class MethodChannelClipboardPlatformAdapter
   Future<ClipboardSnapshot> writeText(String text) async {
     return ClipboardSnapshot.fromMap(
       await _methodChannel.invokeMethod<Object?>('writeText', {'text': text}),
+    );
+  }
+
+  @override
+  Future<ClipboardSnapshot> writeFiles(List<String> paths) async {
+    if (paths.isEmpty) throw ArgumentError.value(paths, 'paths', '文件列表为空');
+    return ClipboardSnapshot.fromMap(
+      await _methodChannel.invokeMethod<Object?>('writeFiles', {
+        'paths': paths,
+      }),
     );
   }
 }
@@ -108,6 +131,9 @@ class UserInitiatedClipboardPlatformAdapter
   bool get supported => true;
 
   @override
+  bool get fileClipboardSupported => false;
+
+  @override
   bool get automaticMonitoringSupported => false;
 
   @override
@@ -123,6 +149,11 @@ class UserInitiatedClipboardPlatformAdapter
   Future<ClipboardSnapshot> writeText(String text) async {
     await _writeText(text);
     return _snapshot(text);
+  }
+
+  @override
+  Future<ClipboardSnapshot> writeFiles(List<String> paths) {
+    throw UnsupportedError('iPad 暂不支持系统文件剪贴板');
   }
 
   ClipboardSnapshot _snapshot(String? text) {
@@ -150,6 +181,9 @@ class UnsupportedClipboardPlatformAdapter implements ClipboardPlatformAdapter {
   bool get supported => false;
 
   @override
+  bool get fileClipboardSupported => false;
+
+  @override
   bool get automaticMonitoringSupported => false;
 
   @override
@@ -163,6 +197,11 @@ class UnsupportedClipboardPlatformAdapter implements ClipboardPlatformAdapter {
   @override
   Future<ClipboardSnapshot> writeText(String text) {
     throw UnsupportedError('Clipboard synchronization is unavailable');
+  }
+
+  @override
+  Future<ClipboardSnapshot> writeFiles(List<String> paths) {
+    throw UnsupportedError('File clipboard synchronization is unavailable');
   }
 }
 

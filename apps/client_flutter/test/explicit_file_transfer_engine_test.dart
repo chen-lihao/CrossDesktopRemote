@@ -69,6 +69,28 @@ void main() {
     );
   });
 
+  test('clipboard purpose survives offer negotiation without changing v1 transport', () async {
+    _connect(sender, receiver);
+    await _waitFor(() => sender.transportReady && receiver.transportReady);
+    final source = File('${sandbox.path}${Platform.pathSeparator}paste.txt');
+    await source.writeAsString('clipboard');
+
+    final transferId = await sender.sendFiles([
+      source.path,
+    ], purpose: ExplicitFileTransferPurpose.clipboard);
+    await _waitFor(
+      () => receiver.tasks.any(
+        (task) => task.id == transferId && task.awaitsAcceptance,
+      ),
+    );
+
+    final incoming = receiver.tasks.singleWhere(
+      (task) => task.id == transferId,
+    );
+    expect(incoming.isClipboard, isTrue);
+    expect(incoming.message, '正在准备文件剪贴板');
+  });
+
   test('resumes from a .cdrpart after transport reconnects', () async {
     var dataDelay = const Duration(milliseconds: 2);
     _connect(sender, receiver, dataDelay: () => dataDelay);

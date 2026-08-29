@@ -99,4 +99,28 @@ void main() {
     );
     expect(activeContentGeometryVersion(const []), 0);
   });
+
+  test('file clipboard requires clipboard and explicit transfer support', () {
+    final capabilities = buildRemoteClientCapabilities(
+      role: RemoteRole.host,
+      platform: 'windows',
+      clipboardSupported: true,
+      explicitFileTransferSupported: true,
+      fileClipboardSupported: true,
+    );
+    expect(capabilities, contains(textClipboardV1Capability));
+    expect(capabilities, contains(explicitFileTransferV1Capability));
+    expect(capabilities, contains(fileClipboardV1Capability));
+
+    expect(
+      buildRemoteClientCapabilities(
+        role: RemoteRole.host,
+        platform: 'windows',
+        clipboardSupported: false,
+        explicitFileTransferSupported: true,
+        fileClipboardSupported: true,
+      ),
+      isNot(contains(fileClipboardV1Capability)),
+    );
+  });
 }
