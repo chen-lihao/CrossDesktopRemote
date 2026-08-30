@@ -53,7 +53,14 @@ abstract interface class WindowsInputBridgeApi {
 
   Future<void> sendText(String text);
 
+  Future<void> invokeShortcut({
+    required String key,
+    required List<String> modifiers,
+  });
+
   Future<void> releasePointerButtons();
+
+  Future<void> releaseAllInput();
 }
 
 class WindowsInputBridge implements WindowsInputBridgeApi {
@@ -136,7 +143,23 @@ class WindowsInputBridge implements WindowsInputBridgeApi {
   }
 
   @override
+  Future<void> invokeShortcut({
+    required String key,
+    required List<String> modifiers,
+  }) {
+    return _channel.invokeMethod<void>('invokeShortcut', {
+      'key': key,
+      'modifiers': modifiers,
+    });
+  }
+
+  @override
   Future<void> releasePointerButtons() {
     return _channel.invokeMethod<void>('releasePointerButtons');
+  }
+
+  @override
+  Future<void> releaseAllInput() {
+    return _channel.invokeMethod<void>('releaseAllInput');
   }
 }

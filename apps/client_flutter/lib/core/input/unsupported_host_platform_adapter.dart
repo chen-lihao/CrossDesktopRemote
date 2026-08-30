@@ -41,7 +41,18 @@ class UnsupportedHostPlatformAdapter implements HostPlatformAdapter {
   }
 
   @override
+  Future<void> invokeShortcut({
+    required String key,
+    required List<String> modifiers,
+  }) async {
+    throw _unsupported();
+  }
+
+  @override
   Future<void> releasePointerButtons() async {}
+
+  @override
+  Future<void> releaseAllInput() async {}
 
   @override
   Future<HostCaptureFrameState?> getCaptureFrameState() async => null;

@@ -768,7 +768,6 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
                       inputSettings,
                       desktopFullScreen: true,
                     ),
-                    _FileClipboardPasteProgress(session: widget.session),
                     Expanded(
                       child: _buildRemoteSurface(
                         inputSettings,
@@ -789,7 +788,6 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
                     inputSettings,
                     desktopFullScreen: false,
                   ),
-                  _FileClipboardPasteProgress(session: widget.session),
                   SizedBox(
                     height: viewportHeight,
                     child: _buildRemoteSurface(
@@ -957,7 +955,6 @@ class _FullScreenRemoteDesktopPageState
                   isFullScreen: true,
                 ),
               ),
-              _FileClipboardPasteProgress(session: widget.session),
               Expanded(
                 child: _RemoteDesktopSurface(
                   key: _surfaceKey,
@@ -2205,6 +2202,14 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                         ),
                       ),
                     ),
+                  Positioned(
+                    top: 12,
+                    left: 12,
+                    right: 12,
+                    child: IgnorePointer(
+                      child: _FileClipboardPasteProgress(session: session),
+                    ),
+                  ),
                   if (widget.inputSettings.pointerMode ==
                           RemotePointerMode.touchpad &&
                       !_keyboardVisible)

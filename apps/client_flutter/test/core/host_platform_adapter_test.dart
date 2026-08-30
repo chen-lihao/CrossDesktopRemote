@@ -78,11 +78,15 @@ void main() {
       ),
     );
     await adapter.sendText('你好');
+    await adapter.invokeShortcut(key: 'KeyV', modifiers: const ['command']);
+    await adapter.releaseAllInput();
 
     expect(calls.map((call) => call.method), [
       'pointer',
       'keyboard',
       'keyboard',
+      'invokeShortcut',
+      'releaseAllInput',
     ]);
     expect((calls[0].arguments as Map)['displayId'], '42');
     expect((calls[1].arguments as Map)['key'], 'KeyC');
@@ -201,11 +205,13 @@ void main() {
         ),
       );
       await adapter.sendText('中文');
-      await adapter.releasePointerButtons();
+      await adapter.invokeShortcut(key: 'KeyV', modifiers: const ['control']);
+      await adapter.releaseAllInput();
 
       expect(bridge.pointerEvents.single.displayId, r'\\.\DISPLAY1');
       expect(bridge.keyEvents.single.physicalHidUsage, 0x70004);
       expect(bridge.textValues, ['中文']);
+      expect(bridge.shortcuts.single.key, 'KeyV');
       expect(bridge.releaseCount, 1);
     },
   );
@@ -262,7 +268,8 @@ void main() {
       ),
     );
     await bridge.sendText('你好');
-    await bridge.releasePointerButtons();
+    await bridge.invokeShortcut(key: 'KeyV', modifiers: const ['control']);
+    await bridge.releaseAllInput();
 
     expect(capabilities.isCompatible, isTrue);
     expect(displays.single.pointPixelScale, 1.25);
@@ -272,7 +279,8 @@ void main() {
       'pointer',
       'keyboard',
       'keyboard',
-      'releasePointerButtons',
+      'invokeShortcut',
+      'releaseAllInput',
     ]);
     expect((calls[3].arguments as Map)['physicalHidUsage'], 0x70006);
     expect((calls[4].arguments as Map)['text'], '你好');
@@ -295,8 +303,17 @@ class _FakeWindowsInputBridge implements WindowsInputBridgeApi {
   final int protocolVersion;
   final pointerEvents = <HostPointerEvent>[];
   final keyEvents = <HostKeyEvent>[];
+  final shortcuts = <({String key, List<String> modifiers})>[];
   final textValues = <String>[];
   int releaseCount = 0;
+
+  @override
+  Future<void> invokeShortcut({
+    required String key,
+    required List<String> modifiers,
+  }) async {
+    shortcuts.add((key: key, modifiers: modifiers));
+  }
 
   @override
   Future<WindowsNativeHostCapabilities> getHostCapabilities() async {
@@ -329,6 +346,11 @@ class _FakeWindowsInputBridge implements WindowsInputBridgeApi {
 
   @override
   Future<void> releasePointerButtons() async {
+    releaseCount += 1;
+  }
+
+  @override
+  Future<void> releaseAllInput() async {
     releaseCount += 1;
   }
 

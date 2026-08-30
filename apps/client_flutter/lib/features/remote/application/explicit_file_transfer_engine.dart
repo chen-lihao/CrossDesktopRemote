@@ -16,14 +16,13 @@ typedef ExplicitFileTransferBinarySender = Future<void> Function(
   Uint8List data,
 );
 typedef ExplicitFileTransferBufferedAmount = Future<int> Function();
+typedef ExplicitFileTransferPacingDelay = Duration Function();
 
 class ExplicitFileTransferEngine extends ChangeNotifier {
   ExplicitFileTransferEngine();
 
   static const int _maxControlMessageBytes = 14 * 1024;
-  static const int _highWaterBytes =
-      explicitFileTransferWireMessageBytes *
-      explicitFileTransferMaxInFlightFragments;
+  static const int _highWaterBytes = explicitFileTransferWireMessageBytes * 4;
 
   final Map<String, _MutableTransferTask> _tasks = {};
   final Map<String, _IncomingManifestAssembly> _manifestAssemblies = {};
@@ -35,6 +34,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
   ExplicitFileTransferControlSender? _sendControlCallback;
   ExplicitFileTransferBinarySender? _sendBinaryCallback;
   ExplicitFileTransferBufferedAmount? _bufferedAmountCallback;
+  ExplicitFileTransferPacingDelay? _pacingDelayCallback;
   Future<void> _incomingFrameTail = Future<void>.value();
   Future<void> _controlTail = Future<void>.value();
   bool _transportOpen = false;
@@ -42,6 +42,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
   bool _sendPumpRunning = false;
   bool _disposed = false;
   int _transportGeneration = 0;
+  int _fragmentsSinceYield = 0;
 
   Stream<String> get notices => _notices.stream;
   bool get transportReady => _transportOpen && _remoteHelloReceived;
@@ -63,10 +64,13 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     required ExplicitFileTransferControlSender sendControl,
     required ExplicitFileTransferBinarySender sendBinary,
     required ExplicitFileTransferBufferedAmount bufferedAmount,
+    ExplicitFileTransferPacingDelay? pacingDelay,
   }) {
     _sendControlCallback = sendControl;
     _sendBinaryCallback = sendBinary;
     _bufferedAmountCallback = bufferedAmount;
+    _pacingDelayCallback = pacingDelay;
+    _fragmentsSinceYield = 0;
     _transportOpen = true;
     _remoteHelloReceived = false;
     _transportGeneration += 1;
@@ -80,6 +84,8 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     _sendControlCallback = null;
     _sendBinaryCallback = null;
     _bufferedAmountCallback = null;
+    _pacingDelayCallback = null;
+    _fragmentsSinceYield = 0;
     _transportGeneration += 1;
     for (final task in _tasks.values) {
       if (reconnecting &&
@@ -760,6 +766,11 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     final sender = _sendBinaryCallback;
     if (sender == null) throw StateError('文件数据通道已关闭');
     await sender(encodeExplicitFileTransferFrame(frame));
+    _fragmentsSinceYield += 1;
+    if (_fragmentsSinceYield >= 4) {
+      _fragmentsSinceYield = 0;
+      await Future<void>.delayed(_pacingDelayCallback?.call() ?? Duration.zero);
+    }
     return true;
   }
 

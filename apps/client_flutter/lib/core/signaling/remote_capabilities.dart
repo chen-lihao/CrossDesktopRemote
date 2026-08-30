@@ -7,6 +7,7 @@ const textureCropRenderingV1Capability = 'texture-crop-rendering-v1';
 const textClipboardV1Capability = 'text-clipboard-v1';
 const explicitFileTransferV1Capability = 'explicit-file-transfer-v1';
 const fileClipboardV1Capability = 'file-clipboard-v1';
+const atomicShortcutV1Capability = 'atomic-shortcut-v1';
 const iosActiveContentGeometryV3Enabled = bool.fromEnvironment(
   'CDR_IOS_ACTIVE_CONTENT_GEOMETRY_V3',
   defaultValue: true,
@@ -53,6 +54,7 @@ List<String> buildRemoteClientCapabilities({
       fileClipboardSupported) {
     capabilities.add(fileClipboardV1Capability);
   }
+  capabilities.add(atomicShortcutV1Capability);
   return capabilities;
 }
 

@@ -33,6 +33,7 @@ class MainFlutterWindow: NSWindow {
   private var clipboardBridge: AppleClipboardBridge?
   private var lanDiscoveryBridge: AppleLanDiscoveryBridge?
   private var pressedMouseButtons: Set<String> = []
+  private var pressedKeyboardKeys: Set<CGKeyCode> = []
   private var captureColorDiagnostics: [String: Any] = [:]
   private var colorDiagnosticsObserver: NSObjectProtocol?
   private var captureFirstFrameObserver: NSObjectProtocol?
@@ -122,8 +123,13 @@ class MainFlutterWindow: NSWindow {
         self.handlePointer(arguments: call.arguments, result: result)
       case "keyboard":
         self.handleKeyboard(arguments: call.arguments, result: result)
+      case "invokeShortcut":
+        self.invokeShortcut(arguments: call.arguments, result: result)
       case "releasePointerButtons":
         self.releasePointerButtons()
+        result(nil)
+      case "releaseAllInput":
+        self.releaseAllInput()
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
@@ -311,6 +317,43 @@ class MainFlutterWindow: NSWindow {
     )
     event?.flags = modifierFlags(values["modifiers"] as? [String] ?? [])
     event?.post(tap: .cghidEventTap)
+    if phase == "down" {
+      pressedKeyboardKeys.insert(keyCode)
+    } else {
+      pressedKeyboardKeys.remove(keyCode)
+    }
+    result(nil)
+  }
+
+  private func invokeShortcut(arguments: Any?, result: FlutterResult) {
+    guard hasInputAccess() else {
+      result(FlutterError(
+        code: "input_permission_required",
+        message: "请在系统设置中允许本机发布鼠标和键盘事件",
+        details: nil
+      ))
+      return
+    }
+    guard
+      let values = arguments as? [String: Any],
+      let keyName = values["key"] as? String,
+      let keyCode = macKeyCode(for: keyName)
+    else {
+      result(FlutterError(code: "unsupported_key", message: "Unsupported shortcut key", details: nil))
+      return
+    }
+
+    // A shortcut is one native transaction. Releasing bridge-owned state
+    // first prevents an interrupted file transfer from leaving a synthetic
+    // modifier or mouse button active on the host.
+    releaseAllInput()
+    let flags = modifierFlags(values["modifiers"] as? [String] ?? [])
+    let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true)
+    down?.flags = flags
+    down?.post(tap: .cghidEventTap)
+    let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false)
+    up?.flags = flags
+    up?.post(tap: .cghidEventTap)
     result(nil)
   }
 
@@ -333,6 +376,18 @@ class MainFlutterWindow: NSWindow {
       )?.post(tap: .cghidEventTap)
     }
     pressedMouseButtons.removeAll()
+  }
+
+  private func releaseAllInput() {
+    releasePointerButtons()
+    for keyCode in pressedKeyboardKeys {
+      CGEvent(
+        keyboardEventSource: nil,
+        virtualKey: keyCode,
+        keyDown: false
+      )?.post(tap: .cghidEventTap)
+    }
+    pressedKeyboardKeys.removeAll()
   }
 
   private func postUnicodeText(_ text: String) {

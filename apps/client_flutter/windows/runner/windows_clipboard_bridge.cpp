@@ -88,30 +88,10 @@ WindowsClipboardBridge::~WindowsClipboardBridge() {
 }
 
 bool WindowsClipboardBridge::HandleWindowMessage(UINT message) {
-  switch (message) {
-    case WM_RENDERFORMAT:
-      return RenderDelayedFiles();
-    case WM_RENDERALLFORMATS:
-      if (!delayed_file_paths_.empty() && GetClipboardOwner() == window_ &&
-          OpenClipboardWithRetry()) {
-        RenderDelayedFiles();
-        CloseClipboard();
-      }
-      return true;
-    case WM_DESTROYCLIPBOARD:
-      delayed_file_paths_.clear();
-      return false;
-    case WM_CLIPBOARDUPDATE:
-      if (event_sink_) {
-        event_sink_->Success(
-            delayed_file_paths_.empty()
-                ? Snapshot()
-                : FileSnapshot(delayed_file_paths_, "ole-delayed-rendering"));
-      }
-      return false;
-    default:
-      return false;
+  if (message == WM_CLIPBOARDUPDATE) {
+    EmitSnapshot();
   }
+  return false;
 }
 
 void WindowsClipboardBridge::HandleMethodCall(
@@ -156,15 +136,56 @@ void WindowsClipboardBridge::HandleMethodCall(
       }
       paths.push_back(path);
     }
+    HGLOBAL file_drop = BuildFileDrop(paths);
+    HGLOBAL preferred_effect = BuildPreferredDropEffect();
+    if (file_drop == nullptr || preferred_effect == nullptr) {
+      if (file_drop != nullptr) GlobalFree(file_drop);
+      if (preferred_effect != nullptr) GlobalFree(preferred_effect);
+      result->Error("clipboard_write_failed",
+                    "Unable to allocate Windows file clipboard data");
+      return;
+    }
     if (!OpenClipboardWithRetry()) {
+      GlobalFree(file_drop);
+      GlobalFree(preferred_effect);
       result->Error("clipboard_busy", "The Windows clipboard is busy");
       return;
     }
-    EmptyClipboard();
-    delayed_file_paths_ = paths;
-    SetClipboardData(CF_HDROP, nullptr);
+    if (!EmptyClipboard()) {
+      GlobalFree(file_drop);
+      GlobalFree(preferred_effect);
+      CloseClipboard();
+      result->Error("clipboard_write_failed",
+                    "Unable to take ownership of the Windows clipboard");
+      return;
+    }
+    const UINT preferred_effect_format =
+        RegisterClipboardFormat(CFSTR_PREFERREDDROPEFFECT);
+    if (preferred_effect_format == 0 ||
+        SetClipboardData(preferred_effect_format, preferred_effect) == nullptr) {
+      GlobalFree(file_drop);
+      GlobalFree(preferred_effect);
+      CloseClipboard();
+      result->Error("clipboard_write_failed",
+                    "Unable to publish the preferred file copy operation");
+      return;
+    }
+    preferred_effect = nullptr;
+    if (SetClipboardData(CF_HDROP, file_drop) == nullptr) {
+      GlobalFree(file_drop);
+      CloseClipboard();
+      result->Error("clipboard_write_failed",
+                    "Unable to publish Windows file paths");
+      return;
+    }
+    file_drop = nullptr;
     CloseClipboard();
-    result->Success(FileSnapshot(paths, "ole-delayed-rendering"));
+    if (!VerifyFileDrop(paths)) {
+      result->Error("clipboard_write_failed",
+                    "Windows did not commit the materialized file clipboard");
+      return;
+    }
+    result->Success(FileSnapshot(paths, "materialized-cf-hdrop"));
     return;
   }
   const auto entry = arguments->find(EncodableValue("text"));
@@ -190,7 +211,6 @@ void WindowsClipboardBridge::HandleMethodCall(
     return;
   }
   EmptyClipboard();
-  delayed_file_paths_.clear();
   const size_t allocation_size = (wide.size() + 1) * sizeof(wchar_t);
   HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, allocation_size);
   if (memory == nullptr) {
@@ -295,42 +315,75 @@ EncodableValue WindowsClipboardBridge::FileSnapshot(
   });
 }
 
-bool WindowsClipboardBridge::RenderDelayedFiles() {
-  if (delayed_file_paths_.empty()) return false;
+HGLOBAL WindowsClipboardBridge::BuildFileDrop(
+    const std::vector<std::wstring>& paths) {
   size_t characters = 1;
-  for (const auto& path : delayed_file_paths_) characters += path.size() + 1;
+  for (const auto& path : paths) characters += path.size() + 1;
   const size_t allocation_size =
       sizeof(DROPFILES) + characters * sizeof(wchar_t);
   HGLOBAL memory =
       GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, allocation_size);
-  if (memory == nullptr) return false;
+  if (memory == nullptr) return nullptr;
   auto* drop = static_cast<DROPFILES*>(GlobalLock(memory));
   if (drop == nullptr) {
     GlobalFree(memory);
-    return false;
+    return nullptr;
   }
   drop->pFiles = static_cast<DWORD>(sizeof(DROPFILES));
   drop->fWide = TRUE;
   auto* destination = reinterpret_cast<wchar_t*>(
       reinterpret_cast<BYTE*>(drop) + sizeof(DROPFILES));
-  for (const auto& path : delayed_file_paths_) {
+  for (const auto& path : paths) {
     std::memcpy(destination, path.c_str(),
                 (path.size() + 1) * sizeof(wchar_t));
     destination += path.size() + 1;
   }
   *destination = L'\0';
   GlobalUnlock(memory);
-  if (SetClipboardData(CF_HDROP, memory) == nullptr) {
+  return memory;
+}
+
+HGLOBAL WindowsClipboardBridge::BuildPreferredDropEffect() {
+  HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
+  if (memory == nullptr) return nullptr;
+  auto* effect = static_cast<DWORD*>(GlobalLock(memory));
+  if (effect == nullptr) {
     GlobalFree(memory);
-    return false;
+    return nullptr;
   }
-  return true;
+  *effect = DROPEFFECT_COPY;
+  GlobalUnlock(memory);
+  return memory;
+}
+
+bool WindowsClipboardBridge::VerifyFileDrop(
+    const std::vector<std::wstring>& paths) {
+  if (!OpenClipboardWithRetry()) return false;
+  const HDROP drop = reinterpret_cast<HDROP>(GetClipboardData(CF_HDROP));
+  bool matches = drop != nullptr &&
+                 DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0) ==
+                     static_cast<UINT>(paths.size());
+  for (UINT index = 0;
+       matches && index < static_cast<UINT>(paths.size()); ++index) {
+    const UINT length = DragQueryFileW(drop, index, nullptr, 0);
+    std::wstring actual(static_cast<size_t>(length) + 1, L'\0');
+    if (DragQueryFileW(drop, index, actual.data(), length + 1) == 0) {
+      matches = false;
+      break;
+    }
+    actual.resize(length);
+    matches = CompareStringOrdinal(actual.c_str(), -1,
+                                   paths[index].c_str(), -1, TRUE) ==
+              CSTR_EQUAL;
+  }
+  CloseClipboard();
+  return matches;
 }
 
 bool WindowsClipboardBridge::OpenClipboardWithRetry() {
-  for (int attempt = 0; attempt < 4; ++attempt) {
+  for (int attempt = 0; attempt < 8; ++attempt) {
     if (OpenClipboard(window_)) return true;
-    Sleep(2);
+    Sleep(4);
   }
   return false;
 }

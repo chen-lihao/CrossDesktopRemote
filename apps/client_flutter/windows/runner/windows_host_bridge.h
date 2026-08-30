@@ -40,6 +40,8 @@ class WindowsHostBridge {
                      std::string* error);
   bool HandleKeyboard(const flutter::EncodableMap& arguments,
                       std::string* error);
+  bool HandleShortcut(const flutter::EncodableMap& arguments,
+                      std::string* error);
   bool HandleText(const std::string& text, std::string* error);
   bool SetSyntheticModifiers(const std::set<UINT>& requested,
                              std::string* error);

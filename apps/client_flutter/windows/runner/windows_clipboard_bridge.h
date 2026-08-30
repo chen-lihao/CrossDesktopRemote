@@ -32,7 +32,9 @@ class WindowsClipboardBridge {
   EncodableValue Snapshot();
   EncodableValue FileSnapshot(const std::vector<std::wstring>& paths,
                               const char* delivery);
-  bool RenderDelayedFiles();
+  HGLOBAL BuildFileDrop(const std::vector<std::wstring>& paths);
+  HGLOBAL BuildPreferredDropEffect();
+  bool VerifyFileDrop(const std::vector<std::wstring>& paths);
   bool OpenClipboardWithRetry();
   void EmitSnapshot();
 
@@ -40,7 +42,6 @@ class WindowsClipboardBridge {
   std::unique_ptr<flutter::MethodChannel<EncodableValue>> method_channel_;
   std::unique_ptr<flutter::EventChannel<EncodableValue>> event_channel_;
   std::unique_ptr<flutter::EventSink<EncodableValue>> event_sink_;
-  std::vector<std::wstring> delayed_file_paths_;
 };
 
 #endif  // RUNNER_WINDOWS_CLIPBOARD_BRIDGE_H_

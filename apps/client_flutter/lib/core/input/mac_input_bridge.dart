@@ -224,8 +224,22 @@ class MacInputBridge {
     });
   }
 
+  Future<void> invokeShortcut({
+    required String key,
+    required List<String> modifiers,
+  }) {
+    return _channel.invokeMethod<void>('invokeShortcut', {
+      'key': key,
+      'modifiers': modifiers,
+    });
+  }
+
   Future<void> releasePointerButtons() {
     return _channel.invokeMethod<void>('releasePointerButtons');
+  }
+
+  Future<void> releaseAllInput() {
+    return _channel.invokeMethod<void>('releaseAllInput');
   }
 }
 

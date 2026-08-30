@@ -430,7 +430,8 @@ void WindowsHostBridge::HandleMethodCall(
     return;
   }
 
-  if (call.method_name() == "releasePointerButtons") {
+  if (call.method_name() == "releasePointerButtons" ||
+      call.method_name() == "releaseAllInput") {
     ReleaseAllInput();
     result->Success();
     return;
@@ -448,6 +449,8 @@ void WindowsHostBridge::HandleMethodCall(
     success = HandlePointer(*arguments, &error);
   } else if (call.method_name() == "keyboard") {
     success = HandleKeyboard(*arguments, &error);
+  } else if (call.method_name() == "invokeShortcut") {
+    success = HandleShortcut(*arguments, &error);
   } else {
     result->NotImplemented();
     return;
@@ -611,6 +614,28 @@ bool WindowsHostBridge::HandleKeyboard(const EncodableMap& arguments,
     return false;
   }
   pressed_keys_[token] = descriptor;
+  return true;
+}
+
+bool WindowsHostBridge::HandleShortcut(const EncodableMap& arguments,
+                                       std::string* error) {
+  // Clipboard-backed paste can take minutes. Treat its eventual shortcut as
+  // one native transaction so a partially delivered down/up sequence cannot
+  // strand Control, a key, or a mouse button on the host.
+  ReleaseAllInput();
+  EncodableMap down = arguments;
+  EncodableMap up = arguments;
+  down[EncodableValue("phase")] = EncodableValue("down");
+  up[EncodableValue("phase")] = EncodableValue("up");
+  if (!HandleKeyboard(down, error)) {
+    ReleaseAllInput();
+    return false;
+  }
+  if (!HandleKeyboard(up, error)) {
+    ReleaseAllInput();
+    return false;
+  }
+  ReleaseAllInput();
   return true;
 }
 

@@ -55,6 +55,25 @@ ClipboardSyncMode _platformClipboardMode(
       : ClipboardSyncMode.hostToController;
 }
 
+String? _fileClipboardSignature(ClipboardSnapshot snapshot) {
+  if (!snapshot.hasFiles) return null;
+  final paths = snapshot.filePaths
+      .map((path) => '${path.length}:$path')
+      .join('|');
+  return '${snapshot.revision}:$paths';
+}
+
+bool _isModifierWireKey(String key) => const {
+  'ControlLeft',
+  'ControlRight',
+  'MetaLeft',
+  'MetaRight',
+  'AltLeft',
+  'AltRight',
+  'ShiftLeft',
+  'ShiftRight',
+}.contains(key);
+
 class _RtcVideoProgress {
   const _RtcVideoProgress({
     required this.size,
@@ -253,6 +272,7 @@ class RemoteSessionController extends ChangeNotifier {
   bool _screenCaptureGranted = false;
   bool? _accessibilityGranted;
   int _inputSequence = 0;
+  int _remoteInputEpoch = 0;
   int _inputPermissionPollAttempts = 0;
   int _motionEventsSinceProbe = 0;
   int _droppedMotionEvents = 0;
@@ -278,6 +298,7 @@ class RemoteSessionController extends ChangeNotifier {
   bool _remoteSupportsTextClipboardV1 = false;
   bool _remoteSupportsExplicitFileTransferV1 = false;
   bool _remoteSupportsFileClipboardV1 = false;
+  bool _remoteSupportsAtomicShortcutV1 = false;
   bool _remoteClipboardSupportsApplied = false;
   bool _explicitFileTransferTransportAttached = false;
   Completer<void>? _invitationRotationCompleter;
@@ -288,6 +309,7 @@ class RemoteSessionController extends ChangeNotifier {
   ClipboardSyncMode? _remoteClipboardMode;
   ClipboardOffer? _queuedClipboardOffer;
   String? _fileClipboardPasteTransferId;
+  String? _remotePreparedFileClipboardSignature;
   String? _latestIncomingFileClipboardTransferId;
   bool _fileClipboardPastePreparing = false;
   bool _synchronizingFileClipboardTransfers = false;
@@ -560,6 +582,10 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   void _handleLocalClipboardChange(ClipboardSnapshot snapshot) {
+    if (_remotePreparedFileClipboardSignature !=
+        _fileClipboardSignature(snapshot)) {
+      _remotePreparedFileClipboardSignature = null;
+    }
     _clipboardTempLeases.observeClipboard(snapshot);
     if (snapshot.hasFiles) {
       if (_fileClipboardEchoGuard.consumeIfExpected(snapshot)) {
@@ -819,6 +845,9 @@ class RemoteSessionController extends ChangeNotifier {
       }
       return;
     }
+    if (phase == 'down' || phase == 'scroll') {
+      _remoteInputEpoch += 1;
+    }
     final isMotion = phase == 'move' || phase == 'scroll';
     final probe = isMotion && ++_motionEventsSinceProbe >= 30;
     if (probe) _motionEventsSinceProbe = 0;
@@ -858,6 +887,9 @@ class RemoteSessionController extends ChangeNotifier {
       explainControlUnavailable();
       return;
     }
+    if (phase == 'down' && !_isModifierWireKey(key)) {
+      _remoteInputEpoch += 1;
+    }
     _sendControl({
       'type': 'keyboard',
       'version': 2,
@@ -879,6 +911,7 @@ class RemoteSessionController extends ChangeNotifier {
       }
       return;
     }
+    _remoteInputEpoch += 1;
     for (final chunk in chunkRemoteText(text)) {
       _sendControl({
         'type': 'keyboard',
@@ -897,14 +930,35 @@ class RemoteSessionController extends ChangeNotifier {
       explainControlUnavailable();
       return;
     }
-    if (key == 'KeyV' && !await _prepareRemoteClipboardPaste()) return;
+    if (key == 'KeyV' && fileClipboardPastePending) {
+      _emitNotice('文件仍在同步，完成后会自动继续粘贴');
+      return;
+    }
+    final inputEpoch = ++_remoteInputEpoch;
+    if (key == 'KeyV' &&
+        !await _prepareRemoteClipboardPaste(inputEpoch: inputEpoch)) {
+      return;
+    }
     if (!canSendControl) return;
     final modifiers = [remotePrimaryShortcutModifier];
-    sendKey(phase: 'down', key: key, modifiers: modifiers);
-    sendKey(phase: 'up', key: key, modifiers: modifiers);
+    if (_remoteSupportsAtomicShortcutV1) {
+      _sendControl({
+        'type': 'shortcut',
+        'version': 2,
+        'sequence': ++_inputSequence,
+        'sentAtUnixMicros': DateTime.now().microsecondsSinceEpoch,
+        'key': key,
+        'modifiers': modifiers,
+      });
+    } else {
+      // Preserve interoperability with peers released before atomic shortcut
+      // capability negotiation was introduced.
+      sendKey(phase: 'down', key: key, modifiers: modifiers);
+      sendKey(phase: 'up', key: key, modifiers: modifiers);
+    }
   }
 
-  Future<bool> _prepareRemoteClipboardPaste() async {
+  Future<bool> _prepareRemoteClipboardPaste({required int inputEpoch}) async {
     final channel = _clipboardChannel;
     if (!_clipboardPlatform.supported ||
         channel == null ||
@@ -918,7 +972,10 @@ class RemoteSessionController extends ChangeNotifier {
           _emitNotice('远程设备当前不允许接收剪贴板', level: RemoteNoticeLevel.warning);
           return false;
         }
-        return await _prepareRemoteFileClipboardPaste(snapshot);
+        return await _prepareRemoteFileClipboardPaste(
+          snapshot,
+          inputEpoch: inputEpoch,
+        );
       }
       if (!_remoteSupportsTextClipboardV1 || !_remoteAllowsClipboardInbound) {
         return true;
@@ -944,11 +1001,17 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<bool> _prepareRemoteFileClipboardPaste(
-    ClipboardSnapshot snapshot,
-  ) async {
+    ClipboardSnapshot snapshot, {
+    required int inputEpoch,
+  }) async {
     if (!fileClipboardReady) {
       _emitNotice('远程设备不支持文件剪贴板，请使用“文件传输”', level: RemoteNoticeLevel.warning);
       return false;
+    }
+    final signature = _fileClipboardSignature(snapshot);
+    if (signature != null &&
+        signature == _remotePreparedFileClipboardSignature) {
+      return true;
     }
     _fileClipboardPastePreparing = true;
     notifyListeners();
@@ -971,6 +1034,14 @@ class RemoteSessionController extends ChangeNotifier {
         return false;
       }
       appliedToRemoteClipboard = true;
+      _remotePreparedFileClipboardSignature = signature;
+      if (_remoteInputEpoch != inputEpoch) {
+        _emitNotice(
+          '文件已同步；检测到传输期间有其他操作，请再次按远程粘贴快捷键',
+          level: RemoteNoticeLevel.success,
+        );
+        return false;
+      }
       _emitNotice('文件已就绪，正在继续远程粘贴', level: RemoteNoticeLevel.success);
       return true;
     } finally {
@@ -1785,7 +1856,7 @@ class RemoteSessionController extends ChangeNotifier {
           refreshColorDiagnostics();
         }
       } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
-        unawaited(_releaseHostPointerButtons());
+        unawaited(_releaseHostInputState());
       }
       notifyListeners();
     };
@@ -1880,6 +1951,9 @@ class RemoteSessionController extends ChangeNotifier {
       sendBinary: (bytes) =>
           data!.send(RTCDataChannelMessage.fromBinary(bytes)),
       bufferedAmount: () => data!.getBufferedAmount(),
+      pacingDelay: () => (_inputRoundTripMs ?? 0) > 60
+          ? const Duration(milliseconds: 12)
+          : Duration.zero,
     );
   }
 
@@ -2022,6 +2096,21 @@ class RemoteSessionController extends ChangeNotifier {
             ),
           );
         }
+        _acknowledgeInput(message);
+      case 'shortcut':
+        if (!_acceptInputSequence(message, motion: false)) {
+          return;
+        }
+        final key = message['key'] as String? ?? '';
+        if (!RemoteShortcutPolicy.commonWireKeys.contains(key)) {
+          return;
+        }
+        await _hostPlatform.invokeShortcut(
+          key: key,
+          modifiers: (message['modifiers'] as List<dynamic>? ?? const [])
+              .whereType<String>()
+              .toList(growable: false),
+        );
         _acknowledgeInput(message);
       case 'select-display':
         await _switchHostDisplay(
@@ -2433,7 +2522,7 @@ class RemoteSessionController extends ChangeNotifier {
       return;
     }
     try {
-      await _releaseHostPointerButtons();
+      await _releaseHostInputState();
       final permission = await _hostPlatform.checkPermissions();
       _accessibilityGranted = permission.inputGranted;
       _controlError = permission.inputGranted ? null : permission.limitation;
@@ -3189,6 +3278,9 @@ class RemoteSessionController extends ChangeNotifier {
         _remoteSupportsFileClipboardV1 = peerCapabilities.contains(
           fileClipboardV1Capability,
         );
+        _remoteSupportsAtomicShortcutV1 = peerCapabilities.contains(
+          atomicShortcutV1Capability,
+        );
         if (role == RemoteRole.host) {
           _remoteActiveContentGeometryVersion = activeContentGeometryVersion(
             peerCapabilities,
@@ -3619,7 +3711,7 @@ class RemoteSessionController extends ChangeNotifier {
     }
 
     _hostDisplaySwitchInProgress = true;
-    await _releaseHostPointerButtons();
+    await _releaseHostInputState();
     _mediaStatsAccumulator.reset();
     _geometryObservationToken += 1;
     _videoGeometryState = RemoteVideoGeometryState.adapting;
@@ -4260,7 +4352,7 @@ class RemoteSessionController extends ChangeNotifier {
       }
     }
     await _signaling.close();
-    await _releaseHostPointerButtons();
+    await _releaseHostInputState();
     await _controlChannel?.close();
     _controlChannel = null;
     await _motionChannel?.close();
@@ -4329,6 +4421,7 @@ class RemoteSessionController extends ChangeNotifier {
     _remoteSupportsTextClipboardV1 = false;
     _remoteSupportsExplicitFileTransferV1 = false;
     _remoteSupportsFileClipboardV1 = false;
+    _remoteSupportsAtomicShortcutV1 = false;
     _remoteClipboardSupportsApplied = false;
     _remoteClipboardMode = null;
     _queuedClipboardOffer = null;
@@ -4337,6 +4430,7 @@ class RemoteSessionController extends ChangeNotifier {
     _fileClipboardApplyGate.reset();
     _fileClipboardEchoGuard.reset();
     _fileClipboardPasteTransferId = null;
+    _remotePreparedFileClipboardSignature = null;
     _latestIncomingFileClipboardTransferId = null;
     _fileClipboardPastePreparing = false;
     _acceptingFileClipboardTransfers.clear();
@@ -4380,6 +4474,7 @@ class RemoteSessionController extends ChangeNotifier {
     _displaySwitch.reset();
     _geometryObservationToken += 1;
     _inputSequence = 0;
+    _remoteInputEpoch = 0;
     _inputSequenceGuard.reset();
     _inputPermissionPollAttempts = 0;
     _motionEventsSinceProbe = 0;
@@ -4398,12 +4493,12 @@ class RemoteSessionController extends ChangeNotifier {
     _closing = false;
   }
 
-  Future<void> _releaseHostPointerButtons() async {
+  Future<void> _releaseHostInputState() async {
     if (role != RemoteRole.host || !_hostPlatform.capabilities.canHostDesktop) {
       return;
     }
     try {
-      await _hostPlatform.releasePointerButtons();
+      await _hostPlatform.releaseAllInput();
     } catch (_) {
       // The native window may already be closing or unavailable in tests.
     }

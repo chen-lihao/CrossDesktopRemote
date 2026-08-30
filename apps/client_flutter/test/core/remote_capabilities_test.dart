@@ -40,6 +40,7 @@ void main() {
       activeContentGeometryV2Capability,
       activeContentGeometryV3Capability,
       textureCropRenderingV1Capability,
+      atomicShortcutV1Capability,
     ]);
   });
 
@@ -52,7 +53,10 @@ void main() {
       enableIosGeometryV3: false,
     );
 
-    expect(capabilities, [displaySwitchTransactionV1Capability]);
+    expect(capabilities, [
+      displaySwitchTransactionV1Capability,
+      atomicShortcutV1Capability,
+    ]);
   });
 
   test('host does not advertise controller capabilities', () {
@@ -63,7 +67,7 @@ void main() {
         clipboardSupported: false,
         explicitFileTransferSupported: false,
       ),
-      isEmpty,
+      [atomicShortcutV1Capability],
     );
   });
 
@@ -75,7 +79,7 @@ void main() {
         clipboardSupported: false,
         explicitFileTransferSupported: false,
       ),
-      [displaySwitchTransactionV1Capability],
+      [displaySwitchTransactionV1Capability, atomicShortcutV1Capability],
     );
   });
 

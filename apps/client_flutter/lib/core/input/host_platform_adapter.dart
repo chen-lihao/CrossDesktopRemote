@@ -202,7 +202,14 @@ abstract interface class HostPlatformAdapter {
 
   Future<void> sendText(String text);
 
+  Future<void> invokeShortcut({
+    required String key,
+    required List<String> modifiers,
+  });
+
   Future<void> releasePointerButtons();
+
+  Future<void> releaseAllInput();
 
   Future<HostCaptureFrameState?> getCaptureFrameState();
 

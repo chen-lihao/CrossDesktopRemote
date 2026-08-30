@@ -79,7 +79,16 @@ class MacHostPlatformAdapter implements HostPlatformAdapter {
   Future<void> sendText(String text) => bridge.sendText(text);
 
   @override
+  Future<void> invokeShortcut({
+    required String key,
+    required List<String> modifiers,
+  }) => bridge.invokeShortcut(key: key, modifiers: modifiers);
+
+  @override
   Future<void> releasePointerButtons() => bridge.releasePointerButtons();
+
+  @override
+  Future<void> releaseAllInput() => bridge.releaseAllInput();
 
   @override
   Future<HostCaptureFrameState?> getCaptureFrameState() async {
