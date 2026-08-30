@@ -52,13 +52,76 @@ void main() {
   );
 
   test('desktop file clipboard uses an isolated temporary directory', () async {
-    const adapter = DesktopExplicitFileTransferPlatformAdapter();
+    final systemTemp = await Directory.systemTemp.createTemp(
+      'crossdesktop-platform-test-',
+    );
+    addTearDown(() async {
+      if (await systemTemp.exists()) await systemTemp.delete(recursive: true);
+    });
+    final adapter = DesktopExplicitFileTransferPlatformAdapter(
+      systemTemp: systemTemp,
+    );
     final path = await adapter.createClipboardReceiveDirectory('transfer-1');
     addTearDown(() => adapter.cleanupClipboardReceiveDirectory(path));
 
     expect(await Directory(path).exists(), isTrue);
-    expect(path, contains('crossdesktop-file-clipboard-transfer-1-'));
+    expect(
+      path,
+      contains('CrossDesktopRemote${Platform.pathSeparator}clipboard'),
+    );
+    expect(path, contains('transfer-1-'));
     await adapter.cleanupClipboardReceiveDirectory(path);
     expect(await Directory(path).exists(), isFalse);
   });
+
+  test(
+    'desktop cleanup rejects directories outside its managed root',
+    () async {
+      final systemTemp = await Directory.systemTemp.createTemp(
+        'crossdesktop-platform-test-',
+      );
+      addTearDown(() async {
+        if (await systemTemp.exists()) await systemTemp.delete(recursive: true);
+      });
+      final outside = await Directory(
+        '${systemTemp.path}${Platform.pathSeparator}outside',
+      ).create();
+      final adapter = DesktopExplicitFileTransferPlatformAdapter(
+        systemTemp: systemTemp,
+      );
+
+      expect(
+        () => adapter.cleanupClipboardReceiveDirectory(outside.path),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(await outside.exists(), isTrue);
+    },
+  );
+
+  test(
+    'desktop startup scavenger removes expired managed and legacy dirs',
+    () async {
+      final systemTemp = await Directory.systemTemp.createTemp(
+        'crossdesktop-platform-test-',
+      );
+      addTearDown(() async {
+        if (await systemTemp.exists()) await systemTemp.delete(recursive: true);
+      });
+      final adapter = DesktopExplicitFileTransferPlatformAdapter(
+        systemTemp: systemTemp,
+      );
+      final managed = await adapter.createClipboardReceiveDirectory('managed');
+      final legacy = await systemTemp.createTemp(
+        'crossdesktop-file-clipboard-legacy-',
+      );
+
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+      await adapter.cleanupOrphanedClipboardReceiveDirectories(
+        maxAge: Duration.zero,
+      );
+
+      expect(await Directory(managed).exists(), isFalse);
+      expect(await legacy.exists(), isFalse);
+    },
+  );
 }

@@ -251,6 +251,34 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     _notify();
   }
 
+  /// Retires clipboard-only work when the enclosing remote session ends.
+  ///
+  /// Explicit transfers retain their reconnect semantics. Clipboard transfers
+  /// are tied to one OS clipboard generation and must never be re-offered to a
+  /// later peer session.
+  Future<Set<String>> retireClipboardTasks() async {
+    final retired = <String>{};
+    _manifestAssemblies.removeWhere((_, assembly) {
+      final remove = assembly.purpose == ExplicitFileTransferPurpose.clipboard;
+      if (remove) retired.add(assembly.transferId);
+      return remove;
+    });
+    for (final task in _tasks.values) {
+      if (!task.isClipboard) continue;
+      retired.add(task.id);
+      if (task.snapshot.canCancel) {
+        task
+          ..state = ExplicitFileTransferState.cancelled
+          ..message = '远程会话已结束，文件剪贴板任务已作废';
+        await _discardReceivePartials(task);
+      } else {
+        await _closeReceiveHandles(task);
+      }
+    }
+    _notify();
+    return retired;
+  }
+
   void handleControlMessage(String payload) {
     _controlTail = _controlTail.then((_) => _processControlMessage(payload));
   }

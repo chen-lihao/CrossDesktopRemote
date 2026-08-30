@@ -105,6 +105,39 @@ void main() {
     expect(completed.message, '文件剪贴板缓存已就绪');
   });
 
+  test(
+    'session retirement cancels clipboard tasks but preserves explicit ones',
+    () async {
+      _connect(sender, receiver);
+      await _waitFor(() => sender.transportReady && receiver.transportReady);
+      final clipboardSource = File(
+        '${sandbox.path}${Platform.pathSeparator}clipboard.txt',
+      );
+      final explicitSource = File(
+        '${sandbox.path}${Platform.pathSeparator}explicit.txt',
+      );
+      await clipboardSource.writeAsString('clipboard');
+      await explicitSource.writeAsString('explicit');
+
+      final clipboardId = await sender.sendFiles([
+        clipboardSource.path,
+      ], purpose: ExplicitFileTransferPurpose.clipboard);
+      final explicitId = await sender.sendFiles([explicitSource.path]);
+      final retired = await sender.retireClipboardTasks();
+
+      expect(retired, contains(clipboardId));
+      expect(retired, isNot(contains(explicitId)));
+      expect(
+        sender.tasks.singleWhere((task) => task.id == clipboardId).state,
+        ExplicitFileTransferState.cancelled,
+      );
+      expect(
+        sender.tasks.singleWhere((task) => task.id == explicitId).state,
+        ExplicitFileTransferState.offered,
+      );
+    },
+  );
+
   test('resumes from a .cdrpart after transport reconnects', () async {
     var dataDelay = const Duration(milliseconds: 2);
     _connect(sender, receiver, dataDelay: () => dataDelay);
