@@ -1,10 +1,11 @@
 import 'dart:async';
 
 import 'package:cross_desktop_remote/core/discovery/lan_discovery_service.dart';
+import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/platform/device_capabilities.dart';
-import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/devices/presentation/devices_page.dart';
+import 'package:cross_desktop_remote/features/remote/application/host_availability_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/sessions/presentation/sessions_page.dart';
 import 'package:cross_desktop_remote/features/sessions/application/session_history_controller.dart';
@@ -45,9 +46,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   int _selectedIndex = HomeSection.devices.index;
   late final DeviceCapabilities _capabilities;
   late final AppSettingsController _settings;
+  late final DeviceIdentityController _identity;
   late final SessionHistoryController _history;
-  late RemoteRole _role;
-  late RemoteSessionController _session;
+  late final RemoteSessionController _controllerSession;
+  RemoteSessionController? _hostSession;
+  HostAvailabilityController? _hostAvailability;
   late LanDiscoveryService _discovery;
   late List<Widget> _pages;
   bool _desktopRemoteFullScreen = false;
@@ -58,70 +61,84 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _capabilities = DeviceCapabilities.current();
     _settings = AppSettingsController();
+    _identity = DeviceIdentityController();
     _history = SessionHistoryController(settings: _settings);
-    _role = _capabilities.defaultToHost
-        ? RemoteRole.host
-        : RemoteRole.controller;
     _createWorkspace();
     _settings.addListener(_handleSettingsChanged);
     unawaited(_loadPersistentState());
   }
 
   Future<void> _loadPersistentState() async {
+    final identity = await _identity.loadOrCreate();
+    _controllerSession.setLocalDeviceId(identity.deviceId);
+    _hostSession?.setLocalDeviceId(identity.deviceId);
     await _settings.load();
     await _history.load();
+    final availability = _hostAvailability;
+    if (availability != null) {
+      await availability.setIncomingAccessEnabled(
+        _settings.incomingAccessEnabled,
+      );
+      await availability.initialize();
+    }
   }
 
   void _createWorkspace() {
-    _session = RemoteSessionController(
-      role: _role,
+    _controllerSession = RemoteSessionController(
+      role: RemoteRole.controller,
+      localDeviceId: _identity.deviceId,
       initialQuality: _settings.defaultQuality,
       initialClipboardMode: _settings.clipboardSyncMode,
     );
-    _history.attach(_session);
+    if (_capabilities.canHost) {
+      _hostSession = RemoteSessionController(
+        role: RemoteRole.host,
+        localDeviceId: _identity.deviceId,
+        initialQuality: _settings.defaultQuality,
+        initialClipboardMode: _settings.clipboardSyncMode,
+      );
+      _hostAvailability = HostAvailabilityController(
+        session: _hostSession!,
+        serverUrl: () => _settings.signalingServerUrl,
+      );
+    }
+    _history.attachAll([_controllerSession, ?_hostSession]);
     _discovery = createLanDiscoveryService();
     _pages = <Widget>[
       DevicesPage(
-        session: _session,
+        controllerSession: _controllerSession,
+        hostAvailability: _hostAvailability,
         discoveryService: _discovery,
-        capabilities: _capabilities,
-        onRoleChanged: _changeRole,
+        identity: _identity,
         settings: _settings,
         onDesktopFullScreenChanged: _handleDesktopFullScreenChanged,
       ),
       SessionsPage(
-        session: _session,
+        sessions: [_controllerSession, ?_hostSession],
         history: _history,
         onOpenDevices: () => _select(HomeSection.devices.index),
       ),
-      SettingsPage(settings: _settings, session: _session),
+      SettingsPage(
+        settings: _settings,
+        session: _controllerSession,
+        hostSession: _hostSession,
+      ),
     ];
   }
 
-  void _changeRole(RemoteRole nextRole) {
-    if (nextRole == _role ||
-        (nextRole == RemoteRole.host && !_capabilities.canHost) ||
-        (nextRole == RemoteRole.controller && !_capabilities.canControl)) {
-      return;
-    }
-    final previousSession = _session;
-    final previousDiscovery = _discovery;
-    setState(() {
-      _role = nextRole;
-      _selectedIndex = HomeSection.devices.index;
-      _createWorkspace();
-    });
-    previousSession.dispose();
-    unawaited(previousDiscovery.dispose());
-    AppMessenger.show(
-      nextRole == RemoteRole.host ? '已切换为共享本机' : '已切换为控制其他设备',
-      level: AppMessageLevel.success,
-    );
-  }
-
   void _handleSettingsChanged() {
-    _session.setIdleQuality(_settings.defaultQuality);
-    _session.setClipboardMode(_settings.clipboardSyncMode);
+    _controllerSession.setIdleQuality(_settings.defaultQuality);
+    _controllerSession.setClipboardMode(_settings.clipboardSyncMode);
+    _hostSession?.setIdleQuality(_settings.defaultQuality);
+    _hostSession?.setClipboardMode(_settings.clipboardSyncMode);
+    final availability = _hostAvailability;
+    if (availability != null) {
+      unawaited(
+        availability.setIncomingAccessEnabled(_settings.incomingAccessEnabled),
+      );
+      availability.reconcileServerConfiguration();
+      unawaited(availability.ensureOnline());
+    }
   }
 
   void _handleDesktopFullScreenChanged(bool enabled) {
@@ -132,7 +149,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      unawaited(_session.refreshHostPermissions());
+      final hostSession = _hostSession;
+      if (hostSession != null) {
+        unawaited(hostSession.refreshHostPermissions());
+      }
+      final availability = _hostAvailability;
+      if (availability != null) {
+        unawaited(availability.ensureOnline());
+      }
     }
   }
 
@@ -218,8 +242,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_discovery.dispose());
     _history.dispose();
-    _session.dispose();
+    _hostAvailability?.dispose();
+    _hostSession?.dispose();
+    _controllerSession.dispose();
     _settings.removeListener(_handleSettingsChanged);
+    _identity.dispose();
     _settings.dispose();
     super.dispose();
   }

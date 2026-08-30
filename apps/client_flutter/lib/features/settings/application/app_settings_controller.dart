@@ -21,6 +21,7 @@ class AppSettingsController extends ChangeNotifier {
   static const _historyEnabledKey = 'settings.session_history_enabled';
   static const _historyLimitKey = 'settings.session_history_limit';
   static const _advancedNetworkKey = 'settings.show_advanced_network';
+  static const _incomingAccessKey = 'settings.incoming_access_enabled';
 
   SharedPreferencesAsync? _preferences;
 
@@ -48,6 +49,7 @@ class AppSettingsController extends ChangeNotifier {
   bool sessionHistoryEnabled = true;
   int sessionHistoryLimit = 50;
   bool showAdvancedNetwork = false;
+  bool incomingAccessEnabled = true;
   bool loaded = false;
 
   RemoteInputSettings get inputSettings => RemoteInputSettings(
@@ -99,6 +101,7 @@ class AppSettingsController extends ChangeNotifier {
       100,
     );
     showAdvancedNetwork = await store.getBool(_advancedNetworkKey) ?? false;
+    incomingAccessEnabled = await store.getBool(_incomingAccessKey) ?? true;
     loaded = true;
     notifyListeners();
   }
@@ -190,6 +193,13 @@ class AppSettingsController extends ChangeNotifier {
     showAdvancedNetwork = value;
     notifyListeners();
     await _persist((store) => store.setBool(_advancedNetworkKey, value));
+  }
+
+  Future<void> setIncomingAccessEnabled(bool value) async {
+    if (incomingAccessEnabled == value) return;
+    incomingAccessEnabled = value;
+    notifyListeners();
+    await _persist((store) => store.setBool(_incomingAccessKey, value));
   }
 
   Future<void> _persist(

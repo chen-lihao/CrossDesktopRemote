@@ -10,12 +10,12 @@ import 'package:flutter/services.dart';
 class SessionsPage extends StatefulWidget {
   const SessionsPage({
     super.key,
-    required this.session,
+    required this.sessions,
     required this.history,
     required this.onOpenDevices,
   });
 
-  final RemoteSessionController session;
+  final List<RemoteSessionController> sessions;
   final SessionHistoryController history;
   final VoidCallback onOpenDevices;
 
@@ -43,13 +43,9 @@ class _SessionsPageState extends State<SessionsPage> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([widget.session, widget.history]),
+      animation: Listenable.merge([...widget.sessions, widget.history]),
       builder: (context, _) {
-        final active = !{
-          RemoteSessionState.idle,
-          RemoteSessionState.disconnected,
-          RemoteSessionState.failed,
-        }.contains(widget.session.state);
+        final session = _activeSession;
         return ListView(
           padding: const EdgeInsets.all(24),
           children: [
@@ -66,8 +62,8 @@ class _SessionsPageState extends State<SessionsPage> {
                     const SizedBox(height: 6),
                     const Text('查看当前连接质量和最近的本机会话元数据。'),
                     const SizedBox(height: 24),
-                    if (active) _buildActiveSession(context),
-                    if (active) const SizedBox(height: 24),
+                    if (session != null) _buildActiveSession(context, session),
+                    if (session != null) const SizedBox(height: 24),
                     Row(
                       children: [
                         Expanded(
@@ -114,9 +110,27 @@ class _SessionsPageState extends State<SessionsPage> {
     );
   }
 
-  Widget _buildActiveSession(BuildContext context) {
-    final session = widget.session;
-    final startedAt = widget.history.currentStartedAt;
+  RemoteSessionController? get _activeSession {
+    for (final session in widget.sessions) {
+      if (session.state == RemoteSessionState.streaming) return session;
+    }
+    for (final session in widget.sessions) {
+      if ({
+        RemoteSessionState.connecting,
+        RemoteSessionState.awaitingApproval,
+        RemoteSessionState.reconnecting,
+      }.contains(session.state)) {
+        return session;
+      }
+    }
+    return null;
+  }
+
+  Widget _buildActiveSession(
+    BuildContext context,
+    RemoteSessionController session,
+  ) {
+    final startedAt = widget.history.currentStartedAtFor(session);
     final duration = startedAt == null
         ? null
         : DateTime.now().difference(startedAt);
@@ -194,7 +208,7 @@ class _SessionsPageState extends State<SessionsPage> {
               runSpacing: 8,
               children: [
                 TextButton.icon(
-                  onPressed: _copyDiagnostics,
+                  onPressed: () => _copyDiagnostics(session),
                   icon: const Icon(Icons.copy_all_outlined),
                   label: const Text('复制诊断'),
                 ),
@@ -216,8 +230,7 @@ class _SessionsPageState extends State<SessionsPage> {
     );
   }
 
-  Future<void> _copyDiagnostics() async {
-    final session = widget.session;
+  Future<void> _copyDiagnostics(RemoteSessionController session) async {
     final media = session.mediaDiagnostics;
     final text = [
       '状态: ${session.statusMessage}',

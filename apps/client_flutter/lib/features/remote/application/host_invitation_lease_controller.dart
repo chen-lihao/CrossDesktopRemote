@@ -13,7 +13,7 @@ class HostInvitationLeaseController extends ChangeNotifier {
     this.safetyMargin = const Duration(seconds: 2),
   }) : _now = now ?? DateTime.now;
 
-  final HostInvitationRotation onRotationDue;
+  HostInvitationRotation onRotationDue;
   final DateTime Function() _now;
   final Duration safetyMargin;
 
@@ -51,13 +51,22 @@ class HostInvitationLeaseController extends ChangeNotifier {
     final delay = expiresAt.difference(_now()) - safetyMargin;
     _rotationTimer = Timer(
       delay.isNegative ? Duration.zero : delay,
-      () => unawaited(rotateNow()),
+      () => unawaited(_rotateWhenDue()),
     );
     _countdownTimer = Timer.periodic(
       const Duration(seconds: 1),
       (_) => notifyListeners(),
     );
     notifyListeners();
+  }
+
+  Future<void> _rotateWhenDue() async {
+    try {
+      await rotateNow();
+    } catch (_) {
+      // The owner reports the failure and may replace an expired lease by
+      // reconnecting. A timer callback must not leak an unhandled Future.
+    }
   }
 
   Future<void> rotateNow() async {

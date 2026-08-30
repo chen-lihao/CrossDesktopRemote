@@ -16,6 +16,7 @@ void main() {
       serverUrl: 'ws://192.168.1.8:8080/ws/signaling',
       roomCode: '123456',
       role: RemoteRole.controller,
+      deviceId: '0123456789abcdef0123456789abcdef',
       clientPlatform: 'Windows',
       clientCapabilities: const ['active-content-geometry-v2'],
     );
@@ -24,6 +25,10 @@ void main() {
     expect(endpoint.queryParameters['room'], '123456');
     expect(endpoint.queryParameters['role'], 'controller');
     expect(endpoint.queryParameters['protocol'], '2');
+    expect(
+      endpoint.queryParameters['deviceId'],
+      '0123456789abcdef0123456789abcdef',
+    );
     expect(endpoint.queryParameters['platform'], 'windows');
     expect(
       endpoint.queryParameters['capabilities'],

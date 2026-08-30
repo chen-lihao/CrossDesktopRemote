@@ -55,4 +55,23 @@ void main() {
     expect(rotations, 1);
     expect(controller.rotationPending, isFalse);
   });
+
+  test('contains scheduled rotation failures for owner recovery', () async {
+    var rotations = 0;
+    final controller = HostInvitationLeaseController(
+      onRotationDue: () async {
+        rotations += 1;
+        throw StateError('stale lease');
+      },
+      safetyMargin: Duration.zero,
+    );
+    addTearDown(controller.dispose);
+
+    controller.arm(DateTime.now().add(const Duration(milliseconds: 20)));
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+
+    expect(rotations, 1);
+    expect(controller.rotationPending, isFalse);
+    expect(controller.expiresAt, isNull);
+  });
 }

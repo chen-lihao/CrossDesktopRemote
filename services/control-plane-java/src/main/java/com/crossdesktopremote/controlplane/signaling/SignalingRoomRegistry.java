@@ -72,9 +72,13 @@ final class SignalingRoomRegistry {
 	}
 
 	HostInvitation createHostInvitation(WebSocketSession session) {
+		return createHostInvitation(session, 1);
+	}
+
+	private HostInvitation createHostInvitation(WebSocketSession session, long generation) {
 		for (var attempt = 0; attempt < 100; attempt++) {
 			var roomCode = String.format("%06d", secureRandom.nextInt(900_000) + 100_000);
-			var room = Room.withHost(session, currentTimeMillis.getAsLong());
+			var room = Room.withHost(session, currentTimeMillis.getAsLong(), generation);
 			if (rooms.putIfAbsent(roomCode, room) == null) {
 				return invitation(roomCode, room);
 			}
@@ -84,13 +88,18 @@ final class SignalingRoomRegistry {
 
 	synchronized Optional<HostInvitation> rotateHostInvitation(
 			String roomCode,
+			String expectedLeaseId,
+			long expectedGeneration,
 			WebSocketSession session) {
 		var current = rooms.get(roomCode);
-		if (current == null || !current.invalidateForRotation(session)) {
+		if (current == null || !current.invalidateForRotation(
+				session,
+				expectedLeaseId,
+				expectedGeneration)) {
 			return Optional.empty();
 		}
 		rooms.remove(roomCode, current);
-		return Optional.of(createHostInvitation(session));
+		return Optional.of(createHostInvitation(session, current.generation() + 1));
 	}
 
 	private HostInvitation invitation(String roomCode, Room room) {
@@ -98,6 +107,7 @@ final class SignalingRoomRegistry {
 		return new HostInvitation(
 				roomCode,
 				room.leaseId(),
+				room.generation(),
 				expiresAt,
 				Math.max(0, expiresAt - currentTimeMillis.getAsLong()));
 	}
@@ -162,7 +172,7 @@ final class SignalingRoomRegistry {
 					|| existing.isExpired(now, roomTtlMillis)
 					|| !existing.hasOpenHost()) {
 				result.set(JoinResult.JOINED);
-				return Room.withHost(session, now);
+				return Room.withHost(session, now, 1);
 			}
 			return existing;
 		});
@@ -240,6 +250,7 @@ final class SignalingRoomRegistry {
 	record HostInvitation(
 			String roomCode,
 			String leaseId,
+			long generation,
 			long expiresAtUnixMillis,
 			long expiresInMillis) {
 	}
@@ -257,16 +268,18 @@ final class SignalingRoomRegistry {
 		private final Map<SignalingRole, WebSocketSession> participants = new EnumMap<>(SignalingRole.class);
 		private final long createdAtMillis;
 		private final String leaseId = UUID.randomUUID().toString();
+		private final long generation;
 		private boolean controllerCodeConsumed;
 		private boolean invitationInvalidated;
 
-		private Room(WebSocketSession host, long createdAtMillis) {
+		private Room(WebSocketSession host, long createdAtMillis, long generation) {
 			this.createdAtMillis = createdAtMillis;
+			this.generation = generation;
 			participants.put(SignalingRole.HOST, host);
 		}
 
-		static Room withHost(WebSocketSession host, long createdAtMillis) {
-			return new Room(host, createdAtMillis);
+		static Room withHost(WebSocketSession host, long createdAtMillis, long generation) {
+			return new Room(host, createdAtMillis, generation);
 		}
 
 		synchronized JoinResult joinController(WebSocketSession session) {
@@ -317,8 +330,18 @@ final class SignalingRoomRegistry {
 			return leaseId;
 		}
 
-		synchronized boolean invalidateForRotation(WebSocketSession host) {
-			if (participants.get(SignalingRole.HOST) != host || controllerCodeConsumed) {
+		synchronized long generation() {
+			return generation;
+		}
+
+		synchronized boolean invalidateForRotation(
+				WebSocketSession host,
+				String expectedLeaseId,
+				long expectedGeneration) {
+			if (participants.get(SignalingRole.HOST) != host
+					|| controllerCodeConsumed
+					|| !leaseId.equals(expectedLeaseId)
+					|| (expectedGeneration >= 0 && generation != expectedGeneration)) {
 				return false;
 			}
 			invitationInvalidated = true;

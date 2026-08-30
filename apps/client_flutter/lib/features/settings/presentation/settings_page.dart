@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
-import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
@@ -14,15 +13,23 @@ class SettingsPage extends StatelessWidget {
     super.key,
     required this.settings,
     required this.session,
+    this.hostSession,
   });
 
   final AppSettingsController settings;
   final RemoteSessionController session;
+  final RemoteSessionController? hostSession;
+
+  RemoteSessionController get _dataSession =>
+      hostSession?.state == RemoteSessionState.streaming &&
+          session.state != RemoteSessionState.streaming
+      ? hostSession!
+      : session;
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([settings, session]),
+      animation: Listenable.merge([settings, session, ?hostSession]),
       builder: (context, _) => ListView(
         padding: const EdgeInsets.all(24),
         children: [
@@ -154,7 +161,7 @@ class SettingsPage extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  if (session.clipboardSupported) ...[
+                  if (_dataSession.clipboardSupported) ...[
                     _SettingsSection(
                       title: '数据交换',
                       icon: Icons.content_paste_go_outlined,
@@ -202,15 +209,16 @@ class SettingsPage extends StatelessWidget {
                           ),
                         ListTile(
                           leading: Icon(
-                            session.clipboardStatus == ClipboardSyncStatus.error
+                            _dataSession.clipboardStatus ==
+                                    ClipboardSyncStatus.error
                                 ? Icons.error_outline
-                                : session.clipboardStatus ==
+                                : _dataSession.clipboardStatus ==
                                       ClipboardSyncStatus.ready
                                 ? Icons.check_circle_outline
                                 : Icons.sync_outlined,
                           ),
                           title: const Text('剪贴板状态'),
-                          subtitle: Text(session.clipboardStatusMessage),
+                          subtitle: Text(_dataSession.clipboardStatusMessage),
                         ),
                         ListTile(
                           leading: Icon(Icons.shield_outlined),
@@ -263,6 +271,17 @@ class SettingsPage extends StatelessWidget {
                     title: '安全与权限',
                     icon: Icons.security_outlined,
                     children: [
+                      if (hostSession != null)
+                        SwitchListTile(
+                          title: const Text('允许接收远程连接'),
+                          subtitle: const Text(
+                            '默认开启；应用连接信令服务后自动生成一次性连接码，不会提前采集屏幕',
+                          ),
+                          value: settings.incomingAccessEnabled,
+                          onChanged: (value) => unawaited(
+                            settings.setIncomingAccessEnabled(value),
+                          ),
+                        ),
                       SwitchListTile(
                         title: const Text('保存会话元数据'),
                         subtitle: const Text('不保存屏幕、剪贴板和键盘输入内容'),
@@ -292,27 +311,27 @@ class SettingsPage extends StatelessWidget {
                           ],
                         ),
                       ),
-                      if (session.role == RemoteRole.host)
+                      if (hostSession != null)
                         ListTile(
                           leading: Icon(
-                            session.accessibilityGranted == true
+                            hostSession!.accessibilityGranted == true
                                 ? Icons.check_circle_outline
                                 : Icons.warning_amber_outlined,
                           ),
                           title: const Text('远程输入权限'),
                           subtitle: Text(
-                            session.accessibilityGranted == true
+                            hostSession!.accessibilityGranted == true
                                 ? '辅助功能权限已就绪'
                                 : '尚未允许鼠标和键盘控制',
                           ),
                           trailing: TextButton(
-                            onPressed: session.accessibilityGranted == true
-                                ? () => session.refreshHostPermissions(
+                            onPressed: hostSession!.accessibilityGranted == true
+                                ? () => hostSession!.refreshHostPermissions(
                                     announce: true,
                                   )
-                                : session.requestHostInputPermission,
+                                : hostSession!.requestHostInputPermission,
                             child: Text(
-                              session.accessibilityGranted == true
+                              hostSession!.accessibilityGranted == true
                                   ? '重新检查'
                                   : '前往设置',
                             ),

@@ -63,8 +63,8 @@ class SessionHistoryController extends ChangeNotifier {
   final AppSettingsController settings;
   SharedPreferencesAsync? _preferences;
   final List<SessionRecord> _records = [];
-  RemoteSessionController? _session;
-  DateTime? _currentStartedAt;
+  final Map<RemoteSessionController, VoidCallback> _sessionListeners = {};
+  final Map<RemoteSessionController, DateTime> _startedAt = {};
 
   SharedPreferencesAsync? get _store {
     if (_preferences != null) return _preferences;
@@ -76,7 +76,10 @@ class SessionHistoryController extends ChangeNotifier {
   }
 
   List<SessionRecord> get records => List.unmodifiable(_records);
-  DateTime? get currentStartedAt => _currentStartedAt;
+  DateTime? get currentStartedAt => _startedAt.values.firstOrNull;
+
+  DateTime? currentStartedAtFor(RemoteSessionController session) =>
+      _startedAt[session];
 
   Future<void> load() async {
     final values = await _store?.getStringList(_recordsKey) ?? const [];
@@ -98,12 +101,21 @@ class SessionHistoryController extends ChangeNotifier {
   }
 
   void attach(RemoteSessionController session) {
-    if (identical(_session, session)) return;
-    _session?.removeListener(_handleSessionChanged);
-    _session = session;
-    _currentStartedAt = null;
-    session.addListener(_handleSessionChanged);
-    _handleSessionChanged();
+    attachAll([session]);
+  }
+
+  void attachAll(Iterable<RemoteSessionController> sessions) {
+    for (final entry in _sessionListeners.entries) {
+      entry.key.removeListener(entry.value);
+    }
+    _sessionListeners.clear();
+    _startedAt.clear();
+    for (final session in sessions) {
+      void listener() => _handleSessionChanged(session);
+      _sessionListeners[session] = listener;
+      session.addListener(listener);
+      _handleSessionChanged(session);
+    }
   }
 
   Future<void> clear() async {
@@ -112,26 +124,23 @@ class SessionHistoryController extends ChangeNotifier {
     await _store?.remove(_recordsKey);
   }
 
-  void _handleSessionChanged() {
-    final session = _session;
-    if (session == null) return;
+  void _handleSessionChanged(RemoteSessionController session) {
     if (session.state == RemoteSessionState.streaming) {
-      if (_currentStartedAt == null) {
-        _currentStartedAt = DateTime.now();
+      if (!_startedAt.containsKey(session)) {
+        _startedAt[session] = DateTime.now();
         notifyListeners();
       }
       return;
     }
-    if (_currentStartedAt == null ||
+    if (!_startedAt.containsKey(session) ||
         !{
           RemoteSessionState.disconnected,
           RemoteSessionState.failed,
         }.contains(session.state)) {
       return;
     }
-    final startedAt = _currentStartedAt!;
+    final startedAt = _startedAt.remove(session)!;
     final endedAt = DateTime.now();
-    _currentStartedAt = null;
     if (settings.sessionHistoryEnabled) {
       _records.insert(
         0,
@@ -178,7 +187,10 @@ class SessionHistoryController extends ChangeNotifier {
 
   @override
   void dispose() {
-    _session?.removeListener(_handleSessionChanged);
+    for (final entry in _sessionListeners.entries) {
+      entry.key.removeListener(entry.value);
+    }
+    _sessionListeners.clear();
     settings.removeListener(_handleSettingsChanged);
     super.dispose();
   }

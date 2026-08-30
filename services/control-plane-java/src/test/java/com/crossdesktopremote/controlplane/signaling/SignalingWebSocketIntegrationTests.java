@@ -36,7 +36,9 @@ class SignalingWebSocketIntegrationTests {
 		assertThat(ready).contains("\"invitation-rotation\"");
 		var initialCode = roomCode(ready);
 
-		host.sendText("{\"type\":\"rotate-invitation\",\"requestId\":\"test-1\"}", true).join();
+		var leaseId = jsonString(ready, "invitationLeaseId");
+		host.sendText("{\"type\":\"rotate-invitation\",\"requestId\":\"test-1\","
+				+ "\"leaseId\":\"" + leaseId + "\",\"generation\":1}", true).join();
 		var rotated = hostMessages.next();
 		assertThat(rotated).contains("\"type\":\"invitation-rotated\"");
 		assertThat(rotated).contains("\"requestId\":\"test-1\"");
@@ -78,6 +80,7 @@ class SignalingWebSocketIntegrationTests {
 				.buildAsync(URI.create("ws://127.0.0.1:" + port
 						+ "/ws/signaling?room=" + room
 						+ "&role=controller&platform=windows"
+						+ "&deviceId=0123456789abcdef0123456789abcdef"
 						+ "&capabilities=active-content-geometry-v2"
 						+ "&capability=active-content-geometry-v2"
 						+ "&capability=text-clipboard-v1"), controllerMessages)
@@ -85,6 +88,7 @@ class SignalingWebSocketIntegrationTests {
 
 		assertThat(controllerMessages.next()).contains("\"type\":\"ready\"");
 		assertThat(hostMessages.next())
+				.contains("\"peerDeviceId\":\"0123456789abcdef0123456789abcdef\"")
 				.contains("\"peerPlatform\":\"windows\"")
 				.contains("active-content-geometry-v2")
 				.contains("text-clipboard-v1");
@@ -163,6 +167,12 @@ class SignalingWebSocketIntegrationTests {
 		var marker = "\"room\":\"";
 		var start = message.indexOf(marker);
 		return message.substring(start + marker.length(), start + marker.length() + 6);
+	}
+
+	private String jsonString(String message, String name) {
+		var marker = "\"" + name + "\":\"";
+		var start = message.indexOf(marker) + marker.length();
+		return message.substring(start, message.indexOf('"', start));
 	}
 
 	private static final class RecordingListener implements WebSocket.Listener {

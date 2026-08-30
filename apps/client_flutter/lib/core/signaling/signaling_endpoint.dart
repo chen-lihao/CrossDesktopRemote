@@ -13,6 +13,7 @@ Uri buildSignalingUri({
   required String serverUrl,
   required String roomCode,
   required RemoteRole role,
+  String deviceId = '',
   String clientPlatform = '',
   Iterable<String> clientCapabilities = const [],
 }) {
@@ -39,6 +40,7 @@ Uri buildSignalingUri({
       if (roomCode.isNotEmpty) 'room': roomCode,
       'role': role.name,
       'protocol': '2',
+      if (deviceId.trim().isNotEmpty) 'deviceId': deviceId.trim().toLowerCase(),
       if (clientPlatform.trim().isNotEmpty)
         'platform': clientPlatform.trim().toLowerCase(),
       // Keep the first capability for servers that only understand the legacy

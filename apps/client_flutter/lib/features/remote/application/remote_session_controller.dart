@@ -41,6 +41,8 @@ enum RemoteSessionState {
   failed,
 }
 
+enum HostInvitationState { unavailable, active, consumed, expired, rotating }
+
 ClipboardSyncMode _platformClipboardMode(
   ClipboardSyncMode requested,
   RemoteRole role,
@@ -123,6 +125,7 @@ class RemoteSessionController extends ChangeNotifier {
 
   RemoteSessionController({
     required this.role,
+    String localDeviceId = '',
     SignalingClient? signalingClient,
     HostPlatformAdapter? hostPlatformAdapter,
     ClipboardPlatformAdapter? clipboardPlatformAdapter,
@@ -130,7 +133,8 @@ class RemoteSessionController extends ChangeNotifier {
     Stream<DesktopWindowLifecycleEvent>? hostWindowLifecycleEvents,
     RemoteQualityProfile initialQuality = RemoteQualityProfile.automatic,
     ClipboardSyncMode initialClipboardMode = ClipboardSyncMode.bidirectional,
-  }) : _signaling = signalingClient ?? SignalingClient(),
+  }) : _localDeviceId = localDeviceId.trim().toLowerCase(),
+       _signaling = signalingClient ?? SignalingClient(),
        _hostPlatform = hostPlatformAdapter ?? createHostPlatformAdapter(),
        _clipboardPlatform =
            clipboardPlatformAdapter ?? createClipboardPlatformAdapter(),
@@ -151,6 +155,7 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   final RemoteRole role;
+  String _localDeviceId;
   final SignalingClient _signaling;
   final HostPlatformAdapter _hostPlatform;
   final ClipboardPlatformAdapter _clipboardPlatform;
@@ -250,6 +255,8 @@ class RemoteSessionController extends ChangeNotifier {
   DateTime? _hostInvitationExpiresAt;
   String? _hostInvitationCode;
   String? _hostInvitationLeaseId;
+  int _hostInvitationGeneration = 0;
+  HostInvitationState _hostInvitationState = HostInvitationState.unavailable;
   bool _supportsInvitationRotation = false;
   bool _remoteSupportsActiveContentGeometry = false;
   int _remoteActiveContentGeometryVersion = 0;
@@ -306,6 +313,8 @@ class RemoteSessionController extends ChangeNotifier {
   String? get controlError => _controlError;
   DateTime? get hostInvitationExpiresAt => _hostInvitationExpiresAt;
   String? get hostInvitationCode => _hostInvitationCode;
+  int get hostInvitationGeneration => _hostInvitationGeneration;
+  HostInvitationState get hostInvitationState => _hostInvitationState;
   bool get supportsInvitationRotation => _supportsInvitationRotation;
   bool get screenCaptureGranted => _screenCaptureGranted;
   bool? get accessibilityGranted => _accessibilityGranted;
@@ -415,6 +424,7 @@ class RemoteSessionController extends ChangeNotifier {
   String? get selectedDisplayId => _selectedDisplayId;
   String? get renderedDisplayId => _renderedDisplayId;
   String? get remoteDeviceId => _remoteDeviceId;
+  String get localDeviceId => _localDeviceId;
   String? get remoteHostPlatform => _remoteHostPlatform;
   bool get remoteSupportsPhysicalKeyboard => _remoteSupportsPhysicalKeyboard;
   RemoteColorDiagnostics? get colorDiagnostics => _colorDiagnostics;
@@ -470,6 +480,19 @@ class RemoteSessionController extends ChangeNotifier {
     } catch (error) {
       _fail('视频渲染器初始化失败：$error');
     }
+  }
+
+  void setLocalDeviceId(String value) {
+    final normalized = value.trim().toLowerCase();
+    if (normalized.isEmpty || normalized == _localDeviceId) return;
+    if (!{
+      RemoteSessionState.idle,
+      RemoteSessionState.disconnected,
+      RemoteSessionState.failed,
+    }.contains(state)) {
+      throw StateError('远程会话活动期间不能更换设备身份');
+    }
+    _localDeviceId = normalized;
   }
 
   void _handleRendererColorDiagnostics(Map<String, dynamic> diagnostics) {
@@ -642,6 +665,7 @@ class RemoteSessionController extends ChangeNotifier {
   Future<void> connect({
     required String serverUrl,
     required String roomCode,
+    bool announceLifecycle = true,
   }) async {
     if (!_rendererReady) {
       await initialize();
@@ -656,12 +680,14 @@ class RemoteSessionController extends ChangeNotifier {
     _hostInvitationExpiresAt = null;
     _hostInvitationCode = null;
     _hostInvitationLeaseId = null;
+    _hostInvitationGeneration = 0;
+    _hostInvitationState = HostInvitationState.unavailable;
     _supportsInvitationRotation = false;
     if (role == RemoteRole.controller) {
       _controlError = null;
     }
     _inputConfirmed = false;
-    _emitNotice('正在连接远程设备');
+    if (announceLifecycle) _emitNotice('正在连接远程设备');
 
     try {
       final clientCapabilities = buildRemoteClientCapabilities(
@@ -675,6 +701,7 @@ class RemoteSessionController extends ChangeNotifier {
         serverUrl: serverUrl,
         roomCode: roomCode,
         role: role,
+        deviceId: _localDeviceId,
         clientPlatform: Platform.operatingSystem,
         clientCapabilities: clientCapabilities,
       );
@@ -686,14 +713,14 @@ class RemoteSessionController extends ChangeNotifier {
           try {
             await _handleSignalingMessage(message);
           } catch (error) {
-            _fail('信令处理失败：$error');
+            _fail('信令处理失败：$error', announce: announceLifecycle);
           }
         },
         onDone: _handleSignalingClosed,
       );
     } catch (error) {
       await _closeSession(notifyPeer: false);
-      _fail('连接失败：$error');
+      _fail('连接失败：$error', announce: announceLifecycle);
     }
   }
 
@@ -716,14 +743,23 @@ class RemoteSessionController extends ChangeNotifier {
     if (_invitationRotationCompleter != null) return;
     final completer = Completer<void>();
     _invitationRotationCompleter = completer;
+    _hostInvitationState = HostInvitationState.rotating;
+    notifyListeners();
     final requestId = DateTime.now().microsecondsSinceEpoch.toString();
     _signaling.send({
       'type': 'rotate-invitation',
       'requestId': requestId,
       if (_hostInvitationLeaseId != null) 'leaseId': _hostInvitationLeaseId,
+      'generation': _hostInvitationGeneration,
     });
     try {
       await completer.future.timeout(const Duration(seconds: 8));
+    } on TimeoutException {
+      _hostInvitationState = _hostInvitationCode == null
+          ? HostInvitationState.unavailable
+          : HostInvitationState.expired;
+      notifyListeners();
+      rethrow;
     } finally {
       if (identical(_invitationRotationCompleter, completer)) {
         _invitationRotationCompleter = null;
@@ -741,7 +777,7 @@ class RemoteSessionController extends ChangeNotifier {
 
   Future<void> disconnect() async {
     await _closeSession(notifyPeer: true);
-    final message = role == RemoteRole.host ? '已停止共享本机' : '远程会话已断开';
+    final message = role == RemoteRole.host ? '已停止接收远程连接' : '远程会话已断开';
     _setState(RemoteSessionState.disconnected, message);
     _emitNotice(message);
   }
@@ -2606,7 +2642,7 @@ class RemoteSessionController extends ChangeNotifier {
     _sendControl({
       'type': 'host-status',
       'version': 2,
-      'deviceId': Platform.localHostname.toLowerCase(),
+      'deviceId': _localDeviceId,
       'hostPlatform': _hostPlatform.type.name,
       'supportsUnicodeText': true,
       'supportsPhysicalKeyboard':
@@ -3006,6 +3042,9 @@ class RemoteSessionController extends ChangeNotifier {
         if (role == RemoteRole.host) {
           _hostInvitationCode = message['room'] as String?;
           _hostInvitationLeaseId = message['invitationLeaseId'] as String?;
+          _hostInvitationGeneration =
+              (message['invitationGeneration'] as num?)?.toInt() ?? 1;
+          _hostInvitationState = HostInvitationState.active;
           final capabilities =
               (message['capabilities'] as List<dynamic>? ?? const [])
                   .whereType<String>()
@@ -3027,6 +3066,10 @@ class RemoteSessionController extends ChangeNotifier {
       case 'invitation-rotated':
         _hostInvitationCode = message['room'] as String?;
         _hostInvitationLeaseId = message['invitationLeaseId'] as String?;
+        _hostInvitationGeneration =
+            (message['invitationGeneration'] as num?)?.toInt() ??
+            (_hostInvitationGeneration + 1);
+        _hostInvitationState = HostInvitationState.active;
         final rawRemaining = message['invitationExpiresInMillis'];
         final rawExpiry = message['invitationExpiresAtUnixMillis'];
         _hostInvitationExpiresAt = rawRemaining is num
@@ -3041,12 +3084,23 @@ class RemoteSessionController extends ChangeNotifier {
         notifyListeners();
         _emitNotice('连接码已刷新', level: RemoteNoticeLevel.success);
       case 'invitation-rotation-error':
+        _hostInvitationState = _hostInvitationCode == null
+            ? HostInvitationState.unavailable
+            : HostInvitationState.active;
         final error = StateError('连接码当前无法刷新');
         _invitationRotationCompleter?.completeError(error);
         _invitationRotationCompleter = null;
         _emitNotice(error.message, level: RemoteNoticeLevel.error);
-      case 'peer-joined':
+      case 'invitation-consumed':
         _hostInvitationExpiresAt = null;
+        _hostInvitationState = HostInvitationState.consumed;
+        notifyListeners();
+      case 'peer-joined':
+        _remoteDeviceId = message['peerDeviceId'] as String?;
+        _hostInvitationExpiresAt = null;
+        if (role == RemoteRole.host) {
+          _hostInvitationState = HostInvitationState.consumed;
+        }
         final peerCapabilities =
             (message['peerCapabilities'] as List<dynamic>? ?? const [])
                 .whereType<String>()
@@ -4220,6 +4274,8 @@ class RemoteSessionController extends ChangeNotifier {
     _hostInvitationExpiresAt = null;
     _hostInvitationCode = null;
     _hostInvitationLeaseId = null;
+    _hostInvitationGeneration = 0;
+    _hostInvitationState = HostInvitationState.unavailable;
     _supportsInvitationRotation = false;
     _decoderOutputColorDiagnostics = null;
     _renderOutputColorDiagnostics = null;
@@ -4287,10 +4343,10 @@ class RemoteSessionController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _fail(String message) {
+  void _fail(String message, {bool announce = true}) {
     _error = message;
     _setState(RemoteSessionState.failed, message);
-    _emitNotice(message, level: RemoteNoticeLevel.error);
+    if (announce) _emitNotice(message, level: RemoteNoticeLevel.error);
   }
 
   void _emitNotice(

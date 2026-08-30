@@ -24,8 +24,10 @@ class SignalingRoomRegistryTests {
 		assertThat(initial.roomCode()).matches("[0-9]{6}");
 		assertThat(initial.expiresInMillis()).isEqualTo(Duration.ofMinutes(5).toMillis());
 
-		var rotated = registry.rotateHostInvitation(initial.roomCode(), host).orElseThrow();
+		var rotated = registry.rotateHostInvitation(
+				initial.roomCode(), initial.leaseId(), initial.generation(), host).orElseThrow();
 		assertThat(rotated.roomCode()).isNotEqualTo(initial.roomCode());
+		assertThat(rotated.generation()).isEqualTo(2);
 		assertThat(registry.join(initial.roomCode(), SignalingRole.CONTROLLER, controller))
 				.isEqualTo(SignalingRoomRegistry.JoinResult.INVALID_ROOM);
 		assertThat(registry.join(rotated.roomCode(), SignalingRole.CONTROLLER, controller))
@@ -41,8 +43,36 @@ class SignalingRoomRegistryTests {
 
 		assertThat(registry.join(invitation.roomCode(), SignalingRole.CONTROLLER, controller))
 				.isEqualTo(SignalingRoomRegistry.JoinResult.JOINED);
-		assertThat(registry.rotateHostInvitation(invitation.roomCode(), host)).isEmpty();
+		assertThat(registry.rotateHostInvitation(
+				invitation.roomCode(), invitation.leaseId(), invitation.generation(), host)).isEmpty();
 		assertThat(registry.peer(invitation.roomCode(), SignalingRole.HOST)).contains(controller);
+	}
+
+	@Test
+	void rejectsAStaleInvitationLeaseRotation() {
+		var registry = new SignalingRoomRegistry();
+		var host = openSession("host", "192.168.1.10");
+		var invitation = registry.createHostInvitation(host);
+
+		assertThat(registry.rotateHostInvitation(
+				invitation.roomCode(), "stale-lease", invitation.generation(), host)).isEmpty();
+		assertThat(registry.rotateHostInvitation(
+				invitation.roomCode(), invitation.leaseId(), invitation.generation() + 1, host)).isEmpty();
+		assertThat(registry.invitationRemainingMillis(
+				invitation.roomCode(), SignalingRole.HOST, host)).isPresent();
+	}
+
+	@Test
+	void acceptsLeaseBoundRotationFromClientsWithoutAGenerationField() {
+		var registry = new SignalingRoomRegistry();
+		var host = openSession("host", "192.168.1.10");
+		var invitation = registry.createHostInvitation(host);
+
+		var rotated = registry.rotateHostInvitation(
+				invitation.roomCode(), invitation.leaseId(), -1, host).orElseThrow();
+
+		assertThat(rotated.generation()).isEqualTo(invitation.generation() + 1);
+		assertThat(rotated.roomCode()).isNotEqualTo(invitation.roomCode());
 	}
 
 	@Test

@@ -80,29 +80,28 @@ void main() {
     }
   });
 
-  testWidgets(
-    'host requests a server-owned connection code when sharing starts',
-    (tester) async {
-      await tester.binding.setSurfaceSize(const Size(1200, 800));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      await tester.pumpWidget(const MainApp());
-      final codeFinder = find.byKey(const ValueKey('hostRoomCodeText'));
-      if (codeFinder.evaluate().isEmpty) return;
+  testWidgets('host credential is available without switching the page role', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const MainApp());
+    final codeFinder = find.byKey(const ValueKey('hostRoomCodeText'));
+    if (codeFinder.evaluate().isEmpty) return;
 
-      final fieldFinder = find.byKey(const ValueKey('hostRoomCodeField'));
-      expect(fieldFinder, findsOneWidget);
-      final field = tester.widget<InputDecorator>(fieldFinder);
-      expect(field.decoration.labelText, '六位连接码');
-      expect(field.decoration.prefixIcon, isA<Icon>());
-      expect(field.decoration.suffixIcon, isA<IconButton>());
+    final fieldFinder = find.byKey(const ValueKey('hostRoomCodeField'));
+    expect(fieldFinder, findsOneWidget);
+    final field = tester.widget<InputDecorator>(fieldFinder);
+    expect(field.decoration.labelText, '六位连接码');
+    expect(field.decoration.prefixIcon, isA<Icon>());
+    expect(field.decoration.suffixIcon, isA<IconButton>());
 
-      final code = tester.widget<SelectableText>(codeFinder).data;
-      expect(code, isEmpty);
-      final copy = tester.widget<IconButton>(
-        find.byKey(const ValueKey('copyRoomCodeButton')),
-      );
-      expect(copy.onPressed, isNull);
-      expect(find.text('生成连接码'), findsOneWidget);
-    },
-  );
+    final code = tester.widget<SelectableText>(codeFinder).data;
+    expect(code, isEmpty);
+    final copy = tester.widget<IconButton>(
+      find.byKey(const ValueKey('copyRoomCodeButton')),
+    );
+    expect(copy.onPressed, isNull);
+    expect(find.text('生成连接码'), findsOneWidget);
+  });
 }

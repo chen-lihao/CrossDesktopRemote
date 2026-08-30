@@ -34,6 +34,7 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 	private static final String ROOM_ATTRIBUTE = "crossdesktop.room";
 	private static final String ROLE_ATTRIBUTE = "crossdesktop.role";
 	private static final String PLATFORM_ATTRIBUTE = "crossdesktop.platform";
+	private static final String DEVICE_ID_ATTRIBUTE = "crossdesktop.device-id";
 	private static final String CAPABILITIES_ATTRIBUTE = "crossdesktop.capabilities";
 
 	private final SignalingRoomRegistry rooms;
@@ -56,6 +57,7 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		var roomCode = query.getFirst("room");
 		var role = SignalingRole.parse(query.getFirst("role"));
 		var platform = normalizedPlatform(query.getFirst("platform"));
+		var deviceId = normalizedDeviceId(query.getFirst("deviceId"), session.getId());
 		var capabilityValues = new ArrayList<String>();
 		var repeatedCapabilities = query.get("capability");
 		if (repeatedCapabilities != null) capabilityValues.addAll(repeatedCapabilities);
@@ -84,6 +86,7 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		session.getAttributes().put(ROOM_ATTRIBUTE, roomCode);
 		session.getAttributes().put(ROLE_ATTRIBUTE, role.get());
 		session.getAttributes().put(PLATFORM_ATTRIBUTE, platform);
+		session.getAttributes().put(DEVICE_ID_ATTRIBUTE, deviceId);
 		session.getAttributes().put(CAPABILITIES_ATTRIBUTE, clientCapabilities);
 		var ready = new HashMap<String, Object>();
 		ready.put("type", "ready");
@@ -93,6 +96,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		ready.put("role", role.get().wireName());
 		if (invitation != null) {
 			ready.put("invitationLeaseId", invitation.leaseId());
+			ready.put("invitationGeneration", invitation.generation());
+			ready.put("invitationState", "active");
 			ready.put("invitationExpiresAtUnixMillis", invitation.expiresAtUnixMillis());
 			ready.put("invitationExpiresInMillis", invitation.expiresInMillis());
 		} else {
@@ -133,7 +138,13 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 				session.close(CloseStatus.POLICY_VIOLATION.withReason("Host role required"));
 				return;
 			}
-			var rotated = rooms.rotateHostInvitation(roomCode, session);
+			var expectedLeaseId = payload.path("leaseId").asText();
+			var expectedGeneration = payload.path("generation").asLong(-1);
+			var rotated = rooms.rotateHostInvitation(
+					roomCode,
+					expectedLeaseId,
+					expectedGeneration,
+					session);
 			if (rotated.isEmpty()) {
 				sendJson(session, Map.of(
 						"type", "invitation-rotation-error",
@@ -146,6 +157,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			response.put("type", "invitation-rotated");
 			response.put("room", invitation.roomCode());
 			response.put("invitationLeaseId", invitation.leaseId());
+			response.put("invitationGeneration", invitation.generation());
+			response.put("invitationState", "active");
 			response.put("invitationExpiresAtUnixMillis", invitation.expiresAtUnixMillis());
 			response.put("invitationExpiresInMillis", invitation.expiresInMillis());
 			var requestId = payload.path("requestId").asText();
@@ -216,6 +229,7 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		payload.put("type", "peer-joined");
 		payload.put("role", role.wireName());
 		payload.put("peerPlatform", peer.getAttributes().getOrDefault(PLATFORM_ATTRIBUTE, "unknown"));
+		payload.put("peerDeviceId", peer.getAttributes().getOrDefault(DEVICE_ID_ATTRIBUTE, "legacy-" + peer.getId()));
 		payload.put("peerCapabilities", peer.getAttributes().getOrDefault(CAPABILITIES_ATTRIBUTE, Set.of()));
 		return payload;
 	}
@@ -224,6 +238,12 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		if (!StringUtils.hasText(value)) return "unknown";
 		var normalized = value.trim().toLowerCase();
 		return normalized.matches("[a-z0-9_-]{1,32}") ? normalized : "unknown";
+	}
+
+	private String normalizedDeviceId(String value, String sessionId) {
+		if (!StringUtils.hasText(value)) return "legacy-" + sessionId;
+		var normalized = value.trim().toLowerCase();
+		return normalized.matches("[a-z0-9_-]{8,64}") ? normalized : "legacy-" + sessionId;
 	}
 
 	private Set<String> normalizedCapabilities(List<String> values) {

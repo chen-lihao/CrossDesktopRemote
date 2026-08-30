@@ -2,13 +2,12 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:cross_desktop_remote/core/discovery/lan_discovery_service.dart';
+import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/network/lan_address_service.dart';
-import 'package:cross_desktop_remote/core/platform/device_capabilities.dart';
 import 'package:cross_desktop_remote/core/platform/desktop_window_mode.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
-import 'package:cross_desktop_remote/features/remote/application/host_sharing_lifecycle.dart';
-import 'package:cross_desktop_remote/features/remote/application/host_invitation_lease_controller.dart';
+import 'package:cross_desktop_remote/features/remote/application/host_availability_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/explicit_file_transfer_center.dart';
@@ -20,20 +19,20 @@ import 'package:flutter/services.dart';
 class DevicesPage extends StatefulWidget {
   const DevicesPage({
     super.key,
-    required this.session,
+    required this.controllerSession,
+    required this.hostAvailability,
     required this.discoveryService,
-    required this.capabilities,
-    required this.onRoleChanged,
+    required this.identity,
     required this.settings,
     this.addressService = const LanAddressService(),
     this.windowModeController = const PlatformDesktopWindowModeController(),
     this.onDesktopFullScreenChanged,
   });
 
-  final RemoteSessionController session;
+  final RemoteSessionController controllerSession;
+  final HostAvailabilityController? hostAvailability;
   final LanDiscoveryService discoveryService;
-  final DeviceCapabilities capabilities;
-  final ValueChanged<RemoteRole> onRoleChanged;
+  final DeviceIdentityController identity;
   final AppSettingsController settings;
   final LanAddressService addressService;
   final DesktopWindowModeController windowModeController;
@@ -44,17 +43,25 @@ class DevicesPage extends StatefulWidget {
 }
 
 class _DevicesPageState extends State<DevicesPage> {
-  RemoteRole get _role => widget.session.role;
-  RemoteSessionController get _session => widget.session;
+  RemoteSessionController get _controllerSession => widget.controllerSession;
+  HostAvailabilityController? get _hostAvailability => widget.hostAvailability;
+  RemoteSessionController? get _hostSession => _hostAvailability?.session;
+  bool get _controllerSessionIsActive => !{
+    RemoteSessionState.idle,
+    RemoteSessionState.disconnected,
+    RemoteSessionState.failed,
+  }.contains(_controllerSession.state);
 
   late final TextEditingController _serverController = TextEditingController(
     text: widget.settings.signalingServerUrl,
   );
-  late final TextEditingController _roomController = TextEditingController(
+  late final TextEditingController _controllerCodeController =
+      TextEditingController(text: '');
+  late final TextEditingController _hostCodeController = TextEditingController(
     text: '',
   );
   StreamSubscription<List<DiscoveredDevice>>? _discoverySubscription;
-  StreamSubscription<RemoteNotice>? _noticeSubscription;
+  final List<StreamSubscription<RemoteNotice>> _noticeSubscriptions = [];
   List<LanAddress>? _localAddresses;
   List<DiscoveredDevice> _discoveredDevices = const [];
   LanDiscoveryDiagnostics? _lanDiscoveryDiagnostics;
@@ -68,32 +75,30 @@ class _DevicesPageState extends State<DevicesPage> {
   String? _serverTestStatus;
   bool _desktopFullScreen = false;
   bool _windowModeChanging = false;
-  bool _hostPresenceStarting = false;
-  bool _hostPresenceInitialized = false;
   final GlobalKey _remoteDesktopPanelKey = GlobalKey(
     debugLabel: 'persistent-remote-desktop-panel',
   );
-  final HostSharingLifecycle _hostSharing = HostSharingLifecycle();
-  late final HostInvitationLeaseController _invitationLease;
-  late RemoteSessionState _lastSessionState = _session.state;
 
   @override
   void initState() {
     super.initState();
-    _invitationLease = HostInvitationLeaseController(
-      onRotationDue: _rotateHostInvitation,
-    )..addListener(_handleInvitationLeaseChanged);
-    _session.addListener(_handleSessionChanged);
+    _controllerSession.addListener(_handleControllerSessionChanged);
+    _hostAvailability?.addListener(_handleHostAvailabilityChanged);
     widget.settings.addListener(_handleSettingsChanged);
-    _noticeSubscription = _session.notices.listen(_showRemoteNotice);
-    unawaited(_initializeSessionAndPresence());
+    _noticeSubscriptions.add(
+      _controllerSession.notices.listen(_showRemoteNotice),
+    );
+    final host = _hostSession;
+    if (host != null) {
+      _noticeSubscriptions.add(host.notices.listen(_showRemoteNotice));
+    }
     _discoverySubscription = widget.discoveryService.devices.listen(
       (devices) {
         if (mounted) {
           setState(() {
             _discoveredDevices = visibleLanDevices(
               devices: devices,
-              localDeviceId: Platform.localHostname,
+              localDeviceId: widget.identity.deviceId,
             );
             _discoveryError = null;
           });
@@ -109,42 +114,11 @@ class _DevicesPageState extends State<DevicesPage> {
     if (widget.settings.lanDiscoveryEnabled) {
       unawaited(_startBrowsing());
     }
-  }
-
-  Future<void> _initializeSessionAndPresence() async {
-    await _session.initialize();
-    if (!mounted ||
-        !widget.settings.loaded ||
-        _role != RemoteRole.host ||
-        _hostPresenceInitialized) {
-      return;
-    }
-    _hostPresenceInitialized = true;
-    await _findLocalAddresses();
-    if (!mounted) return;
-    await _ensureHostPresence();
-  }
-
-  Future<void> _ensureHostPresence() async {
-    if (!mounted ||
-        _role != RemoteRole.host ||
-        _hostPresenceStarting ||
-        _sessionIsActive) {
-      return;
-    }
-    _hostPresenceStarting = true;
-    _hostSharing.start();
-    setState(() {});
-    try {
-      await _connect(userInitiated: false);
-    } finally {
-      _hostPresenceStarting = false;
-      if (mounted) setState(() {});
-    }
+    unawaited(_findLocalAddresses());
   }
 
   void _handleSettingsChanged() {
-    if (!_sessionIsActive &&
+    if (!_controllerSessionIsActive &&
         _serverController.text != widget.settings.signalingServerUrl) {
       _serverController.value = TextEditingValue(
         text: widget.settings.signalingServerUrl,
@@ -161,9 +135,6 @@ class _DevicesPageState extends State<DevicesPage> {
       if (_isPublishing) {
         unawaited(_stopPublishing());
       }
-    }
-    if (widget.settings.loaded && !_hostPresenceInitialized) {
-      unawaited(_initializeSessionAndPresence());
     }
   }
 
@@ -345,9 +316,11 @@ class _DevicesPageState extends State<DevicesPage> {
       RemoteNoticeLevel.warning => AppMessageLevel.warning,
       RemoteNoticeLevel.error => AppMessageLevel.error,
     };
+    final transferSession = [_controllerSession, ?_hostSession]
+        .where((session) => session.pendingIncomingFileTransferCount > 0)
+        .firstOrNull;
     final incomingFileTransfer =
-        notice.message == '收到文件传输请求' &&
-        _session.pendingIncomingFileTransferCount > 0;
+        notice.message == '收到文件传输请求' && transferSession != null;
     AppMessenger.show(
       notice.message,
       level: level,
@@ -355,124 +328,76 @@ class _DevicesPageState extends State<DevicesPage> {
       onAction: incomingFileTransfer
           ? () {
               if (!mounted) return;
-              showExplicitFileTransferCenter(context, _session);
+              showExplicitFileTransferCenter(context, transferSession);
             }
           : null,
     );
   }
 
-  Future<void> _connect({bool userInitiated = true}) async {
+  Future<void> _connectController() async {
     FocusManager.instance.primaryFocus?.unfocus();
-    if (_role == RemoteRole.host && userInitiated) {
-      _hostSharing.start();
-      if (mounted) setState(() {});
-    }
-    await _session.connect(
+    await _controllerSession.connect(
       serverUrl: _serverController.text,
-      roomCode: _roomController.text,
+      roomCode: _controllerCodeController.text,
     );
   }
 
-  Future<void> _disconnect() async {
-    if (_role == RemoteRole.host) {
-      _hostSharing.stop();
-      if (mounted) setState(() {});
-    }
-    await _session.disconnect();
+  Future<void> _disconnectController() => _controllerSession.disconnect();
+
+  Future<void> _disconnectIncomingSession() async {
+    await _hostSession?.disconnect();
   }
 
-  void _handleSessionChanged() {
-    final previousState = _lastSessionState;
-    _lastSessionState = _session.state;
-    if (_desktopFullScreen && !_session.hasRemoteVideo) {
+  void _handleControllerSessionChanged() {
+    if (_desktopFullScreen && !_controllerSession.hasRemoteVideo) {
       unawaited(_setDesktopFullScreen(false, announce: false));
     }
-    if (_role != RemoteRole.host) {
-      _invitationLease.cancel();
-      if ({
-        RemoteSessionState.disconnected,
-        RemoteSessionState.failed,
-      }.contains(_session.state)) {
-        _roomController.clear();
-      }
-      return;
-    }
-
-    final invitationCode = _session.hostInvitationCode;
-    if (invitationCode != null && invitationCode != _roomController.text) {
-      _roomController.text = invitationCode;
-    }
-
-    final shouldRestart = _hostSharing.observeTransition(
-      previous: previousState,
-      next: _session.state,
-    );
     if ({
       RemoteSessionState.disconnected,
       RemoteSessionState.failed,
-    }.contains(_session.state)) {
-      _roomController.clear();
+    }.contains(_controllerSession.state)) {
+      _controllerCodeController.clear();
     }
-    if (shouldRestart) unawaited(_restartHostSharing());
-    _reconcileInvitationLease();
     if (mounted) setState(() {});
+  }
 
+  void _handleHostAvailabilityChanged() {
+    final code = _hostSession?.hostInvitationCode ?? '';
+    if (code != _hostCodeController.text) {
+      _hostCodeController.text = code;
+    }
     _reconcileHostPublication();
-  }
-
-  void _handleInvitationLeaseChanged() {
     if (mounted) setState(() {});
-  }
-
-  void _reconcileInvitationLease() {
-    final expiresAt = _session.hostInvitationExpiresAt;
-    if (_session.state == RemoteSessionState.waitingForPeer &&
-        expiresAt != null) {
-      _invitationLease.arm(expiresAt);
-    } else if (!_invitationLease.rotationPending) {
-      _invitationLease.cancel();
-    }
   }
 
   Future<void> _rotateHostInvitation() async {
-    if (!mounted ||
-        _role != RemoteRole.host ||
-        _session.state != RemoteSessionState.waitingForPeer) {
-      return;
-    }
+    final availability = _hostAvailability;
+    if (!mounted || availability == null || !availability.available) return;
     AppMessenger.show('正在向信令服务器申请新连接码', level: AppMessageLevel.info);
     try {
-      await _session.rotateHostInvitation();
-      final code = _session.hostInvitationCode;
-      if (code != null) _roomController.text = code;
+      await availability.invitationLease.rotateNow();
     } catch (error) {
       AppMessenger.show('刷新连接码失败：$error', level: AppMessageLevel.error);
     }
   }
 
   void _reconcileHostPublication() {
-    if (!mounted || _role != RemoteRole.host || _publicationBusy) return;
+    final availability = _hostAvailability;
+    if (!mounted || availability == null || _publicationBusy) return;
     final shouldPublish =
         widget.settings.lanDiscoveryEnabled &&
-        _hostSharing.sharingRequested &&
-        (_session.state == RemoteSessionState.waitingForPeer ||
+        availability.desiredOnline &&
+        (availability.session.state == RemoteSessionState.waitingForPeer ||
             (_isPublishing &&
                 {
                   RemoteSessionState.connecting,
                   RemoteSessionState.streaming,
-                }.contains(_session.state)));
+                }.contains(availability.session.state)));
     if (shouldPublish && !_isPublishing) {
       unawaited(_publishHost());
     } else if (!shouldPublish && _isPublishing) {
       unawaited(_stopPublishing());
     }
-  }
-
-  Future<void> _restartHostSharing() async {
-    AppMessenger.show('上一会话已结束，正在生成新连接码并恢复共享', level: AppMessageLevel.info);
-    await Future<void>.delayed(const Duration(milliseconds: 300));
-    if (!mounted || !_hostSharing.sharingRequested) return;
-    await _connect(userInitiated: false);
   }
 
   Future<void> _publishHost() async {
@@ -499,7 +424,7 @@ class _DevicesPageState extends State<DevicesPage> {
       }
       await widget.discoveryService.publishHost(
         HostAdvertisement(
-          deviceId: Platform.localHostname.toLowerCase(),
+          deviceId: widget.identity.deviceId,
           name: Platform.localHostname,
           port: endpoint.hasPort
               ? endpoint.port
@@ -557,15 +482,16 @@ class _DevicesPageState extends State<DevicesPage> {
         widget.windowModeController.supportsNativeFullScreen) {
       unawaited(_restoreWindowModeForDispose());
     }
-    _session.removeListener(_handleSessionChanged);
+    _controllerSession.removeListener(_handleControllerSessionChanged);
+    _hostAvailability?.removeListener(_handleHostAvailabilityChanged);
     widget.settings.removeListener(_handleSettingsChanged);
-    _invitationLease
-      ..removeListener(_handleInvitationLeaseChanged)
-      ..dispose();
     unawaited(_discoverySubscription?.cancel());
-    unawaited(_noticeSubscription?.cancel());
+    for (final subscription in _noticeSubscriptions) {
+      unawaited(subscription.cancel());
+    }
     _serverController.dispose();
-    _roomController.dispose();
+    _controllerCodeController.dispose();
+    _hostCodeController.dispose();
     super.dispose();
   }
 
@@ -609,7 +535,7 @@ class _DevicesPageState extends State<DevicesPage> {
   RemoteDesktopPanel _buildRemoteDesktopPanel() {
     return RemoteDesktopPanel(
       key: _remoteDesktopPanelKey,
-      session: _session,
+      session: _controllerSession,
       initialInputSettings: widget.settings.inputSettings,
       desktopFullScreen: _desktopFullScreen,
       onDesktopFullScreenChanged: _setDesktopFullScreen,
@@ -623,11 +549,9 @@ class _DevicesPageState extends State<DevicesPage> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: _session,
+      animation: Listenable.merge([_controllerSession, ?_hostAvailability]),
       builder: (context, _) {
-        if (_desktopFullScreen &&
-            _role == RemoteRole.controller &&
-            _session.hasRemoteVideo) {
+        if (_desktopFullScreen && _controllerSession.hasRemoteVideo) {
           return ColoredBox(
             color: Colors.black,
             child: _buildRemoteDesktopPanel(),
@@ -644,39 +568,14 @@ class _DevicesPageState extends State<DevicesPage> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        if (widget.capabilities.supportsRoleSwitching) ...[
-                          SegmentedButton<RemoteRole>(
-                            segments: const [
-                              ButtonSegment(
-                                value: RemoteRole.controller,
-                                icon: Icon(Icons.desktop_windows_outlined),
-                                label: Text('控制其他设备'),
-                              ),
-                              ButtonSegment(
-                                value: RemoteRole.host,
-                                icon: Icon(Icons.screen_share_outlined),
-                                label: Text('共享本机'),
-                              ),
-                            ],
-                            selected: {_role},
-                            onSelectionChanged: _sessionIsActive
-                                ? null
-                                : (selection) =>
-                                      widget.onRoleChanged(selection.single),
-                          ),
-                          const SizedBox(height: 20),
-                        ],
                         Text(
-                          _role == RemoteRole.host ? '共享本机' : '控制其他设备',
+                          '设备',
                           style: Theme.of(context).textTheme.headlineMedium,
                         ),
                         const SizedBox(height: 8),
-                        Text(
-                          _role == RemoteRole.host
-                              ? '应用在线后自动生成五分钟有效的一次性连接码；验证成功后才开始采集和控制。'
-                              : '选择附近设备，或输入远程设备地址和六位连接码。',
-                          style: Theme.of(context).textTheme.bodyLarge,
-                        ),
+                        const Text('本机在线与控制其他设备相互独立；只有连接码验证成功后才开始屏幕采集。'),
+                        const SizedBox(height: 16),
+                        _DeviceIdentityCard(identity: widget.identity),
                       ],
                     ),
                   ),
@@ -691,42 +590,15 @@ class _DevicesPageState extends State<DevicesPage> {
                     constraints: const BoxConstraints(maxWidth: 1160),
                     child: Column(
                       children: [
-                        _ConnectionCard(
-                          role: _role,
-                          serverController: _serverController,
-                          roomController: _roomController,
-                          session: _session,
-                          localAddresses: _localAddresses,
-                          addressError: _addressError,
-                          discoveredDevices: _discoveredDevices,
-                          discoveryError: _discoveryError,
-                          discoveryEmptyHint: lanDiscoveryEmptyHint(
-                            platform: Platform.operatingSystem,
-                          ),
-                          discoveryDiagnostics: _lanDiscoveryDiagnostics,
-                          isBrowsing: _isBrowsing,
-                          isPublishing: _isPublishing,
-                          hostSharingRequested: _hostSharing.sharingRequested,
-                          hostRestarting: _hostSharing.rearming,
-                          invitationStatus: _hostInvitationStatusLabel,
-                          invitationRefreshing:
-                              _invitationLease.rotationPending,
-                          settings: widget.settings,
-                          onConnect: _connect,
-                          onDisconnect: _disconnect,
-                          onRefreshAddresses: _findLocalAddresses,
-                          onRefreshDiscovery: _refreshDiscovery,
-                          onRefreshRoomCode: _invitationLease.rotateNow,
-                          onSelectDevice: _selectDevice,
-                          onServerChanged: (value) => unawaited(
-                            widget.settings.setSignalingServerUrl(value),
-                          ),
-                          onTestServer: _testSignalingServer,
-                          serverTesting: _serverTesting,
-                          serverTestStatus: _serverTestStatus,
-                        ),
-                        if (_role == RemoteRole.controller &&
-                            _session.hasRemoteVideo) ...[
+                        if (_hostAvailability != null) ...[
+                          _buildHostConnectionCard(),
+                          const SizedBox(height: 16),
+                        ] else ...[
+                          const _UnsupportedHostCard(),
+                          const SizedBox(height: 16),
+                        ],
+                        _buildControllerConnectionCard(),
+                        if (_controllerSession.hasRemoteVideo) ...[
                           const SizedBox(height: 16),
                           _buildRemoteDesktopPanel(),
                         ],
@@ -742,22 +614,92 @@ class _DevicesPageState extends State<DevicesPage> {
     );
   }
 
-  bool get _sessionIsActive =>
-      !{
-        RemoteSessionState.idle,
-        RemoteSessionState.disconnected,
-        RemoteSessionState.failed,
-      }.contains(_session.state) ||
-      (_role == RemoteRole.host && _hostSharing.sharingRequested);
+  _ConnectionCard _buildHostConnectionCard() {
+    final availability = _hostAvailability!;
+    return _ConnectionCard(
+      role: RemoteRole.host,
+      serverController: _serverController,
+      roomController: _hostCodeController,
+      session: availability.session,
+      localAddresses: _localAddresses,
+      addressError: _addressError,
+      discoveredDevices: _discoveredDevices,
+      discoveryError: _discoveryError,
+      discoveryEmptyHint: lanDiscoveryEmptyHint(
+        platform: Platform.operatingSystem,
+      ),
+      discoveryDiagnostics: _lanDiscoveryDiagnostics,
+      isBrowsing: _isBrowsing,
+      isPublishing: _isPublishing,
+      hostSharingRequested: availability.desiredOnline,
+      hostRestarting: availability.starting || availability.reconnecting,
+      invitationStatus: availability.statusLabel,
+      invitationRefreshing: availability.invitationLease.rotationPending,
+      settings: widget.settings,
+      onConnect: availability.ensureOnline,
+      onDisconnect: _disconnectIncomingSession,
+      onRefreshAddresses: _findLocalAddresses,
+      onRefreshDiscovery: _refreshDiscovery,
+      onRefreshRoomCode: _rotateHostInvitation,
+      onSelectDevice: _selectDevice,
+      onServerChanged: _setServerUrl,
+      onTestServer: _testSignalingServer,
+      serverTesting: _serverTesting,
+      serverTestStatus: _serverTestStatus,
+    );
+  }
 
-  String get _hostInvitationStatusLabel {
-    if (_hostPresenceStarting) return '正在连接信令服务并生成连接码';
-    if (_hostSharing.rearming) return '正在恢复在线状态并生成新的单次连接码';
-    if (_session.hostInvitationCode != null &&
-        _session.state != RemoteSessionState.waitingForPeer) {
-      return '本次连接码已使用；当前会话断开后会自动生成新码';
-    }
-    return _invitationLease.statusLabel;
+  _ConnectionCard _buildControllerConnectionCard() {
+    return _ConnectionCard(
+      role: RemoteRole.controller,
+      serverController: _serverController,
+      roomController: _controllerCodeController,
+      session: _controllerSession,
+      localAddresses: _localAddresses,
+      addressError: _addressError,
+      discoveredDevices: _discoveredDevices,
+      discoveryError: _discoveryError,
+      discoveryEmptyHint: lanDiscoveryEmptyHint(
+        platform: Platform.operatingSystem,
+      ),
+      discoveryDiagnostics: _lanDiscoveryDiagnostics,
+      isBrowsing: _isBrowsing,
+      isPublishing: _isPublishing,
+      hostSharingRequested: false,
+      hostRestarting: false,
+      invitationStatus: '',
+      invitationRefreshing: false,
+      settings: widget.settings,
+      onConnect: _connectController,
+      onDisconnect: _disconnectController,
+      onRefreshAddresses: _findLocalAddresses,
+      onRefreshDiscovery: _refreshDiscovery,
+      onRefreshRoomCode: _rotateHostInvitation,
+      onSelectDevice: _selectDevice,
+      onServerChanged: _setServerUrl,
+      onTestServer: _testSignalingServer,
+      serverTesting: _serverTesting,
+      serverTestStatus: _serverTestStatus,
+    );
+  }
+
+  void _setServerUrl(String value) {
+    unawaited(widget.settings.setSignalingServerUrl(value));
+  }
+}
+
+class _UnsupportedHostCard extends StatelessWidget {
+  const _UnsupportedHostCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Card(
+      child: ListTile(
+        leading: Icon(Icons.info_outline),
+        title: Text('允许远程访问'),
+        subtitle: Text('当前平台暂不支持作为桌面被控端；机器码仍可用于设备识别和后续可信设备功能。'),
+      ),
+    );
   }
 }
 
@@ -865,6 +807,11 @@ class _ConnectionCard extends StatelessWidget {
   }
 
   Widget _buildHostContent(BuildContext context, {required bool twoColumns}) {
+    final canRegisterHost = {
+      RemoteSessionState.idle,
+      RemoteSessionState.disconnected,
+      RemoteSessionState.failed,
+    }.contains(session.state);
     final invitationConsumed =
         hostSharingRequested &&
         roomController.text.isNotEmpty &&
@@ -872,7 +819,7 @@ class _ConnectionCard extends StatelessWidget {
     final credentials = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('连接凭证', style: Theme.of(context).textTheme.titleLarge),
+        Text('允许远程访问', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 6),
         const Text('在线状态只连接信令服务，不采集屏幕；连接码验证成功后才建立远程会话。'),
         const SizedBox(height: 18),
@@ -887,7 +834,7 @@ class _ConnectionCard extends StatelessWidget {
                   ? null
                   : session.state == RemoteSessionState.waitingForPeer
                   ? onRefreshRoomCode
-                  : !_isActive
+                  : canRegisterHost
                   ? onConnect
                   : null,
               icon: invitationRefreshing
@@ -907,30 +854,25 @@ class _ConnectionCard extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 16),
-        TextField(
-          key: const ValueKey('signalingServerField'),
-          controller: serverController,
-          enabled: !_isActive,
-          onChanged: onServerChanged,
-          autocorrect: false,
-          keyboardType: TextInputType.url,
-          decoration:
-              const InputDecoration(
-                labelText: '信令服务器地址',
-                hintText: 'ws://192.168.1.10:8080/ws/signaling',
-                prefixIcon: Icon(Icons.dns_outlined),
-              ).copyWith(
-                suffixIcon: IconButton(
-                  tooltip: '测试信令服务器',
-                  onPressed: serverTesting ? null : onTestServer,
-                  icon: serverTesting
-                      ? const SizedBox.square(
-                          dimension: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.network_ping),
-                ),
-              ),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.dns_outlined),
+          title: const Text('信令服务器'),
+          subtitle: SelectableText(
+            serverController.text.trim().isEmpty
+                ? '尚未配置'
+                : serverController.text.trim(),
+          ),
+          trailing: IconButton(
+            tooltip: '测试信令服务器',
+            onPressed: serverTesting ? null : onTestServer,
+            icon: serverTesting
+                ? const SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.network_ping),
+          ),
         ),
         const SizedBox(height: 6),
         const Text('控制端和被控端必须使用同一个信令服务器；127.0.0.1 仅表示当前设备。'),
@@ -994,7 +936,7 @@ class _ConnectionCard extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('连接设备', style: Theme.of(context).textTheme.titleLarge),
+        Text('控制其他设备', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 6),
         const Text('附近设备发现用于找到被控端；信令服务可以在 Mac、Windows 或独立公网服务器上。'),
         const SizedBox(height: 18),
@@ -1106,6 +1048,13 @@ class _ConnectionCard extends StatelessWidget {
         ],
       );
     }
+    final hostHasPeer =
+        role == RemoteRole.host &&
+        {
+          RemoteSessionState.connecting,
+          RemoteSessionState.streaming,
+          RemoteSessionState.reconnecting,
+        }.contains(session.state);
     return Wrap(
       alignment: WrapAlignment.end,
       spacing: 10,
@@ -1125,25 +1074,23 @@ class _ConnectionCard extends StatelessWidget {
               session.accessibilityGranted == true ? '输入权限已就绪' : '设置输入权限',
             ),
           ),
-        if (_isActive)
+        if (role == RemoteRole.host && hostHasPeer)
           FilledButton.tonalIcon(
             onPressed: onDisconnect,
-            icon: Icon(
-              role == RemoteRole.host
-                  ? Icons.stop_circle_outlined
-                  : Icons.link_off,
-            ),
-            label: Text(role == RemoteRole.host ? '下线并停止接受连接' : '断开'),
+            icon: const Icon(Icons.link_off),
+            label: const Text('断开当前会话'),
           )
-        else
+        else if (role == RemoteRole.controller && _isActive)
+          FilledButton.tonalIcon(
+            onPressed: onDisconnect,
+            icon: const Icon(Icons.link_off),
+            label: const Text('断开'),
+          )
+        else if (role == RemoteRole.controller)
           FilledButton.icon(
             onPressed: onConnect,
-            icon: Icon(
-              role == RemoteRole.host
-                  ? Icons.sensors
-                  : Icons.desktop_windows_outlined,
-            ),
-            label: Text(role == RemoteRole.host ? '重新上线' : '连接远程设备'),
+            icon: const Icon(Icons.desktop_windows_outlined),
+            label: const Text('连接远程设备'),
           ),
       ],
     );
@@ -1186,6 +1133,43 @@ class _HostRoomCodeDisplay extends StatelessWidget {
             fontWeight: FontWeight.w700,
             letterSpacing: 5,
             fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DeviceIdentityCard extends StatelessWidget {
+  const _DeviceIdentityCard({required this.identity});
+
+  final DeviceIdentityController identity;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: identity,
+      builder: (context, _) => Card(
+        margin: EdgeInsets.zero,
+        child: ListTile(
+          leading: const Icon(Icons.badge_outlined),
+          title: const Text('本机机器码'),
+          subtitle: SelectableText(
+            identity.loaded ? identity.machineCode : '正在创建设备身份',
+            key: const ValueKey('machineCodeText'),
+          ),
+          trailing: IconButton(
+            key: const ValueKey('copyMachineCodeButton'),
+            tooltip: '复制机器码',
+            onPressed: !identity.loaded
+                ? null
+                : () async {
+                    await Clipboard.setData(
+                      ClipboardData(text: identity.machineCode),
+                    );
+                    AppMessenger.show('机器码已复制', level: AppMessageLevel.success);
+                  },
+            icon: const Icon(Icons.copy_outlined),
           ),
         ),
       ),
