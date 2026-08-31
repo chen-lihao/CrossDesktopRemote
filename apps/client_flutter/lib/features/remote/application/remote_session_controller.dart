@@ -8,6 +8,7 @@ import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
 import 'package:cross_desktop_remote/core/files/explicit_file_transfer_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/host_platform_adapter_factory.dart';
+import 'package:cross_desktop_remote/core/input/remote_input_reset.dart';
 import 'package:cross_desktop_remote/core/input/remote_shortcut_policy.dart';
 import 'package:cross_desktop_remote/core/protocol/wire_value_parsers.dart';
 import 'package:cross_desktop_remote/core/input/remote_text_chunks.dart';
@@ -299,6 +300,7 @@ class RemoteSessionController extends ChangeNotifier {
   bool _remoteSupportsExplicitFileTransferV1 = false;
   bool _remoteSupportsFileClipboardV1 = false;
   bool _remoteSupportsAtomicShortcutV1 = false;
+  bool _remoteSupportsScopedInputResetV1 = false;
   bool _remoteClipboardSupportsApplied = false;
   bool _explicitFileTransferTransportAttached = false;
   Completer<void>? _invitationRotationCompleter;
@@ -834,6 +836,7 @@ class RemoteSessionController extends ChangeNotifier {
     double movementY = 0,
     double deltaX = 0,
     double deltaY = 0,
+    List<String> modifiers = const [],
   }) {
     // Input must follow the frame the controller has actually rendered. During
     // a display-switch transaction `_selectedDisplayId` may describe the UI
@@ -868,6 +871,7 @@ class RemoteSessionController extends ChangeNotifier {
       'movementY': movementY,
       'deltaX': deltaX,
       'deltaY': deltaY,
+      'modifiers': modifiers,
     };
     if (isMotion) {
       _sendMotion(message);
@@ -904,21 +908,35 @@ class RemoteSessionController extends ChangeNotifier {
     });
   }
 
-  /// Releases every bridge-owned key, modifier, and pointer button on the
-  /// remote host. Unlike ordinary input this remains available while a display
-  /// switch is pending, so focus loss cannot strand a modifier remotely.
-  void releaseRemoteInputState() {
+  /// Resets one input ownership domain on the host. Focus transitions use the
+  /// keyboard scope; pointer cancellation uses pointer; only session teardown
+  /// may use all. This remains available during a display switch.
+  void resetRemoteInput(RemoteInputResetScope scope, {required String reason}) {
     final channel = _controlChannel;
     if (role != RemoteRole.controller ||
         channel == null ||
         channel.state != RTCDataChannelState.RTCDataChannelOpen) {
       return;
     }
+    if (!_remoteSupportsScopedInputResetV1) {
+      // A legacy peer only understands a destructive full reset. Preserve it
+      // for true session teardown, but never turn focus loss into pointer-up.
+      if (scope != RemoteInputResetScope.all) return;
+      _sendControl({
+        'type': 'release-input',
+        'version': 2,
+        'sequence': ++_inputSequence,
+        'sentAtUnixMicros': DateTime.now().microsecondsSinceEpoch,
+      });
+      return;
+    }
     _sendControl({
-      'type': 'release-input',
+      'type': 'input-reset',
       'version': 2,
       'sequence': ++_inputSequence,
       'sentAtUnixMicros': DateTime.now().microsecondsSinceEpoch,
+      'scope': scope.wireValue,
+      'reason': reason,
     });
   }
 
@@ -2086,6 +2104,9 @@ class RemoteSessionController extends ChangeNotifier {
             movementY: (message['movementY'] as num?)?.toDouble() ?? 0,
             deltaX: (message['deltaX'] as num?)?.toDouble() ?? 0,
             deltaY: (message['deltaY'] as num?)?.toDouble() ?? 0,
+            modifiers: (message['modifiers'] as List<dynamic>? ?? const [])
+                .whereType<String>()
+                .toList(growable: false),
           ),
         );
         if ((message['phase'] != 'move' && message['phase'] != 'scroll') ||
@@ -2135,6 +2156,21 @@ class RemoteSessionController extends ChangeNotifier {
           return;
         }
         await _hostPlatform.releaseAllInput();
+        _acknowledgeInput(message);
+      case 'input-reset':
+        if (!_acceptInputSequence(message, motion: false)) {
+          return;
+        }
+        switch (parseRemoteInputResetScope(message['scope'])) {
+          case RemoteInputResetScope.keyboard:
+            await _hostPlatform.releaseKeyboardState();
+          case RemoteInputResetScope.pointer:
+            await _hostPlatform.releasePointerButtons();
+          case RemoteInputResetScope.all:
+            await _hostPlatform.releaseAllInput();
+          case null:
+            return;
+        }
         _acknowledgeInput(message);
       case 'select-display':
         await _switchHostDisplay(
@@ -3305,6 +3341,9 @@ class RemoteSessionController extends ChangeNotifier {
         _remoteSupportsAtomicShortcutV1 = peerCapabilities.contains(
           atomicShortcutV1Capability,
         );
+        _remoteSupportsScopedInputResetV1 = peerCapabilities.contains(
+          scopedInputResetV1Capability,
+        );
         if (role == RemoteRole.host) {
           _remoteActiveContentGeometryVersion = activeContentGeometryVersion(
             peerCapabilities,
@@ -4446,6 +4485,7 @@ class RemoteSessionController extends ChangeNotifier {
     _remoteSupportsExplicitFileTransferV1 = false;
     _remoteSupportsFileClipboardV1 = false;
     _remoteSupportsAtomicShortcutV1 = false;
+    _remoteSupportsScopedInputResetV1 = false;
     _remoteClipboardSupportsApplied = false;
     _remoteClipboardMode = null;
     _queuedClipboardOffer = null;

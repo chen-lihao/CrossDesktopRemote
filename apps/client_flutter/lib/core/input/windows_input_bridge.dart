@@ -60,6 +60,8 @@ abstract interface class WindowsInputBridgeApi {
 
   Future<void> releasePointerButtons();
 
+  Future<void> releaseKeyboardState();
+
   Future<void> releaseAllInput();
 }
 
@@ -119,6 +121,7 @@ class WindowsInputBridge implements WindowsInputBridgeApi {
       'movementY': event.movementY,
       'deltaX': event.deltaX,
       'deltaY': event.deltaY,
+      'modifiers': event.modifiers,
     });
   }
 
@@ -156,6 +159,11 @@ class WindowsInputBridge implements WindowsInputBridgeApi {
   @override
   Future<void> releasePointerButtons() {
     return _channel.invokeMethod<void>('releasePointerButtons');
+  }
+
+  @override
+  Future<void> releaseKeyboardState() {
+    return _channel.invokeMethod<void>('releaseKeyboardState');
   }
 
   @override

@@ -153,6 +153,11 @@ final class CrossDesktopRemoteSyntheticKeyboard {
   }
 
   @discardableResult
+  func setModifiers(_ names: [String], post: Poster) -> Bool {
+    reconcileModifiers(names, post: post)
+  }
+
+  @discardableResult
   func release(post: Poster) -> Bool {
     var succeeded = true
     for keyCode in pressedKeyCodes.sorted() {
@@ -346,6 +351,9 @@ class MainFlutterWindow: NSWindow {
       case "releasePointerButtons":
         self.releasePointerButtons()
         result(nil)
+      case "releaseKeyboardState":
+        self.releaseKeyboardState()
+        result(nil)
       case "releaseAllInput":
         self.releaseAllInput()
         result(nil)
@@ -422,6 +430,19 @@ class MainFlutterWindow: NSWindow {
       activeDisplayIds().contains(displayId)
     else {
       result(FlutterError(code: "invalid_pointer", message: "Invalid pointer event", details: nil))
+      return
+    }
+
+    let source = CGEventSource(stateID: .hidSystemState)
+    guard syntheticKeyboard.setModifiers(
+      values["modifiers"] as? [String] ?? [],
+      post: { self.postSyntheticKeyStroke($0, source: source) }
+    ) else {
+      result(FlutterError(
+        code: "input_injection_failed",
+        message: "Failed to reconcile pointer modifiers",
+        details: nil
+      ))
       return
     }
 
@@ -575,10 +596,8 @@ class MainFlutterWindow: NSWindow {
       return
     }
 
-    // Post a balanced native chord instead of attaching Command/Control flags
-    // only to V. macOS requires every synthetic modifier to be explicitly
-    // entered and released.
-    releasePointerButtons()
+    // A shortcut owns only keyboard state. Pointer buttons are an independent
+    // input domain and may be held for drag-selection while the chord runs.
     let source = CGEventSource(stateID: .hidSystemState)
     guard syntheticKeyboard.performShortcut(
       keyCode: keyCode,
@@ -618,6 +637,10 @@ class MainFlutterWindow: NSWindow {
 
   private func releaseAllInput() {
     releasePointerButtons()
+    releaseKeyboardState()
+  }
+
+  private func releaseKeyboardState() {
     let source = CGEventSource(stateID: .hidSystemState)
     syntheticKeyboard.release(
       post: { self.postSyntheticKeyStroke($0, source: source) }

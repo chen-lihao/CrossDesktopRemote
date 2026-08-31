@@ -84,6 +84,9 @@ class WindowsHostPlatformAdapter implements HostPlatformAdapter {
   Future<void> releasePointerButtons() => bridge.releasePointerButtons();
 
   @override
+  Future<void> releaseKeyboardState() => bridge.releaseKeyboardState();
+
+  @override
   Future<void> releaseAllInput() => bridge.releaseAllInput();
 
   @override

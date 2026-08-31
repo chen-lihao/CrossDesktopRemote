@@ -67,6 +67,7 @@ void main() {
         y: .75,
         displayId: '42',
         button: 'right',
+        modifiers: ['command', 'shift'],
       ),
     );
     await adapter.sendKey(
@@ -79,6 +80,7 @@ void main() {
     );
     await adapter.sendText('你好');
     await adapter.invokeShortcut(key: 'KeyV', modifiers: const ['command']);
+    await adapter.releaseKeyboardState();
     await adapter.releaseAllInput();
 
     expect(calls.map((call) => call.method), [
@@ -86,9 +88,11 @@ void main() {
       'keyboard',
       'keyboard',
       'invokeShortcut',
+      'releaseKeyboardState',
       'releaseAllInput',
     ]);
     expect((calls[0].arguments as Map)['displayId'], '42');
+    expect((calls[0].arguments as Map)['modifiers'], ['command', 'shift']);
     expect((calls[1].arguments as Map)['key'], 'KeyC');
     expect((calls[2].arguments as Map)['text'], '你好');
   });
@@ -206,12 +210,14 @@ void main() {
       );
       await adapter.sendText('中文');
       await adapter.invokeShortcut(key: 'KeyV', modifiers: const ['control']);
+      await adapter.releaseKeyboardState();
       await adapter.releaseAllInput();
 
       expect(bridge.pointerEvents.single.displayId, r'\\.\DISPLAY1');
       expect(bridge.keyEvents.single.physicalHidUsage, 0x70004);
       expect(bridge.textValues, ['中文']);
       expect(bridge.shortcuts.single.key, 'KeyV');
+      expect(bridge.keyboardReleaseCount, 1);
       expect(bridge.releaseCount, 1);
     },
   );
@@ -257,6 +263,7 @@ void main() {
         y: .5,
         displayId: r'\\.\DISPLAY1',
         deltaY: 20,
+        modifiers: ['control'],
       ),
     );
     await bridge.sendKey(
@@ -269,6 +276,7 @@ void main() {
     );
     await bridge.sendText('你好');
     await bridge.invokeShortcut(key: 'KeyV', modifiers: const ['control']);
+    await bridge.releaseKeyboardState();
     await bridge.releaseAllInput();
 
     expect(capabilities.isCompatible, isTrue);
@@ -280,10 +288,12 @@ void main() {
       'keyboard',
       'keyboard',
       'invokeShortcut',
+      'releaseKeyboardState',
       'releaseAllInput',
     ]);
     expect((calls[3].arguments as Map)['physicalHidUsage'], 0x70006);
     expect((calls[4].arguments as Map)['text'], '你好');
+    expect((calls[2].arguments as Map)['modifiers'], ['control']);
   });
 
   test('Windows adapter rejects an incompatible native bridge', () async {
@@ -306,6 +316,7 @@ class _FakeWindowsInputBridge implements WindowsInputBridgeApi {
   final shortcuts = <({String key, List<String> modifiers})>[];
   final textValues = <String>[];
   int releaseCount = 0;
+  int keyboardReleaseCount = 0;
 
   @override
   Future<void> invokeShortcut({
@@ -347,6 +358,11 @@ class _FakeWindowsInputBridge implements WindowsInputBridgeApi {
   @override
   Future<void> releasePointerButtons() async {
     releaseCount += 1;
+  }
+
+  @override
+  Future<void> releaseKeyboardState() async {
+    keyboardReleaseCount += 1;
   }
 
   @override

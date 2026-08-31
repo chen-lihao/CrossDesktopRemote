@@ -60,6 +60,49 @@ abstract final class RemoteShortcutPolicy {
   static String primaryLabel(String modifier) =>
       modifier == 'command' ? '⌘' : 'Ctrl';
 
+  /// Converts the controller's physical modifier state into semantic host
+  /// modifiers. The familiar primary key follows the destination platform,
+  /// while non-primary Control/Command remain available independently.
+  static List<String> remoteModifiers({
+    required RemoteControllerPlatform controllerPlatform,
+    required String? remoteHostPlatform,
+    required bool metaPressed,
+    required bool controlPressed,
+    required bool altPressed,
+    required bool shiftPressed,
+  }) {
+    final values = <String>{};
+    final primaryPressed = localPrimaryPressed(
+      platform: controllerPlatform,
+      metaPressed: metaPressed,
+      controlPressed: controlPressed,
+    );
+    if (primaryPressed) {
+      values.add(
+        remotePrimaryModifier(
+          remoteHostPlatform: remoteHostPlatform,
+          controllerPlatform: controllerPlatform,
+        ),
+      );
+    }
+    final localPrimaryIsMeta =
+        controllerPlatform == RemoteControllerPlatform.macOS ||
+        controllerPlatform == RemoteControllerPlatform.iOS;
+    if (controlPressed && !localPrimaryIsMeta) {
+      // Control is already represented by the semantic primary modifier.
+    } else if (controlPressed) {
+      values.add('control');
+    }
+    if (metaPressed && localPrimaryIsMeta) {
+      // Meta is already represented by the semantic primary modifier.
+    } else if (metaPressed) {
+      values.add('command');
+    }
+    if (altPressed) values.add('option');
+    if (shiftPressed) values.add('shift');
+    return values.toList(growable: false);
+  }
+
   static String commandLabel(String? remoteHostPlatform) =>
       remoteHostPlatform == HostPlatformType.windows.name ? 'Win' : '⌘';
 }

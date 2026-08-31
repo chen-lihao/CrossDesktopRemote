@@ -430,8 +430,17 @@ void WindowsHostBridge::HandleMethodCall(
     return;
   }
 
-  if (call.method_name() == "releasePointerButtons" ||
-      call.method_name() == "releaseAllInput") {
+  if (call.method_name() == "releasePointerButtons") {
+    ReleasePointerButtons();
+    result->Success();
+    return;
+  }
+  if (call.method_name() == "releaseKeyboardState") {
+    ReleaseKeyboardInput();
+    result->Success();
+    return;
+  }
+  if (call.method_name() == "releaseAllInput") {
     ReleaseAllInput();
     result->Success();
     return;
@@ -467,6 +476,11 @@ bool WindowsHostBridge::HandlePointer(const EncodableMap& arguments,
                                       std::string* error) {
   const std::string phase = StringValue(arguments, "phase", "move");
   std::vector<INPUT> inputs;
+
+  if (!SetSyntheticModifiers(
+          ModifierVirtualKeys(StringSetValue(arguments, "modifiers")), error)) {
+    return false;
+  }
 
   if (phase == "scroll") {
     const LONG vertical = static_cast<LONG>(
@@ -620,22 +634,22 @@ bool WindowsHostBridge::HandleKeyboard(const EncodableMap& arguments,
 bool WindowsHostBridge::HandleShortcut(const EncodableMap& arguments,
                                        std::string* error) {
   // Clipboard-backed paste can take minutes. Treat its eventual shortcut as
-  // one native transaction so a partially delivered down/up sequence cannot
-  // strand Control, a key, or a mouse button on the host.
-  ReleaseAllInput();
+  // one keyboard transaction. A simultaneous drag owns pointer state and must
+  // not be cancelled by shortcut cleanup.
+  ReleaseKeyboardInput();
   EncodableMap down = arguments;
   EncodableMap up = arguments;
   down[EncodableValue("phase")] = EncodableValue("down");
   up[EncodableValue("phase")] = EncodableValue("up");
   if (!HandleKeyboard(down, error)) {
-    ReleaseAllInput();
+    ReleaseKeyboardInput();
     return false;
   }
   if (!HandleKeyboard(up, error)) {
-    ReleaseAllInput();
+    ReleaseKeyboardInput();
     return false;
   }
-  ReleaseAllInput();
+  ReleaseKeyboardInput();
   return true;
 }
 
@@ -712,7 +726,7 @@ bool WindowsHostBridge::SendInputs(std::vector<INPUT>* inputs,
   return false;
 }
 
-void WindowsHostBridge::ReleaseAllInput() {
+void WindowsHostBridge::ReleaseKeyboardInput() {
   std::vector<INPUT> inputs;
   for (const auto& key : pressed_keys_) {
     inputs.push_back(ScanCodeInput(key.second.scan_code, key.second.extended,
@@ -725,12 +739,23 @@ void WindowsHostBridge::ReleaseAllInput() {
           ScanCodeInput(descriptor.scan_code, descriptor.extended, true));
     }
   }
+  std::string ignored;
+  SendInputs(&inputs, &ignored);
+  pressed_keys_.clear();
+  pressed_modifiers_.clear();
+}
+
+void WindowsHostBridge::ReleasePointerButtons() {
+  std::vector<INPUT> inputs;
   for (const auto& button : pressed_mouse_buttons_) {
     inputs.push_back(MouseInput(ButtonFlag(button, true)));
   }
   std::string ignored;
   SendInputs(&inputs, &ignored);
-  pressed_keys_.clear();
-  pressed_modifiers_.clear();
   pressed_mouse_buttons_.clear();
+}
+
+void WindowsHostBridge::ReleaseAllInput() {
+  ReleaseKeyboardInput();
+  ReleasePointerButtons();
 }

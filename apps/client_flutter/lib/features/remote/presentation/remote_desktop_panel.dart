@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/remote_ime_input_adapter.dart';
+import 'package:cross_desktop_remote/core/input/remote_input_reset.dart';
 import 'package:cross_desktop_remote/core/input/remote_shortcut_policy.dart';
 import 'package:cross_desktop_remote/core/platform/desktop_window_mode.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
@@ -1583,7 +1584,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       }
       if (oldWidget.inputSettings.textInputMode !=
           widget.inputSettings.textInputMode) {
-        _releaseDesktopKeys();
+        _releaseDesktopKeys(reason: 'text-input-mode-changed');
         _resetTextInput();
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) requestHardwareKeyboardFocus();
@@ -1615,7 +1616,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         _activeKeyboardMode = nextMode;
         _keyboardVisible = false;
       });
-      _releaseDesktopKeys();
+      _releaseDesktopKeys(reason: 'keyboard-mode-changed');
       _textFocus.unfocus();
       _hardwareFocus.requestFocus();
       AppMessenger.show('已使用被控端 Windows 输入法，可直接键入拼音');
@@ -1687,14 +1688,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     if (pending == _lastDisplaySwitchPending) return;
     _lastDisplaySwitchPending = pending;
     if (pending) {
-      _longPressTimer?.cancel();
-      _pointerFlushTimer?.cancel();
-      _pointerFlushTimer = null;
-      _pointerCoalescer.clear();
-      _gestures.cancelAll(releaseDragLock: true);
-      _ignoredPointers.clear();
-      _mouseButtons.clear();
-      _lastNormalizedPointer = null;
+      _releaseRemotePointerState(reason: 'display-switch');
       _desktopClickTracker.reset();
       final rendererSize = _currentRendererSourceSize();
       if (rendererSize != null) _committedVideoSourceSize = rendererSize;
@@ -1987,7 +1981,8 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (_usesDesktopKeyboard && state != AppLifecycleState.resumed) {
-      _releaseDesktopKeys();
+      _releaseDesktopKeys(reason: 'application-background');
+      _releaseRemotePointerState(reason: 'application-background');
     }
     if (_usesDesktopIme && state != AppLifecycleState.resumed) {
       _suspendDesktopDirectIme();
@@ -2012,16 +2007,39 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
 
   void _handleHardwareFocusChanged(bool focused) {
     if (_usesDesktopKeyboard && !focused) {
-      _releaseDesktopKeys();
+      _releaseDesktopKeys(reason: 'hardware-focus-lost');
     }
   }
 
-  void _releaseDesktopKeys() {
+  void _releaseDesktopKeys({required String reason}) {
     _primaryShortcutKeys.clear();
     for (final action in _desktopKeyboard.releaseAll()) {
       _dispatchKeyboardAction(action);
     }
-    session.releaseRemoteInputState();
+    session.resetRemoteInput(RemoteInputResetScope.keyboard, reason: reason);
+  }
+
+  void _releaseRemotePointerState({required String reason}) {
+    _longPressTimer?.cancel();
+    _flushPointerMotion();
+    final lastPosition = _lastNormalizedPointer;
+    if (lastPosition != null && session.canSendControl) {
+      for (final button in _mouseButtons.values.toSet()) {
+        _sendPointerNow(
+          RemotePointerPacket(
+            phase: 'up',
+            x: lastPosition.dx,
+            y: lastPosition.dy,
+            button: button,
+          ),
+        );
+      }
+    }
+    _dispatchGestureActions(_gestures.cancelAll(releaseDragLock: true));
+    _ignoredPointers.clear();
+    _mouseButtons.clear();
+    _lastNormalizedPointer = null;
+    session.resetRemoteInput(RemoteInputResetScope.pointer, reason: reason);
   }
 
   @override
@@ -2033,10 +2051,9 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     _switchOverlaySlowTimer?.cancel();
     session.removeListener(_handleDisplaySwitchState);
     unawaited(_imeSubscription?.cancel());
-    _dispatchGestureActions(_gestures.cancelAll(releaseDragLock: true));
+    _releaseRemotePointerState(reason: 'surface-disposed');
     _desktopClickTracker.reset();
-    _flushPointerMotion();
-    _releaseDesktopKeys();
+    _releaseDesktopKeys(reason: 'surface-disposed');
     if ((_keyboardVisible &&
             _activeKeyboardMode == RemoteKeyboardMode.system) ||
         (_usesDesktopIme && _textFocus.hasFocus)) {
@@ -2812,6 +2829,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       movementY: packet.movementY,
       deltaX: packet.deltaX,
       deltaY: packet.deltaY,
+      modifiers: _remoteModifiers(HardwareKeyboard.instance),
     );
   }
 
@@ -2949,12 +2967,15 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     return event is KeyDownEvent || event is KeyRepeatEvent;
   }
 
-  List<String> _remoteModifiers(HardwareKeyboard keyboard) => <String>[
-    if (keyboard.isMetaPressed) 'command',
-    if (keyboard.isControlPressed) 'control',
-    if (keyboard.isAltPressed) 'option',
-    if (keyboard.isShiftPressed) 'shift',
-  ];
+  List<String> _remoteModifiers(HardwareKeyboard keyboard) =>
+      RemoteShortcutPolicy.remoteModifiers(
+        controllerPlatform: currentRemoteControllerPlatform(),
+        remoteHostPlatform: session.remoteHostPlatform,
+        metaPressed: keyboard.isMetaPressed,
+        controlPressed: keyboard.isControlPressed,
+        altPressed: keyboard.isAltPressed,
+        shiftPressed: keyboard.isShiftPressed,
+      );
 
   bool _remoteShortcutPressed(HardwareKeyboard keyboard) {
     final altGraph =

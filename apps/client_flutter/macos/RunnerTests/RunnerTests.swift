@@ -192,4 +192,31 @@ class RunnerTests: XCTestCase {
     XCTAssertTrue(keyboard.pressedModifierKeyCodes.isEmpty)
   }
 
+  func testPointerModifierSnapshotCanBeReconciledIndependently() {
+    let keyboard = CrossDesktopRemoteSyntheticKeyboard()
+    var strokes: [CrossDesktopRemoteSyntheticKeyStroke] = []
+    let recorder: CrossDesktopRemoteSyntheticKeyboard.Poster = {
+      strokes.append($0)
+      return true
+    }
+
+    XCTAssertTrue(keyboard.setModifiers(["command", "shift"], post: recorder))
+    XCTAssertEqual(keyboard.pressedModifierKeyCodes, Set([55, 56]))
+    XCTAssertTrue(keyboard.setModifiers([], post: recorder))
+    XCTAssertTrue(keyboard.pressedModifierKeyCodes.isEmpty)
+    XCTAssertEqual(
+      strokes,
+      [
+        .init(keyCode: 55, keyDown: true, flags: .maskCommand),
+        .init(
+          keyCode: 56,
+          keyDown: true,
+          flags: [.maskCommand, .maskShift]
+        ),
+        .init(keyCode: 56, keyDown: false, flags: .maskCommand),
+        .init(keyCode: 55, keyDown: false, flags: []),
+      ]
+    )
+  }
+
 }

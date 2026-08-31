@@ -41,6 +41,7 @@ void main() {
       activeContentGeometryV3Capability,
       textureCropRenderingV1Capability,
       atomicShortcutV1Capability,
+      scopedInputResetV1Capability,
     ]);
   });
 
@@ -56,6 +57,7 @@ void main() {
     expect(capabilities, [
       displaySwitchTransactionV1Capability,
       atomicShortcutV1Capability,
+      scopedInputResetV1Capability,
     ]);
   });
 
@@ -67,7 +69,7 @@ void main() {
         clipboardSupported: false,
         explicitFileTransferSupported: false,
       ),
-      [atomicShortcutV1Capability],
+      [atomicShortcutV1Capability, scopedInputResetV1Capability],
     );
   });
 
@@ -79,7 +81,11 @@ void main() {
         clipboardSupported: false,
         explicitFileTransferSupported: false,
       ),
-      [displaySwitchTransactionV1Capability, atomicShortcutV1Capability],
+      [
+        displaySwitchTransactionV1Capability,
+        atomicShortcutV1Capability,
+        scopedInputResetV1Capability,
+      ],
     );
   });
 

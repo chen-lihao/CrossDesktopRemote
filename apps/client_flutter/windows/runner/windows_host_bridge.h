@@ -25,6 +25,8 @@ class WindowsHostBridge {
   // used for disconnect and shutdown, rather than normal host-window focus
   // changes: a remote click commonly moves focus away from the host UI.
   void ReleaseAllInput();
+  void ReleaseKeyboardInput();
+  void ReleasePointerButtons();
 
   struct KeyDescriptor {
     UINT scan_code = 0;

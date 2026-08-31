@@ -185,6 +185,7 @@ class MacInputBridge {
     double movementY = 0,
     double deltaX = 0,
     double deltaY = 0,
+    List<String> modifiers = const [],
   }) {
     return _channel.invokeMethod<void>('pointer', {
       'version': 2,
@@ -199,6 +200,7 @@ class MacInputBridge {
       'movementY': movementY,
       'deltaX': deltaX,
       'deltaY': deltaY,
+      'modifiers': modifiers,
     });
   }
 
@@ -236,6 +238,10 @@ class MacInputBridge {
 
   Future<void> releasePointerButtons() {
     return _channel.invokeMethod<void>('releasePointerButtons');
+  }
+
+  Future<void> releaseKeyboardState() {
+    return _channel.invokeMethod<void>('releaseKeyboardState');
   }
 
   Future<void> releaseAllInput() {

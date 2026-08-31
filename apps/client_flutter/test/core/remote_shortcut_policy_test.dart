@@ -51,4 +51,29 @@ void main() {
     expect(RemoteShortcutPolicy.commonWireKey(LogicalKeyboardKey.keyS), isNull);
     expect(RemoteShortcutPolicy.commonWireKey(LogicalKeyboardKey.tab), isNull);
   });
+
+  test('pointer modifiers map the controller primary key to the host', () {
+    expect(
+      RemoteShortcutPolicy.remoteModifiers(
+        controllerPlatform: RemoteControllerPlatform.windows,
+        remoteHostPlatform: HostPlatformType.macOS.name,
+        metaPressed: false,
+        controlPressed: true,
+        altPressed: false,
+        shiftPressed: true,
+      ),
+      containsAll(['command', 'shift']),
+    );
+    expect(
+      RemoteShortcutPolicy.remoteModifiers(
+        controllerPlatform: RemoteControllerPlatform.macOS,
+        remoteHostPlatform: HostPlatformType.windows.name,
+        metaPressed: true,
+        controlPressed: false,
+        altPressed: false,
+        shiftPressed: false,
+      ),
+      ['control'],
+    );
+  });
 }

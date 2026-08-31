@@ -63,6 +63,7 @@ class MacHostPlatformAdapter implements HostPlatformAdapter {
       movementY: event.movementY,
       deltaX: event.deltaX,
       deltaY: event.deltaY,
+      modifiers: event.modifiers,
     );
   }
 
@@ -86,6 +87,9 @@ class MacHostPlatformAdapter implements HostPlatformAdapter {
 
   @override
   Future<void> releasePointerButtons() => bridge.releasePointerButtons();
+
+  @override
+  Future<void> releaseKeyboardState() => bridge.releaseKeyboardState();
 
   @override
   Future<void> releaseAllInput() => bridge.releaseAllInput();

@@ -52,6 +52,9 @@ class UnsupportedHostPlatformAdapter implements HostPlatformAdapter {
   Future<void> releasePointerButtons() async {}
 
   @override
+  Future<void> releaseKeyboardState() async {}
+
+  @override
   Future<void> releaseAllInput() async {}
 
   @override

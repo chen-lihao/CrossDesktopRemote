@@ -71,6 +71,7 @@ class HostPointerEvent {
     this.movementY = 0,
     this.deltaX = 0,
     this.deltaY = 0,
+    this.modifiers = const [],
   });
 
   final String phase;
@@ -84,6 +85,7 @@ class HostPointerEvent {
   final double movementY;
   final double deltaX;
   final double deltaY;
+  final List<String> modifiers;
 }
 
 @immutable
@@ -208,6 +210,8 @@ abstract interface class HostPlatformAdapter {
   });
 
   Future<void> releasePointerButtons();
+
+  Future<void> releaseKeyboardState();
 
   Future<void> releaseAllInput();
 
