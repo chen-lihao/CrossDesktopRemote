@@ -904,6 +904,24 @@ class RemoteSessionController extends ChangeNotifier {
     });
   }
 
+  /// Releases every bridge-owned key, modifier, and pointer button on the
+  /// remote host. Unlike ordinary input this remains available while a display
+  /// switch is pending, so focus loss cannot strand a modifier remotely.
+  void releaseRemoteInputState() {
+    final channel = _controlChannel;
+    if (role != RemoteRole.controller ||
+        channel == null ||
+        channel.state != RTCDataChannelState.RTCDataChannelOpen) {
+      return;
+    }
+    _sendControl({
+      'type': 'release-input',
+      'version': 2,
+      'sequence': ++_inputSequence,
+      'sentAtUnixMicros': DateTime.now().microsecondsSinceEpoch,
+    });
+  }
+
   void sendText(String text) {
     if (!canSendControl || text.isEmpty) {
       if (text.isNotEmpty) {
@@ -2111,6 +2129,12 @@ class RemoteSessionController extends ChangeNotifier {
               .whereType<String>()
               .toList(growable: false),
         );
+        _acknowledgeInput(message);
+      case 'release-input':
+        if (!_acceptInputSequence(message, motion: false)) {
+          return;
+        }
+        await _hostPlatform.releaseAllInput();
         _acknowledgeInput(message);
       case 'select-display':
         await _switchHostDisplay(

@@ -28,12 +28,230 @@ func crossDesktopRemoteAbsolutePointerPosition(
   )
 }
 
+struct CrossDesktopRemoteSyntheticKeyStroke: Equatable {
+  let keyCode: CGKeyCode
+  let keyDown: Bool
+  let flags: CGEventFlags
+}
+
+private struct CrossDesktopRemoteSyntheticModifier {
+  let name: String
+  let keyCode: CGKeyCode
+  let flag: CGEventFlags
+}
+
+final class CrossDesktopRemoteSyntheticKeyboard {
+  typealias Poster = (CrossDesktopRemoteSyntheticKeyStroke) -> Bool
+
+  private static let modifiers = [
+    CrossDesktopRemoteSyntheticModifier(
+      name: "command",
+      keyCode: 55,
+      flag: .maskCommand
+    ),
+    CrossDesktopRemoteSyntheticModifier(
+      name: "control",
+      keyCode: 59,
+      flag: .maskControl
+    ),
+    CrossDesktopRemoteSyntheticModifier(
+      name: "option",
+      keyCode: 58,
+      flag: .maskAlternate
+    ),
+    CrossDesktopRemoteSyntheticModifier(
+      name: "shift",
+      keyCode: 56,
+      flag: .maskShift
+    ),
+  ]
+
+  private(set) var pressedKeyCodes: Set<CGKeyCode> = []
+  private(set) var pressedModifierKeyCodes: Set<CGKeyCode> = []
+
+  @discardableResult
+  func handleKey(
+    keyCode: CGKeyCode,
+    phase: String,
+    modifiers: [String],
+    post: Poster
+  ) -> Bool {
+    switch phase {
+    case "down":
+      guard reconcileModifiers(modifiers, post: post) else {
+        release(post: post)
+        return false
+      }
+      guard post(
+        CrossDesktopRemoteSyntheticKeyStroke(
+          keyCode: keyCode,
+          keyDown: true,
+          flags: activeModifierFlags
+        )
+      ) else {
+        release(post: post)
+        return false
+      }
+      pressedKeyCodes.insert(keyCode)
+      return true
+    case "up":
+      let keyReleased = post(
+        CrossDesktopRemoteSyntheticKeyStroke(
+          keyCode: keyCode,
+          keyDown: false,
+          flags: activeModifierFlags
+        )
+      )
+      if keyReleased {
+        pressedKeyCodes.remove(keyCode)
+      }
+      // Each wire key pair is a complete transaction. Releasing every
+      // synthetic modifier here prevents a lost physical modifier-up event on
+      // the controller from leaving Command/Control latched on the host.
+      let modifiersReleased = releaseModifiers(post: post)
+      return keyReleased && modifiersReleased
+    default:
+      return false
+    }
+  }
+
+  @discardableResult
+  func performShortcut(
+    keyCode: CGKeyCode,
+    modifiers: [String],
+    post: Poster
+  ) -> Bool {
+    guard release(post: post) else { return false }
+    guard reconcileModifiers(modifiers, post: post) else {
+      release(post: post)
+      return false
+    }
+
+    var succeeded = post(
+      CrossDesktopRemoteSyntheticKeyStroke(
+        keyCode: keyCode,
+        keyDown: true,
+        flags: activeModifierFlags
+      )
+    )
+    if succeeded {
+      pressedKeyCodes.insert(keyCode)
+      succeeded = post(
+        CrossDesktopRemoteSyntheticKeyStroke(
+          keyCode: keyCode,
+          keyDown: false,
+          flags: activeModifierFlags
+        )
+      )
+      if succeeded {
+        pressedKeyCodes.remove(keyCode)
+      }
+    }
+
+    // Always close the chord, including partial posting failures.
+    return release(post: post) && succeeded
+  }
+
+  @discardableResult
+  func release(post: Poster) -> Bool {
+    var succeeded = true
+    for keyCode in pressedKeyCodes.sorted() {
+      let posted = post(
+        CrossDesktopRemoteSyntheticKeyStroke(
+          keyCode: keyCode,
+          keyDown: false,
+          flags: activeModifierFlags
+        )
+      )
+      if posted {
+        pressedKeyCodes.remove(keyCode)
+      } else {
+        succeeded = false
+      }
+    }
+    return releaseModifiers(post: post) && succeeded
+  }
+
+  private var activeModifierFlags: CGEventFlags {
+    Self.modifiers.reduce(into: CGEventFlags()) { flags, modifier in
+      if pressedModifierKeyCodes.contains(modifier.keyCode) {
+        flags.insert(modifier.flag)
+      }
+    }
+  }
+
+  private func reconcileModifiers(_ names: [String], post: Poster) -> Bool {
+    let requested = Set(
+      Self.modifiers
+        .filter { names.contains($0.name) }
+        .map(\.keyCode)
+    )
+    var succeeded = true
+
+    for modifier in Self.modifiers.reversed()
+    where pressedModifierKeyCodes.contains(modifier.keyCode) &&
+      !requested.contains(modifier.keyCode) {
+      if !releaseModifier(modifier, post: post) {
+        succeeded = false
+      }
+    }
+    for modifier in Self.modifiers
+    where requested.contains(modifier.keyCode) &&
+      !pressedModifierKeyCodes.contains(modifier.keyCode) {
+      var flags = activeModifierFlags
+      flags.insert(modifier.flag)
+      if post(
+        CrossDesktopRemoteSyntheticKeyStroke(
+          keyCode: modifier.keyCode,
+          keyDown: true,
+          flags: flags
+        )
+      ) {
+        pressedModifierKeyCodes.insert(modifier.keyCode)
+      } else {
+        succeeded = false
+      }
+    }
+    return succeeded
+  }
+
+  private func releaseModifiers(post: Poster) -> Bool {
+    var succeeded = true
+    for modifier in Self.modifiers.reversed()
+    where pressedModifierKeyCodes.contains(modifier.keyCode) {
+      if !releaseModifier(modifier, post: post) {
+        succeeded = false
+      }
+    }
+    return succeeded
+  }
+
+  private func releaseModifier(
+    _ modifier: CrossDesktopRemoteSyntheticModifier,
+    post: Poster
+  ) -> Bool {
+    var flags = activeModifierFlags
+    flags.remove(modifier.flag)
+    guard post(
+      CrossDesktopRemoteSyntheticKeyStroke(
+        keyCode: modifier.keyCode,
+        keyDown: false,
+        flags: flags
+      )
+    ) else {
+      return false
+    }
+    pressedModifierKeyCodes.remove(modifier.keyCode)
+    return true
+  }
+}
+
 class MainFlutterWindow: NSWindow {
   private var inputChannel: FlutterMethodChannel?
   private var clipboardBridge: AppleClipboardBridge?
   private var lanDiscoveryBridge: AppleLanDiscoveryBridge?
   private var pressedMouseButtons: Set<String> = []
-  private var pressedKeyboardKeys: Set<CGKeyCode> = []
+  private let syntheticKeyboard = CrossDesktopRemoteSyntheticKeyboard()
   private var captureColorDiagnostics: [String: Any] = [:]
   private var colorDiagnosticsObserver: NSObjectProtocol?
   private var captureFirstFrameObserver: NSObjectProtocol?
@@ -297,6 +515,17 @@ class MainFlutterWindow: NSWindow {
         result(FlutterError(code: "invalid_text", message: "Invalid text input", details: nil))
         return
       }
+      let source = CGEventSource(stateID: .hidSystemState)
+      guard syntheticKeyboard.release(
+        post: { self.postSyntheticKeyStroke($0, source: source) }
+      ) else {
+        result(FlutterError(
+          code: "input_injection_failed",
+          message: "Failed to release previous keyboard state",
+          details: nil
+        ))
+        return
+      }
       postUnicodeText(text)
       result(nil)
       return
@@ -305,22 +534,25 @@ class MainFlutterWindow: NSWindow {
     guard
       let keyName = values["key"] as? String,
       let keyCode = macKeyCode(for: keyName),
-      let phase = values["phase"] as? String
+      let phase = values["phase"] as? String,
+      phase == "down" || phase == "up"
     else {
       result(FlutterError(code: "unsupported_key", message: "Unsupported keyboard key", details: nil))
       return
     }
-    let event = CGEvent(
-      keyboardEventSource: nil,
-      virtualKey: keyCode,
-      keyDown: phase == "down"
-    )
-    event?.flags = modifierFlags(values["modifiers"] as? [String] ?? [])
-    event?.post(tap: .cghidEventTap)
-    if phase == "down" {
-      pressedKeyboardKeys.insert(keyCode)
-    } else {
-      pressedKeyboardKeys.remove(keyCode)
+    let source = CGEventSource(stateID: .hidSystemState)
+    guard syntheticKeyboard.handleKey(
+      keyCode: keyCode,
+      phase: phase,
+      modifiers: values["modifiers"] as? [String] ?? [],
+      post: { self.postSyntheticKeyStroke($0, source: source) }
+    ) else {
+      result(FlutterError(
+        code: "input_injection_failed",
+        message: "Failed to post keyboard event",
+        details: nil
+      ))
+      return
     }
     result(nil)
   }
@@ -343,17 +575,23 @@ class MainFlutterWindow: NSWindow {
       return
     }
 
-    // A shortcut is one native transaction. Releasing bridge-owned state
-    // first prevents an interrupted file transfer from leaving a synthetic
-    // modifier or mouse button active on the host.
-    releaseAllInput()
-    let flags = modifierFlags(values["modifiers"] as? [String] ?? [])
-    let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true)
-    down?.flags = flags
-    down?.post(tap: .cghidEventTap)
-    let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false)
-    up?.flags = flags
-    up?.post(tap: .cghidEventTap)
+    // Post a balanced native chord instead of attaching Command/Control flags
+    // only to V. macOS requires every synthetic modifier to be explicitly
+    // entered and released.
+    releasePointerButtons()
+    let source = CGEventSource(stateID: .hidSystemState)
+    guard syntheticKeyboard.performShortcut(
+      keyCode: keyCode,
+      modifiers: values["modifiers"] as? [String] ?? [],
+      post: { self.postSyntheticKeyStroke($0, source: source) }
+    ) else {
+      result(FlutterError(
+        code: "input_injection_failed",
+        message: "Failed to post keyboard shortcut",
+        details: nil
+      ))
+      return
+    }
     result(nil)
   }
 
@@ -380,14 +618,26 @@ class MainFlutterWindow: NSWindow {
 
   private func releaseAllInput() {
     releasePointerButtons()
-    for keyCode in pressedKeyboardKeys {
-      CGEvent(
-        keyboardEventSource: nil,
-        virtualKey: keyCode,
-        keyDown: false
-      )?.post(tap: .cghidEventTap)
+    let source = CGEventSource(stateID: .hidSystemState)
+    syntheticKeyboard.release(
+      post: { self.postSyntheticKeyStroke($0, source: source) }
+    )
+  }
+
+  private func postSyntheticKeyStroke(
+    _ stroke: CrossDesktopRemoteSyntheticKeyStroke,
+    source: CGEventSource?
+  ) -> Bool {
+    guard let event = CGEvent(
+      keyboardEventSource: source,
+      virtualKey: stroke.keyCode,
+      keyDown: stroke.keyDown
+    ) else {
+      return false
     }
-    pressedKeyboardKeys.removeAll()
+    event.flags = stroke.flags
+    event.post(tap: .cghidEventTap)
+    return true
   }
 
   private func postUnicodeText(_ text: String) {
@@ -403,20 +653,6 @@ class MainFlutterWindow: NSWindow {
       }
       event?.post(tap: .cghidEventTap)
     }
-  }
-
-  private func modifierFlags(_ modifiers: [String]) -> CGEventFlags {
-    var flags: CGEventFlags = []
-    for modifier in modifiers {
-      switch modifier {
-      case "command": flags.insert(.maskCommand)
-      case "control": flags.insert(.maskControl)
-      case "option": flags.insert(.maskAlternate)
-      case "shift": flags.insert(.maskShift)
-      default: break
-      }
-    }
-    return flags
   }
 
   private func macKeyCode(for key: String) -> CGKeyCode? {

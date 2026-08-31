@@ -80,4 +80,116 @@ class RunnerTests: XCTestCase {
     )
   }
 
+  func testCommandShortcutPostsBalancedModifierSequence() {
+    let keyboard = CrossDesktopRemoteSyntheticKeyboard()
+    var strokes: [CrossDesktopRemoteSyntheticKeyStroke] = []
+
+    XCTAssertTrue(
+      keyboard.performShortcut(
+        keyCode: 9,
+        modifiers: ["command"],
+        post: {
+          strokes.append($0)
+          return true
+        }
+      )
+    )
+    XCTAssertEqual(
+      strokes,
+      [
+        .init(keyCode: 55, keyDown: true, flags: .maskCommand),
+        .init(keyCode: 9, keyDown: true, flags: .maskCommand),
+        .init(keyCode: 9, keyDown: false, flags: .maskCommand),
+        .init(keyCode: 55, keyDown: false, flags: []),
+      ]
+    )
+    XCTAssertTrue(keyboard.pressedKeyCodes.isEmpty)
+    XCTAssertTrue(keyboard.pressedModifierKeyCodes.isEmpty)
+  }
+
+  func testKeyPairReleasesSyntheticModifier() {
+    let keyboard = CrossDesktopRemoteSyntheticKeyboard()
+    var strokes: [CrossDesktopRemoteSyntheticKeyStroke] = []
+    let recorder: CrossDesktopRemoteSyntheticKeyboard.Poster = {
+      strokes.append($0)
+      return true
+    }
+
+    XCTAssertTrue(
+      keyboard.handleKey(
+        keyCode: 8,
+        phase: "down",
+        modifiers: ["command"],
+        post: recorder
+      )
+    )
+    XCTAssertTrue(
+      keyboard.handleKey(
+        keyCode: 8,
+        phase: "up",
+        modifiers: ["command"],
+        post: recorder
+      )
+    )
+    XCTAssertEqual(
+      strokes,
+      [
+        .init(keyCode: 55, keyDown: true, flags: .maskCommand),
+        .init(keyCode: 8, keyDown: true, flags: .maskCommand),
+        .init(keyCode: 8, keyDown: false, flags: .maskCommand),
+        .init(keyCode: 55, keyDown: false, flags: []),
+      ]
+    )
+  }
+
+  func testReleaseClosesInterruptedKeyChord() {
+    let keyboard = CrossDesktopRemoteSyntheticKeyboard()
+    var strokes: [CrossDesktopRemoteSyntheticKeyStroke] = []
+    let recorder: CrossDesktopRemoteSyntheticKeyboard.Poster = {
+      strokes.append($0)
+      return true
+    }
+
+    XCTAssertTrue(
+      keyboard.handleKey(
+        keyCode: 9,
+        phase: "down",
+        modifiers: ["command"],
+        post: recorder
+      )
+    )
+    XCTAssertTrue(keyboard.release(post: recorder))
+    XCTAssertEqual(
+      Array(strokes.suffix(2)),
+      [
+        .init(keyCode: 9, keyDown: false, flags: .maskCommand),
+        .init(keyCode: 55, keyDown: false, flags: []),
+      ]
+    )
+    XCTAssertTrue(keyboard.pressedKeyCodes.isEmpty)
+    XCTAssertTrue(keyboard.pressedModifierKeyCodes.isEmpty)
+  }
+
+  func testShortcutPostingFailureStillReleasesCommand() {
+    let keyboard = CrossDesktopRemoteSyntheticKeyboard()
+    var strokes: [CrossDesktopRemoteSyntheticKeyStroke] = []
+
+    XCTAssertFalse(
+      keyboard.performShortcut(
+        keyCode: 9,
+        modifiers: ["command"],
+        post: { stroke in
+          strokes.append(stroke)
+          return !(stroke.keyCode == 9 && stroke.keyDown)
+        }
+      )
+    )
+    XCTAssertEqual(
+      strokes.last,
+      .init(keyCode: 55, keyDown: false, flags: [])
+    )
+    XCTAssertTrue(keyboard.pressedKeyCodes.isEmpty)
+    XCTAssertTrue(keyboard.pressedModifierKeyCodes.isEmpty)
+  }
+
 }

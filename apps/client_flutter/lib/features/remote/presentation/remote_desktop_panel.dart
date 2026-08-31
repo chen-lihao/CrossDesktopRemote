@@ -2021,6 +2021,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     for (final action in _desktopKeyboard.releaseAll()) {
       _dispatchKeyboardAction(action);
     }
+    session.releaseRemoteInputState();
   }
 
   @override
