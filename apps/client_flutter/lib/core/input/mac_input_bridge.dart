@@ -142,6 +142,21 @@ class MacInputBridge {
     return await _channel.invokeMethod<bool>('openInputSettings') ?? false;
   }
 
+  Future<bool> requestScreenCaptureAccess() async {
+    return await _channel.invokeMethod<bool>('requestScreenCaptureAccess') ??
+        false;
+  }
+
+  Future<bool> checkScreenCaptureAccess() async {
+    return await _channel.invokeMethod<bool>('checkScreenCaptureAccess') ??
+        false;
+  }
+
+  Future<bool> openScreenCaptureSettings() async {
+    return await _channel.invokeMethod<bool>('openScreenCaptureSettings') ??
+        false;
+  }
+
   Future<List<MacDisplayInfo>> listDisplays() async {
     final values =
         await _channel.invokeListMethod<Map<Object?, Object?>>(
@@ -185,7 +200,7 @@ class MacInputBridge {
     double movementY = 0,
     double deltaX = 0,
     double deltaY = 0,
-    List<String> modifiers = const [],
+    List<String>? modifiers,
   }) {
     return _channel.invokeMethod<void>('pointer', {
       'version': 2,
@@ -200,7 +215,7 @@ class MacInputBridge {
       'movementY': movementY,
       'deltaX': deltaX,
       'deltaY': deltaY,
-      'modifiers': modifiers,
+      'modifiers': ?modifiers,
     });
   }
 

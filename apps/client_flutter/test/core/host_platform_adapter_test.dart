@@ -35,6 +35,7 @@ void main() {
               },
             ],
             'checkInputAccess' => true,
+            'checkScreenCaptureAccess' => true,
             _ => null,
           };
         });
@@ -49,6 +50,7 @@ void main() {
     expect(displays.single.pixelWidth, 3024);
     expect(displays.single.isPrimary, isTrue);
     expect(permission.inputGranted, isTrue);
+    expect(permission.screenCaptureGranted, isTrue);
   });
 
   test('Mac adapter preserves generic pointer and key protocol', () async {
@@ -95,6 +97,21 @@ void main() {
     expect((calls[0].arguments as Map)['modifiers'], ['command', 'shift']);
     expect((calls[1].arguments as Map)['key'], 'KeyC');
     expect((calls[2].arguments as Map)['text'], '你好');
+  });
+
+  test('stateless Mac pointer motion omits modifier reconciliation', () async {
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(inputChannel, (call) async {
+          calls.add(call);
+          return null;
+        });
+
+    await const MacHostPlatformAdapter().sendPointer(
+      const HostPointerEvent(phase: 'move', x: .25, y: .75, displayId: '42'),
+    );
+
+    expect((calls.single.arguments as Map).containsKey('modifiers'), isFalse);
   });
 
   test('Mac adapter exposes the canonical active capture rectangle', () async {
@@ -295,6 +312,29 @@ void main() {
     expect((calls[4].arguments as Map)['text'], '你好');
     expect((calls[2].arguments as Map)['modifiers'], ['control']);
   });
+
+  test(
+    'stateless Windows pointer motion omits modifier reconciliation',
+    () async {
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(inputChannel, (call) async {
+            calls.add(call);
+            return null;
+          });
+
+      await const WindowsInputBridge().sendPointer(
+        const HostPointerEvent(
+          phase: 'move',
+          x: .5,
+          y: .5,
+          displayId: r'\\.\DISPLAY1',
+        ),
+      );
+
+      expect((calls.single.arguments as Map).containsKey('modifiers'), isFalse);
+    },
+  );
 
   test('Windows adapter rejects an incompatible native bridge', () async {
     final adapter = WindowsHostPlatformAdapter(

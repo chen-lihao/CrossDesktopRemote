@@ -20,6 +20,7 @@ import 'package:cross_desktop_remote/features/remote/application/remote_display_
 import 'package:cross_desktop_remote/features/remote/application/remote_display_switch_protocol.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_frame_geometry_coordinator.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_input_sequence_guard.dart';
+import 'package:cross_desktop_remote/features/remote/application/remote_input_state_coordinator.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_media_stats.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_quality_adaptation.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
@@ -170,7 +171,7 @@ class RemoteSessionController extends ChangeNotifier {
          localIsController: role == RemoteRole.controller,
          initialMode: _platformClipboardMode(initialClipboardMode, role),
        ) {
-    _fileClipboardPublisher = FileClipboardPublishCoordinator(
+    _fileClipboardOffers = FileClipboardOfferBroker(
       publisher: (paths) => _fileTransfer.sendFiles(
         paths,
         purpose: ExplicitFileTransferPurpose.clipboard,
@@ -200,7 +201,7 @@ class RemoteSessionController extends ChangeNotifier {
   final FileClipboardEchoGuard _fileClipboardEchoGuard =
       FileClipboardEchoGuard();
   final ExplicitFileTransferEngine _fileTransfer = ExplicitFileTransferEngine();
-  late final FileClipboardPublishCoordinator _fileClipboardPublisher;
+  late final FileClipboardOfferBroker _fileClipboardOffers;
   late final ClipboardTempLeaseManager _clipboardTempLeases;
   final Map<String, List<String>> _stagedOutgoingFiles = {};
   final Set<String> _acceptingFileClipboardTransfers = {};
@@ -221,6 +222,8 @@ class RemoteSessionController extends ChangeNotifier {
       StreamController<RemoteNotice>.broadcast(sync: true);
   final RemoteInputSequenceGuard _inputSequenceGuard =
       RemoteInputSequenceGuard();
+  final RemoteInputStateCoordinator _hostInputState =
+      RemoteInputStateCoordinator();
   final RemoteMediaStatsAccumulator _mediaStatsAccumulator =
       RemoteMediaStatsAccumulator();
   final RemoteQualityAdaptationController _qualityAdaptation =
@@ -397,6 +400,7 @@ class RemoteSessionController extends ChangeNotifier {
 
   bool get fileClipboardPastePending =>
       _fileClipboardPastePreparing || _fileClipboardPasteTransferId != null;
+  bool get fileClipboardOfferPending => _fileClipboardOffers.hasOffer;
   String get fileClipboardPasteStatus {
     if (_fileClipboardPastePreparing) return '正在分析文件剪贴板';
     final task = fileClipboardPasteTask;
@@ -505,10 +509,7 @@ class RemoteSessionController extends ChangeNotifier {
         }
         try {
           final permission = await _hostPlatform.checkPermissions();
-          _accessibilityGranted = permission.inputGranted;
-          _controlError = _accessibilityGranted == true
-              ? null
-              : permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
+          _applyHostPermissionState(permission);
         } catch (_) {
           // Native channels are unavailable in widget tests and early startup.
         }
@@ -591,15 +592,17 @@ class RemoteSessionController extends ChangeNotifier {
     _clipboardTempLeases.observeClipboard(snapshot);
     if (snapshot.hasFiles) {
       if (_fileClipboardEchoGuard.consumeIfExpected(snapshot)) {
-        unawaited(_fileClipboardPublisher.invalidate());
+        unawaited(_fileClipboardOffers.invalidate());
         _updateClipboardStatus();
         notifyListeners();
         return;
       }
-      unawaited(_publishLocalFileClipboard(snapshot));
+      _fileClipboardOffers.arm(snapshot);
+      _setClipboardStatus(ClipboardSyncStatus.ready, '已记录文件，远程粘贴时开始传输');
+      notifyListeners();
       return;
     }
-    unawaited(_fileClipboardPublisher.invalidate());
+    unawaited(_fileClipboardOffers.invalidate());
     final offer = _clipboardSync.observeLocalChange(snapshot);
     if (snapshot.tooLarge) {
       _setClipboardStatus(ClipboardSyncStatus.error, '文本超过 256 KiB，未同步');
@@ -640,9 +643,9 @@ class RemoteSessionController extends ChangeNotifier {
       }
       return null;
     }
-    _setClipboardStatus(ClipboardSyncStatus.sending, '正在后台同步文件剪贴板');
+    _setClipboardStatus(ClipboardSyncStatus.sending, '远程粘贴已触发，正在传输文件');
     try {
-      final transferId = await _fileClipboardPublisher.publish(snapshot);
+      final transferId = await _fileClipboardOffers.materialize(snapshot);
       notifyListeners();
       return transferId;
     } catch (error) {
@@ -851,7 +854,9 @@ class RemoteSessionController extends ChangeNotifier {
     if (phase == 'down' || phase == 'scroll') {
       _remoteInputEpoch += 1;
     }
-    final isMotion = phase == 'move' || phase == 'scroll';
+    // Only pointer position is allowed on the unordered motion channel.
+    // Scroll and button transitions are stateful and remain FIFO with keys.
+    final isMotion = phase == 'move';
     final probe = isMotion && ++_motionEventsSinceProbe >= 30;
     if (probe) _motionEventsSinceProbe = 0;
     final message = <String, dynamic>{
@@ -871,7 +876,7 @@ class RemoteSessionController extends ChangeNotifier {
       'movementY': movementY,
       'deltaX': deltaX,
       'deltaY': deltaY,
-      'modifiers': modifiers,
+      if (!isMotion) 'modifiers': modifiers,
     };
     if (isMotion) {
       _sendMotion(message);
@@ -1013,6 +1018,7 @@ class RemoteSessionController extends ChangeNotifier {
           inputEpoch: inputEpoch,
         );
       }
+      await _fileClipboardOffers.invalidate();
       if (!_remoteSupportsTextClipboardV1 || !_remoteAllowsClipboardInbound) {
         return true;
       }
@@ -1083,10 +1089,10 @@ class RemoteSessionController extends ChangeNotifier {
     } finally {
       if (preparedTransferId != null) {
         if (appliedToRemoteClipboard) {
-          _fileClipboardPublisher.releaseTransfer(preparedTransferId);
+          _fileClipboardOffers.releaseTransfer(preparedTransferId);
         } else {
           unawaited(
-            _fileClipboardPublisher.invalidateTransfer(preparedTransferId),
+            _fileClipboardOffers.invalidateTransfer(preparedTransferId),
           );
         }
       }
@@ -1340,7 +1346,7 @@ class RemoteSessionController extends ChangeNotifier {
     }
     try {
       final permission = await _hostPlatform.requestPermissions();
-      _accessibilityGranted = permission.inputGranted;
+      _applyHostPermissionState(permission);
       if (_accessibilityGranted == true) {
         _controlError = null;
         _emitNotice('远程输入权限已就绪', level: RemoteNoticeLevel.success);
@@ -1368,6 +1374,32 @@ class RemoteSessionController extends ChangeNotifier {
     }
   }
 
+  Future<void> requestHostScreenCapturePermission() async {
+    if (role != RemoteRole.host || !_hostPlatform.capabilities.canHostDesktop) {
+      return;
+    }
+    try {
+      final permission = await _hostPlatform.requestScreenCapturePermission();
+      _applyHostPermissionState(permission);
+      if (_screenCaptureGranted) {
+        _emitNotice('屏幕录制权限已就绪', level: RemoteNoticeLevel.success);
+      } else {
+        if (_hostPlatform.capabilities.capturePermissionSettings) {
+          await _hostPlatform.openScreenCapturePermissionSettings();
+        }
+        _emitNotice(
+          permission.screenCaptureLimitation ??
+              '请在系统设置中允许 CrossDesktopRemote 录制屏幕，然后返回应用',
+          level: RemoteNoticeLevel.warning,
+        );
+      }
+      _publishHostState();
+      notifyListeners();
+    } catch (error) {
+      _emitNotice('无法打开屏幕录制权限设置：$error', level: RemoteNoticeLevel.error);
+    }
+  }
+
   Future<void> refreshHostPermissions({bool announce = false}) async {
     if (role != RemoteRole.host ||
         !_hostPlatform.capabilities.canHostDesktop ||
@@ -1377,11 +1409,9 @@ class RemoteSessionController extends ChangeNotifier {
     _checkingInputPermission = true;
     try {
       final previous = _accessibilityGranted;
+      final previousCapture = _screenCaptureGranted;
       final permission = await _hostPlatform.checkPermissions();
-      _accessibilityGranted = permission.inputGranted;
-      _controlError = _accessibilityGranted == true
-          ? null
-          : permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
+      _applyHostPermissionState(permission);
       _publishHostState();
       notifyListeners();
       if (_accessibilityGranted == true && previous != true) {
@@ -1390,6 +1420,14 @@ class RemoteSessionController extends ChangeNotifier {
       } else if (announce && _accessibilityGranted != true) {
         _emitNotice(_controlError!, level: RemoteNoticeLevel.warning);
       }
+      if (_screenCaptureGranted && !previousCapture) {
+        _emitNotice('屏幕录制权限已生效', level: RemoteNoticeLevel.success);
+      } else if (announce && !_screenCaptureGranted) {
+        _emitNotice(
+          permission.screenCaptureLimitation ?? '本机尚未允许屏幕录制',
+          level: RemoteNoticeLevel.warning,
+        );
+      }
     } catch (error) {
       if (announce) {
         _emitNotice('检查远程输入权限失败：$error', level: RemoteNoticeLevel.error);
@@ -1397,6 +1435,14 @@ class RemoteSessionController extends ChangeNotifier {
     } finally {
       _checkingInputPermission = false;
     }
+  }
+
+  void _applyHostPermissionState(HostPermissionState permission) {
+    _accessibilityGranted = permission.inputGranted;
+    _screenCaptureGranted = permission.screenCaptureGranted;
+    _controlError = permission.inputGranted
+        ? null
+        : permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
   }
 
   void explainControlUnavailable() {
@@ -2079,14 +2125,35 @@ class RemoteSessionController extends ChangeNotifier {
     }
   }
 
-  Future<void> _handleHostControlMessage(Map<String, dynamic> message) async {
+  Future<void> _handleHostControlMessage(Map<String, dynamic> message) {
     if (!_hostPlatform.capabilities.canHostDesktop) {
-      return;
+      return Future<void>.value();
     }
+    if (_isReliableHostInputMessage(message)) {
+      return _hostInputState.enqueue(() => _applyHostControlMessage(message));
+    }
+    return _applyHostControlMessage(message);
+  }
+
+  bool _isReliableHostInputMessage(Map<String, dynamic> message) {
+    switch (message['type']) {
+      case 'keyboard':
+      case 'shortcut':
+      case 'release-input':
+      case 'input-reset':
+        return true;
+      case 'pointer':
+        return message['phase'] != 'move';
+      default:
+        return false;
+    }
+  }
+
+  Future<void> _applyHostControlMessage(Map<String, dynamic> message) async {
     switch (message['type']) {
       case 'pointer':
         final phase = message['phase'] as String? ?? 'move';
-        final isMotion = phase == 'move' || phase == 'scroll';
+        final isMotion = phase == 'move';
         if (!_acceptInputSequence(message, motion: isMotion)) {
           return;
         }
@@ -2104,9 +2171,11 @@ class RemoteSessionController extends ChangeNotifier {
             movementY: (message['movementY'] as num?)?.toDouble() ?? 0,
             deltaX: (message['deltaX'] as num?)?.toDouble() ?? 0,
             deltaY: (message['deltaY'] as num?)?.toDouble() ?? 0,
-            modifiers: (message['modifiers'] as List<dynamic>? ?? const [])
-                .whereType<String>()
-                .toList(growable: false),
+            modifiers: message.containsKey('modifiers')
+                ? (message['modifiers'] as List<dynamic>? ?? const [])
+                      .whereType<String>()
+                      .toList(growable: false)
+                : null,
           ),
         );
         if ((message['phase'] != 'move' && message['phase'] != 'scroll') ||
@@ -2190,8 +2259,7 @@ class RemoteSessionController extends ChangeNotifier {
         );
       case 'refresh-host-status':
         final permission = await _hostPlatform.checkPermissions();
-        _accessibilityGranted = permission.inputGranted;
-        _controlError = permission.inputGranted ? null : permission.limitation;
+        _applyHostPermissionState(permission);
         _publishHostState();
         notifyListeners();
       case 'refresh-displays':
@@ -2584,8 +2652,7 @@ class RemoteSessionController extends ChangeNotifier {
     try {
       await _releaseHostInputState();
       final permission = await _hostPlatform.checkPermissions();
-      _accessibilityGranted = permission.inputGranted;
-      _controlError = permission.inputGranted ? null : permission.limitation;
+      _applyHostPermissionState(permission);
       await _refreshHostDisplays();
       var keyFrameRequested = false;
       var captureRestarted = false;
@@ -3238,7 +3305,7 @@ class RemoteSessionController extends ChangeNotifier {
 
   Future<void> _reportInputFailure(Object error) async {
     final permission = await _hostPlatform.checkPermissions();
-    _accessibilityGranted = permission.inputGranted;
+    _applyHostPermissionState(permission);
     _controlError = _accessibilityGranted == true
         ? '本机输入注入失败'
         : permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
@@ -3458,11 +3525,19 @@ class RemoteSessionController extends ChangeNotifier {
     if (!_hostPlatform.capabilities.canHostDesktop) {
       throw UnsupportedError('当前版本尚未实现此平台的被控能力');
     }
-    final permission = await _hostPlatform.requestPermissions();
-    _accessibilityGranted = permission.inputGranted;
-    _controlError = _accessibilityGranted == true
-        ? null
-        : permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
+    var permission = await _hostPlatform.checkPermissions();
+    if (!permission.screenCaptureGranted) {
+      permission = await _hostPlatform.requestScreenCapturePermission();
+    }
+    _applyHostPermissionState(permission);
+    if (!permission.screenCaptureGranted) {
+      if (_hostPlatform.capabilities.capturePermissionSettings) {
+        await _hostPlatform.openScreenCapturePermissionSettings();
+      }
+      throw StateError(
+        permission.screenCaptureLimitation ?? '没有屏幕录制权限，请在系统设置中授权',
+      );
+    }
     final limitation = permission.limitation;
     if (_accessibilityGranted == true && limitation != null) {
       _emitNotice(limitation, level: RemoteNoticeLevel.warning);
@@ -4422,7 +4497,7 @@ class RemoteSessionController extends ChangeNotifier {
     _motionChannel = null;
     await _clipboardChannel?.close();
     _clipboardChannel = null;
-    await _fileClipboardPublisher.invalidate();
+    await _fileClipboardOffers.invalidate();
     _retiredFileClipboardTransfers.addAll(
       await _fileTransfer.retireClipboardTasks(),
     );
@@ -4514,8 +4589,8 @@ class RemoteSessionController extends ChangeNotifier {
     _mediaStatsAccumulator.reset();
     _qualityAdaptation.reset();
     _colorDiagnostics = null;
-    _screenCaptureGranted = false;
     if (role == RemoteRole.controller) {
+      _screenCaptureGranted = false;
       _accessibilityGranted = null;
     }
     _authorizingPeer = false;
@@ -4562,7 +4637,8 @@ class RemoteSessionController extends ChangeNotifier {
       return;
     }
     try {
-      await _hostPlatform.releaseAllInput();
+      _hostInputState.advanceGeneration();
+      await _hostInputState.enqueue(_hostPlatform.releaseAllInput);
     } catch (_) {
       // The native window may already be closing or unavailable in tests.
     }
@@ -4596,7 +4672,7 @@ class RemoteSessionController extends ChangeNotifier {
       unawaited(_fileTransferPlatform.cleanupOutgoingFiles(paths));
     }
     _stagedOutgoingFiles.clear();
-    unawaited(_fileClipboardPublisher.invalidate());
+    unawaited(_fileClipboardOffers.invalidate());
     unawaited(_clipboardTempLeases.dispose());
     unawaited(_disposeResources());
     unawaited(_notices.close());

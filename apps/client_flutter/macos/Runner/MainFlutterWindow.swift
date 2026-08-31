@@ -328,6 +328,12 @@ class MainFlutterWindow: NSWindow {
         result(self.hasInputAccess())
       case "openInputSettings":
         result(self.openInputSettings())
+      case "requestScreenCaptureAccess":
+        result(self.requestScreenCaptureAccess())
+      case "checkScreenCaptureAccess":
+        result(self.hasScreenCaptureAccess())
+      case "openScreenCaptureSettings":
+        result(self.openScreenCaptureSettings())
       case "listDisplays":
         result(self.listDisplays())
       case "getColorDiagnostics":
@@ -402,6 +408,29 @@ class MainFlutterWindow: NSWindow {
     return NSWorkspace.shared.open(url)
   }
 
+  private func hasScreenCaptureAccess() -> Bool {
+    if #available(macOS 10.15, *) {
+      return CGPreflightScreenCaptureAccess()
+    }
+    return true
+  }
+
+  private func requestScreenCaptureAccess() -> Bool {
+    if #available(macOS 10.15, *) {
+      return CGRequestScreenCaptureAccess()
+    }
+    return true
+  }
+
+  private func openScreenCaptureSettings() -> Bool {
+    guard let url = URL(
+      string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+    ) else {
+      return false
+    }
+    return NSWorkspace.shared.open(url)
+  }
+
   private func openDisplaySettings() -> Bool {
     guard let url = URL(
       string: "x-apple.systempreferences:com.apple.Displays-Settings.extension"
@@ -434,16 +463,18 @@ class MainFlutterWindow: NSWindow {
     }
 
     let source = CGEventSource(stateID: .hidSystemState)
-    guard syntheticKeyboard.setModifiers(
-      values["modifiers"] as? [String] ?? [],
-      post: { self.postSyntheticKeyStroke($0, source: source) }
-    ) else {
-      result(FlutterError(
-        code: "input_injection_failed",
-        message: "Failed to reconcile pointer modifiers",
-        details: nil
-      ))
-      return
+    if let modifiers = values["modifiers"] as? [String] {
+      guard syntheticKeyboard.setModifiers(
+        modifiers,
+        post: { self.postSyntheticKeyStroke($0, source: source) }
+      ) else {
+        result(FlutterError(
+          code: "input_injection_failed",
+          message: "Failed to reconcile pointer modifiers",
+          details: nil
+        ))
+        return
+      }
     }
 
     let displayBounds = CGDisplayBounds(displayId)

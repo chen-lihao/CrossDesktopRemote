@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/remote/application/host_invitation_lease_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:flutter/foundation.dart';
@@ -100,10 +101,10 @@ class HostAvailabilityController extends ChangeNotifier {
   void reconcileServerConfiguration() {
     if (_disposed || !_desiredOnline) return;
     final endpoint = serverUrl().trim();
-    if (endpoint == _connectedEndpoint ||
-        _serverReconfigureTimer?.isActive == true) {
-      return;
-    }
+    if (endpoint == _connectedEndpoint) return;
+    // A server URL is edited character by character. Restart the timer for
+    // every change so a partial URL can never disconnect a healthy host.
+    _serverReconfigureTimer?.cancel();
     _serverReconfigureTimer = Timer(const Duration(milliseconds: 700), () {
       unawaited(_applyServerConfiguration());
     });
@@ -115,6 +116,15 @@ class HostAvailabilityController extends ChangeNotifier {
     if (_disposed || !_desiredOnline) return;
     final endpoint = serverUrl().trim();
     if (endpoint == _connectedEndpoint) return;
+    if (endpoint.isNotEmpty) {
+      try {
+        normalizeSignalingServerUrl(endpoint);
+      } on FormatException {
+        // Keep the existing registration while the field contains a partial
+        // or invalid URL. A later valid edit schedules another transaction.
+        return;
+      }
+    }
     if ({
       RemoteSessionState.connecting,
       RemoteSessionState.awaitingApproval,

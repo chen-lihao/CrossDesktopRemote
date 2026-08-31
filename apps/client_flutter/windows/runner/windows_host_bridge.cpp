@@ -477,9 +477,12 @@ bool WindowsHostBridge::HandlePointer(const EncodableMap& arguments,
   const std::string phase = StringValue(arguments, "phase", "move");
   std::vector<INPUT> inputs;
 
-  if (!SetSyntheticModifiers(
-          ModifierVirtualKeys(StringSetValue(arguments, "modifiers")), error)) {
-    return false;
+  if (arguments.find(EncodableValue("modifiers")) != arguments.end()) {
+    if (!SetSyntheticModifiers(
+            ModifierVirtualKeys(StringSetValue(arguments, "modifiers")),
+            error)) {
+      return false;
+    }
   }
 
   if (phase == "scroll") {

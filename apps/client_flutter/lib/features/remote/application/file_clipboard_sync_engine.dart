@@ -14,47 +14,83 @@ Map<String, dynamic> fileClipboardAppliedMessage(String transferId) => {
 typedef FileClipboardPublisher = Future<String> Function(List<String> paths);
 typedef FileClipboardCanceller = Future<void> Function(String transferId);
 
-/// Owns one immutable local clipboard generation at a time.
+/// Owns one immutable file clipboard offer at a time.
 ///
-/// Clipboard change notifications and an explicit paste can arrive while the
-/// transfer engine is still hashing the selected files. Keeping the revision,
-/// paths and transfer future in one object prevents a new clipboard signature
-/// from being paired with the previous generation's transfer id.
-class FileClipboardPublishCoordinator {
-  FileClipboardPublishCoordinator({
+/// Copying files only arms an offer. No hashing or network transfer begins
+/// until [materialize] is called by an explicit remote paste action. A new
+/// clipboard revision revokes the previous offer and cancels a preparation
+/// which has not yet been committed to the destination clipboard.
+class FileClipboardOfferBroker {
+  FileClipboardOfferBroker({
     required this.publisher,
     required this.canceller,
+    this.offerLifetime = const Duration(minutes: 10),
   });
 
   final FileClipboardPublisher publisher;
   final FileClipboardCanceller canceller;
-  _FileClipboardPublishGeneration? _current;
+  final Duration offerLifetime;
+  _FileClipboardOffer? _current;
   int _nextEpoch = 0;
 
-  int? get currentRevision => _current?.revision;
-  String? get currentTransferId => _current?.transferId;
+  int? get currentRevision {
+    _expireIfNeeded();
+    return _current?.revision;
+  }
 
-  Future<String?> publish(ClipboardSnapshot snapshot) {
+  String? get currentTransferId => _current?.transferId;
+  bool get hasOffer {
+    _expireIfNeeded();
+    return _current != null;
+  }
+
+  void arm(ClipboardSnapshot snapshot) {
     if (!snapshot.hasFiles) {
       unawaited(invalidate());
-      return Future<String?>.value();
+      return;
     }
+    _expireIfNeeded();
     final current = _current;
     if (current != null &&
         current.revision == snapshot.revision &&
         _samePaths(current.paths, snapshot.filePaths)) {
-      return current.result;
+      return;
     }
-
-    final generation = _FileClipboardPublishGeneration(
+    final offer = _FileClipboardOffer(
       epoch: ++_nextEpoch,
       revision: snapshot.revision,
       paths: List<String>.unmodifiable(snapshot.filePaths),
+      expiresAt: DateTime.now().add(offerLifetime),
     );
-    _current = generation;
+    _current = offer;
     if (current != null) unawaited(_cancelWhenReady(current));
-    generation.result = _start(generation);
-    return generation.result;
+  }
+
+  Future<String?> materialize(ClipboardSnapshot snapshot) {
+    if (!snapshot.hasFiles) {
+      unawaited(invalidate());
+      return Future<String?>.value();
+    }
+    _expireIfNeeded();
+    final current = _current;
+    if (current == null ||
+        current.revision != snapshot.revision ||
+        !_samePaths(current.paths, snapshot.filePaths)) {
+      return Future<String?>.value();
+    }
+    return current.result ??= _start(current);
+  }
+
+  void _expireIfNeeded() {
+    final current = _current;
+    if (current == null ||
+        current.result != null ||
+        DateTime.now().isBefore(current.expiresAt)) {
+      return;
+    }
+    _current = null;
+    _nextEpoch += 1;
+    unawaited(_cancelWhenReady(current));
   }
 
   Future<void> invalidate() async {
@@ -79,7 +115,7 @@ class FileClipboardPublishCoordinator {
     _nextEpoch += 1;
   }
 
-  Future<String?> _start(_FileClipboardPublishGeneration generation) async {
+  Future<String?> _start(_FileClipboardOffer generation) async {
     try {
       final transferId = await publisher(generation.paths);
       generation.transferId = transferId;
@@ -94,11 +130,11 @@ class FileClipboardPublishCoordinator {
     }
   }
 
-  Future<void> _cancelWhenReady(
-    _FileClipboardPublishGeneration generation,
-  ) async {
+  Future<void> _cancelWhenReady(_FileClipboardOffer generation) async {
+    final result = generation.result;
+    if (result == null) return;
     try {
-      final transferId = await generation.result;
+      final transferId = await result;
       if (transferId != null) await _safeCancel(transferId);
     } catch (_) {
       // A failed preparation has no live transfer to retire.
@@ -122,17 +158,19 @@ class FileClipboardPublishCoordinator {
   }
 }
 
-class _FileClipboardPublishGeneration {
-  _FileClipboardPublishGeneration({
+class _FileClipboardOffer {
+  _FileClipboardOffer({
     required this.epoch,
     required this.revision,
     required this.paths,
+    required this.expiresAt,
   });
 
   final int epoch;
   final int revision;
   final List<String> paths;
-  late final Future<String?> result;
+  final DateTime expiresAt;
+  Future<String?>? result;
   String? transferId;
 }
 

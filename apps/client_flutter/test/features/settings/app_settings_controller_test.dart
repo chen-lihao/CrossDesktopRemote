@@ -35,6 +35,7 @@ void main() {
         controller.signalingServerUrl,
         'ws://192.168.1.10:8080/ws/signaling',
       );
+      expect(controller.signalingServerProfile?.name, '自定义服务器');
       expect(controller.sessionHistoryLimit, 10);
     },
   );

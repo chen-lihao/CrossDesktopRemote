@@ -242,7 +242,7 @@ Mac/Windows 启动并连接信令服务后会自动上线并生成连接码；�
 - 同一输入代理已在 macOS 控制端启用，使系统拼音在本地完成组合和选词后直接向 Windows 被控端发送已提交 Unicode；无需打开“全局键盘”文本框。
 - 此路径只在 Windows/macOS 桌面端启用，不改变 iPad 的 UIKit IME、双键盘、触控和移动端全屏实现。
 - 桌面物理鼠标按系统双击时间和范围识别第二次点击，向 Mac 传递原生 `clickCount=2`；Windows 被控端按真实两组 down/up 让系统判定双击，不再额外注入一次点击。
-- 键盘、修饰键和指针拥有独立状态域：焦点/IME变化只复位键盘，Pointer取消只复位鼠标按钮，断线才执行全量释放；Windows `Ctrl` 与 Apple `Command` 会按被控平台语义映射，可配合鼠标拖选文字和多选文件。
+- 键盘、修饰键和指针拥有独立状态域：修饰键、按键、鼠标down/up和reset通过可靠FIFO执行，非可靠motion不再携带或修改修饰键；焦点/IME变化只复位键盘，Pointer取消只复位鼠标按钮，断线才执行全量释放。Windows `Ctrl` 与 Apple `Command` 按被控平台语义映射，可配合鼠标拖选文字和多选文件。
 
 物理设备验收步骤见 [Windows 控制 Mac 验收](./docs/Windows控制Mac验收.md)。
 
@@ -254,6 +254,7 @@ Mac/Windows 启动并连接信令服务后会自动上线并生成连接码；�
 - 焦点变化、指针取消和断开分别使用键盘、指针、全量复位；Runner退出仍释放全部合成输入，避免粘键，同时不会因IME焦点切换打断拖选。
 - UIPI限制普通权限进程控制管理员/UAC安全桌面；应用会提示限制，不通过长期管理员运行规避。
 - Windows 与 macOS 使用相同的双会话页面模型：应用启动后常驻被控信令注册，同时保留独立的控制端连接入口。Runner 已使用 Windows 10+ DNS Service Discovery API 发布和浏览`_cdrremote._tcp.local`。发现对象是正在等待连接的被控设备，不是独立信令服务器目录；设备 TXT 会声明双方应使用的信令地址，用户点击设备后显式采用，且永久保留手动地址后备。多显示器事务仍待单屏实机闭环后启用。
+- 信令服务器是跨角色持久配置，可在设置页、控制端和空闲被控端填写本机、局域网或公网 `ws://`/`wss://` 地址；“测试”执行真实 WebSocket 握手。活动会话不会被配置编辑静默迁移，空闲被控注册在校验后应用新地址。
 - macOS 和 Windows 桌面端不再选择单一角色：局域网浏览持续运行，被控信令注册进入等待后同时发布自身，主动控制使用另一条独立会话。列表按稳定设备 ID 排除本机并去重；Windows 空列表会显示浏览/发布/解析状态和最近 DNS-SD 错误，便于区分应用未启动、Windows 专用网络/防火墙和网络禁用 mDNS 三类情况。
 - 连接信令服务即进入“上线等待连接”，只注册信令和局域网服务，不启动屏幕采集。等待期间可手动或按租约自动轮换连接码；连接成功后当前单次码锁定，断开后控制端清空旧码、被控端自动生成新码，避免误用已消费凭据。
 - Windows Runner 在最小化时保留最后一个有效 Flutter Surface，恢复、最大化、改尺寸和显示配置变化后立即加延迟双重重绘；若 650ms 后 RTP 编码帧仍未推进，则在同一 Sender 上热替换当前显示器采集轨道，保持信令、连接码和 DataChannel 不变。
@@ -326,7 +327,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；桌面DNS-SD、统一跨平台切屏事务、非阻塞显示几何和输入路径；macOS/Windows文本与文件剪贴板；Mac/Windows/iPad显式文件通道和传输中心；iPad用户触发式粘贴、文件安全暂存、接收后导出/分享；文件剪贴板后台物化、原子代次、会话退休和受控临时目录租约；Windows `CF_HDROP` delayed rendering、macOS已物化文件URL、粘贴进度与完成后继续粘贴；暂停/恢复/取消、`.cdrpart`原子落盘与会话内续传；`analyze`零告警、184项测试通过且1项按设计跳过，macOS/iOS Debug构建成功 | Windows MSVC构建、Windows/iPad各30次主副屏往返和Mac/Windows/iPad双机文件/剪贴板物理验收；20 GB、磁盘满、输入P95与应用重启后续传 |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；桌面DNS-SD、统一跨平台切屏事务、非阻塞显示几何和输入路径；可靠输入FIFO与无状态motion；macOS/Windows文本与文件剪贴板；Mac/Windows/iPad显式文件通道和传输中心；文件复制Offer/Paste门禁、受控临时目录租约；持久化信令服务器配置与WebSocket握手检查；macOS录屏/输入独立权限矩阵；暂停/恢复/取消、`.cdrpart`原子落盘与会话内续传；`analyze`零告警、200项测试通过且1项按设计跳过，macOS/iOS Debug构建成功 | Windows MSVC构建、Windows/iPad各30次主副屏往返和Mac/Windows/iPad双机文件/剪贴板物理验收；20 GB、磁盘满、输入P95与应用重启后续传 |
 | Rust | `fmt`、Clippy；27个workspace单测；传输状态机、限额、Manifest/路径、恢复位图、SHA-256、WebRTC背压抽象与任务C ABI | 桌面MVP磁盘数据泵仍在Dart应用服务；下沉Rust/原生层和发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、lease/generation 原子轮换、邀请/来源两级限流、`retryAfter`；16 项测试通过 | 可信身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1基础消息、剪贴板/文件传输协议、显式能力协商和旧客户端降级；Buf lint、Java/Rust/Dart生成和编译 | 平台互操作、模糊测试和breaking基线待增加 |

@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
+import 'package:cross_desktop_remote/core/signaling/signaling_server_profile.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
 import 'package:flutter/foundation.dart';
@@ -42,15 +43,25 @@ class AppSettingsController extends ChangeNotifier {
   RemoteKeyboardMode keyboardMode = RemoteKeyboardMode.system;
   RemoteTextInputMode textInputMode = RemoteTextInputMode.localIme;
   ClipboardSyncMode clipboardSyncMode = ClipboardSyncMode.bidirectional;
-  String signalingServerUrl = Platform.isMacOS
-      ? 'ws://127.0.0.1:8080/ws/signaling'
-      : '';
+  String signalingServerUrl = Platform.isIOS
+      ? ''
+      : SignalingServerProfile.localDevelopment.url;
   bool lanDiscoveryEnabled = true;
   bool sessionHistoryEnabled = true;
   int sessionHistoryLimit = 50;
   bool showAdvancedNetwork = false;
   bool incomingAccessEnabled = true;
   bool loaded = false;
+
+  SignalingServerProfile? get signalingServerProfile {
+    if (signalingServerUrl.isEmpty) return null;
+    try {
+      return SignalingServerProfile.forUrl(signalingServerUrl);
+    } on FormatException {
+      // The device-page field persists its draft while the user is typing.
+      return null;
+    }
+  }
 
   RemoteInputSettings get inputSettings => RemoteInputSettings(
     pointerMode: pointerMode,

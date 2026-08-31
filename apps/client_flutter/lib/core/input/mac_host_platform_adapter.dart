@@ -15,6 +15,7 @@ class MacHostPlatformAdapter implements HostPlatformAdapter {
     captureFrameReadiness: true,
     colorDiagnostics: true,
     permissionSettings: true,
+    capturePermissionSettings: true,
   );
 
   @override
@@ -38,16 +39,34 @@ class MacHostPlatformAdapter implements HostPlatformAdapter {
 
   @override
   Future<HostPermissionState> checkPermissions() async {
-    return HostPermissionState(inputGranted: await bridge.checkInputAccess());
+    final input = await bridge.checkInputAccess();
+    final capture = await bridge.checkScreenCaptureAccess();
+    return HostPermissionState(
+      inputGranted: input,
+      screenCaptureGranted: capture,
+      limitation: input ? null : '尚未允许辅助功能/输入监控权限',
+      screenCaptureLimitation: capture ? null : '尚未允许屏幕与系统音频录制权限',
+    );
   }
 
   @override
   Future<HostPermissionState> requestPermissions() async {
-    return HostPermissionState(inputGranted: await bridge.requestInputAccess());
+    await bridge.requestInputAccess();
+    return checkPermissions();
   }
 
   @override
   Future<bool> openPermissionSettings() => bridge.openInputSettings();
+
+  @override
+  Future<HostPermissionState> requestScreenCapturePermission() async {
+    await bridge.requestScreenCaptureAccess();
+    return checkPermissions();
+  }
+
+  @override
+  Future<bool> openScreenCapturePermissionSettings() =>
+      bridge.openScreenCaptureSettings();
 
   @override
   Future<void> sendPointer(HostPointerEvent event) {

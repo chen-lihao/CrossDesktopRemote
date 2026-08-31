@@ -121,7 +121,7 @@ class WindowsInputBridge implements WindowsInputBridgeApi {
       'movementY': event.movementY,
       'deltaX': event.deltaX,
       'deltaY': event.deltaY,
-      'modifiers': event.modifiers,
+      'modifiers': ?event.modifiers,
     });
   }
 

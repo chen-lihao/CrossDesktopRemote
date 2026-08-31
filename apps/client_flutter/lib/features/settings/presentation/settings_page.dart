@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
+import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
+import 'package:cross_desktop_remote/core/signaling/signaling_server_profile.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
@@ -25,6 +27,78 @@ class SettingsPage extends StatelessWidget {
           session.state != RemoteSessionState.streaming
       ? hostSession!
       : session;
+
+  Future<void> _editSignalingServer(
+    BuildContext context,
+    AppSettingsController settings,
+  ) async {
+    final controller = TextEditingController(text: settings.signalingServerUrl);
+    String? error;
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('信令服务器'),
+          content: SizedBox(
+            width: 520,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                TextField(
+                  key: const ValueKey('settingsSignalingServerField'),
+                  controller: controller,
+                  autofocus: true,
+                  autocorrect: false,
+                  keyboardType: TextInputType.url,
+                  decoration: InputDecoration(
+                    labelText: 'WebSocket 地址',
+                    hintText: 'wss://example.com/ws/signaling',
+                    errorText: error,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () {
+                    controller.text =
+                        SignalingServerProfile.localDevelopment.url;
+                    setState(() => error = null);
+                  },
+                  icon: const Icon(Icons.computer_outlined),
+                  label: const Text('使用本机开发服务'),
+                ),
+                const SizedBox(height: 8),
+                const Text('公网部署应使用 wss://；正在进行的远程会话不会被切换。'),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () {
+                try {
+                  Navigator.pop(
+                    context,
+                    normalizeSignalingServerUrl(controller.text),
+                  );
+                } on FormatException catch (exception) {
+                  setState(() => error = exception.message);
+                }
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+    if (selected != null) {
+      await settings.setSignalingServerUrl(selected);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -249,6 +323,8 @@ class SettingsPage extends StatelessWidget {
                               : settings.signalingServerUrl,
                         ),
                         leading: const Icon(Icons.dns_outlined),
+                        trailing: const Icon(Icons.edit_outlined),
+                        onTap: () => _editSignalingServer(context, settings),
                       ),
                       SwitchListTile(
                         title: const Text('局域网设备发现'),
@@ -332,6 +408,33 @@ class SettingsPage extends StatelessWidget {
                                 : hostSession!.requestHostInputPermission,
                             child: Text(
                               hostSession!.accessibilityGranted == true
+                                  ? '重新检查'
+                                  : '前往设置',
+                            ),
+                          ),
+                        ),
+                      if (hostSession != null)
+                        ListTile(
+                          leading: Icon(
+                            hostSession!.screenCaptureGranted
+                                ? Icons.check_circle_outline
+                                : Icons.warning_amber_outlined,
+                          ),
+                          title: const Text('屏幕录制权限'),
+                          subtitle: Text(
+                            hostSession!.screenCaptureGranted
+                                ? '屏幕采集权限已就绪'
+                                : '尚未允许采集被控端屏幕',
+                          ),
+                          trailing: TextButton(
+                            onPressed: hostSession!.screenCaptureGranted
+                                ? () => hostSession!.refreshHostPermissions(
+                                    announce: true,
+                                  )
+                                : hostSession!
+                                      .requestHostScreenCapturePermission,
+                            child: Text(
+                              hostSession!.screenCaptureGranted
                                   ? '重新检查'
                                   : '前往设置',
                             ),

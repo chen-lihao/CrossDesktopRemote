@@ -260,25 +260,15 @@ class _DevicesPageState extends State<DevicesPage> {
     });
     final stopwatch = Stopwatch()..start();
     try {
-      final endpoint = Uri.parse(_serverController.text.trim());
-      if (!const {'ws', 'wss'}.contains(endpoint.scheme) ||
-          endpoint.host.isEmpty) {
-        throw const FormatException('信令地址必须使用 ws:// 或 wss://');
-      }
-      final port = endpoint.hasPort
-          ? endpoint.port
-          : endpoint.scheme == 'wss'
-          ? 443
-          : 80;
-      final socket = await Socket.connect(
-        endpoint.host,
-        port,
-        timeout: const Duration(seconds: 4),
-      );
-      socket.destroy();
+      final normalized = normalizeSignalingServerUrl(_serverController.text);
+      final socket = await WebSocket.connect(
+        buildSignalingProbeUri(normalized).toString(),
+      ).timeout(const Duration(seconds: 5));
+      await socket.close(WebSocketStatus.normalClosure, 'probe-complete');
       stopwatch.stop();
-      _serverTestStatus = '信令服务器网络可达 · ${stopwatch.elapsedMilliseconds} ms';
-      await widget.settings.setSignalingServerUrl(endpoint.toString());
+      _serverTestStatus =
+          'WebSocket 握手成功 · ${stopwatch.elapsedMilliseconds} ms';
+      await widget.settings.setSignalingServerUrl(normalized);
       AppMessenger.show(_serverTestStatus!, level: AppMessageLevel.success);
     } catch (error) {
       _serverTestStatus = '信令服务器不可达：$error';
@@ -854,24 +844,26 @@ class _ConnectionCard extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 16),
-        ListTile(
-          contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.dns_outlined),
-          title: const Text('信令服务器'),
-          subtitle: SelectableText(
-            serverController.text.trim().isEmpty
-                ? '尚未配置'
-                : serverController.text.trim(),
-          ),
-          trailing: IconButton(
-            tooltip: '测试信令服务器',
-            onPressed: serverTesting ? null : onTestServer,
-            icon: serverTesting
-                ? const SizedBox.square(
-                    dimension: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.network_ping),
+        TextField(
+          key: const ValueKey('hostSignalingServerField'),
+          controller: serverController,
+          enabled: canRegisterHost,
+          onChanged: onServerChanged,
+          autocorrect: false,
+          keyboardType: TextInputType.url,
+          decoration: InputDecoration(
+            labelText: '信令服务器',
+            prefixIcon: const Icon(Icons.dns_outlined),
+            suffixIcon: IconButton(
+              tooltip: '测试 WebSocket 信令服务',
+              onPressed: serverTesting ? null : onTestServer,
+              icon: serverTesting
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.network_ping),
+            ),
           ),
         ),
         const SizedBox(height: 6),
@@ -1073,6 +1065,18 @@ class _ConnectionCard extends StatelessWidget {
             label: Text(
               session.accessibilityGranted == true ? '输入权限已就绪' : '设置输入权限',
             ),
+          ),
+        if (role == RemoteRole.host)
+          OutlinedButton.icon(
+            onPressed: session.screenCaptureGranted
+                ? () => session.refreshHostPermissions(announce: true)
+                : session.requestHostScreenCapturePermission,
+            icon: Icon(
+              session.screenCaptureGranted
+                  ? Icons.check_circle_outline
+                  : Icons.screen_share_outlined,
+            ),
+            label: Text(session.screenCaptureGranted ? '录屏权限已就绪' : '设置录屏权限'),
           ),
         if (role == RemoteRole.host && hostHasPeer)
           FilledButton.tonalIcon(

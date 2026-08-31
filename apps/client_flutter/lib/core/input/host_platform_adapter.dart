@@ -9,29 +9,44 @@ class HostPlatformCapabilities {
     required this.captureFrameReadiness,
     required this.colorDiagnostics,
     required this.permissionSettings,
+    required this.capturePermissionSettings,
   });
 
   const HostPlatformCapabilities.unsupported()
     : canHostDesktop = false,
       captureFrameReadiness = false,
       colorDiagnostics = false,
-      permissionSettings = false;
+      permissionSettings = false,
+      capturePermissionSettings = false;
 
   final bool canHostDesktop;
   final bool captureFrameReadiness;
   final bool colorDiagnostics;
   final bool permissionSettings;
+  final bool capturePermissionSettings;
 }
 
 @immutable
 class HostPermissionState {
-  const HostPermissionState({required this.inputGranted, this.limitation});
+  const HostPermissionState({
+    required this.inputGranted,
+    required this.screenCaptureGranted,
+    this.limitation,
+    this.screenCaptureLimitation,
+  });
 
   const HostPermissionState.unavailable({String? limitation})
-    : this(inputGranted: false, limitation: limitation);
+    : this(
+        inputGranted: false,
+        screenCaptureGranted: false,
+        limitation: limitation,
+        screenCaptureLimitation: limitation,
+      );
 
   final bool inputGranted;
+  final bool screenCaptureGranted;
   final String? limitation;
+  final String? screenCaptureLimitation;
 }
 
 @immutable
@@ -71,7 +86,7 @@ class HostPointerEvent {
     this.movementY = 0,
     this.deltaX = 0,
     this.deltaY = 0,
-    this.modifiers = const [],
+    this.modifiers,
   });
 
   final String phase;
@@ -85,7 +100,11 @@ class HostPointerEvent {
   final double movementY;
   final double deltaX;
   final double deltaY;
-  final List<String> modifiers;
+
+  /// Null means this packet is stateless motion and must not reconcile the
+  /// host keyboard modifiers. A non-null list is an authoritative snapshot on
+  /// the reliable input channel.
+  final List<String>? modifiers;
 }
 
 @immutable
@@ -197,6 +216,10 @@ abstract interface class HostPlatformAdapter {
   Future<HostPermissionState> requestPermissions();
 
   Future<bool> openPermissionSettings();
+
+  Future<HostPermissionState> requestScreenCapturePermission();
+
+  Future<bool> openScreenCapturePermissionSettings();
 
   Future<void> sendPointer(HostPointerEvent event);
 

@@ -26,6 +26,13 @@ class UnsupportedHostPlatformAdapter implements HostPlatformAdapter {
   Future<bool> openPermissionSettings() async => false;
 
   @override
+  Future<HostPermissionState> requestScreenCapturePermission() =>
+      checkPermissions();
+
+  @override
+  Future<bool> openScreenCapturePermissionSettings() async => false;
+
+  @override
   Future<void> sendPointer(HostPointerEvent event) async {
     throw _unsupported();
   }

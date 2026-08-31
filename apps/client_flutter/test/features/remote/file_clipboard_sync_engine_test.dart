@@ -20,7 +20,7 @@ void main() {
       final second = Completer<String>();
       var publishes = 0;
       final cancelled = <String>[];
-      final coordinator = FileClipboardPublishCoordinator(
+      final coordinator = FileClipboardOfferBroker(
         publisher: (paths) {
           publishes += 1;
           return publishes == 1 ? Future.value('transfer-a') : second.future;
@@ -28,9 +28,13 @@ void main() {
         canceller: (id) async => cancelled.add(id),
       );
 
-      expect(await coordinator.publish(files(1, ['/tmp/a.txt'])), 'transfer-a');
-      final background = coordinator.publish(files(2, ['/tmp/b.txt']));
-      final explicitPaste = coordinator.publish(files(2, ['/tmp/b.txt']));
+      final firstSnapshot = files(1, ['/tmp/a.txt']);
+      coordinator.arm(firstSnapshot);
+      expect(await coordinator.materialize(firstSnapshot), 'transfer-a');
+      final secondSnapshot = files(2, ['/tmp/b.txt']);
+      coordinator.arm(secondSnapshot);
+      final background = coordinator.materialize(secondSnapshot);
+      final explicitPaste = coordinator.materialize(secondSnapshot);
       var completedEarly = false;
       explicitPaste.then((_) => completedEarly = true);
       await Future<void>.delayed(Duration.zero);
@@ -49,13 +53,17 @@ void main() {
     final second = Completer<String>();
     final cancelled = <String>[];
     var publishes = 0;
-    final coordinator = FileClipboardPublishCoordinator(
+    final coordinator = FileClipboardOfferBroker(
       publisher: (_) => ++publishes == 1 ? first.future : second.future,
       canceller: (id) async => cancelled.add(id),
     );
 
-    final stale = coordinator.publish(files(10, ['/tmp/a.txt']));
-    final current = coordinator.publish(files(11, ['/tmp/b.txt']));
+    final firstSnapshot = files(10, ['/tmp/a.txt']);
+    coordinator.arm(firstSnapshot);
+    final stale = coordinator.materialize(firstSnapshot);
+    final secondSnapshot = files(11, ['/tmp/b.txt']);
+    coordinator.arm(secondSnapshot);
+    final current = coordinator.materialize(secondSnapshot);
     second.complete('transfer-b');
     expect(await current, 'transfer-b');
     first.complete('transfer-a');
@@ -68,19 +76,17 @@ void main() {
     'copying the same path with a new revision creates a new task',
     () async {
       var publishes = 0;
-      final coordinator = FileClipboardPublishCoordinator(
+      final coordinator = FileClipboardOfferBroker(
         publisher: (_) async => 'transfer-${++publishes}',
         canceller: (_) async {},
       );
 
-      expect(
-        await coordinator.publish(files(20, ['/tmp/a.txt'])),
-        'transfer-1',
-      );
-      expect(
-        await coordinator.publish(files(21, ['/tmp/a.txt'])),
-        'transfer-2',
-      );
+      final firstSnapshot = files(20, ['/tmp/a.txt']);
+      coordinator.arm(firstSnapshot);
+      expect(await coordinator.materialize(firstSnapshot), 'transfer-1');
+      final secondSnapshot = files(21, ['/tmp/a.txt']);
+      coordinator.arm(secondSnapshot);
+      expect(await coordinator.materialize(secondSnapshot), 'transfer-2');
       expect(publishes, 2);
     },
   );
@@ -90,21 +96,86 @@ void main() {
     () async {
       final cancelled = <String>[];
       var publishes = 0;
-      final coordinator = FileClipboardPublishCoordinator(
+      final coordinator = FileClipboardOfferBroker(
         publisher: (_) async => 'transfer-${++publishes}',
         canceller: (id) async => cancelled.add(id),
       );
 
-      final transferId = await coordinator.publish(files(30, ['/tmp/a.txt']));
+      final snapshot = files(30, ['/tmp/a.txt']);
+      coordinator.arm(snapshot);
+      final transferId = await coordinator.materialize(snapshot);
       coordinator.releaseTransfer(transferId!);
       expect(cancelled, isEmpty);
       expect(coordinator.currentTransferId, isNull);
-      expect(
-        await coordinator.publish(files(30, ['/tmp/a.txt'])),
-        'transfer-2',
-      );
+      coordinator.arm(snapshot);
+      expect(await coordinator.materialize(snapshot), 'transfer-2');
     },
   );
+
+  test('copy arms an immutable offer without starting transfer', () async {
+    var publishes = 0;
+    final coordinator = FileClipboardOfferBroker(
+      publisher: (_) async => 'transfer-${++publishes}',
+      canceller: (_) async {},
+    );
+    final snapshot = files(40, ['/tmp/a.txt']);
+
+    coordinator.arm(snapshot);
+
+    expect(coordinator.hasOffer, isTrue);
+    expect(coordinator.currentRevision, 40);
+    expect(coordinator.currentTransferId, isNull);
+    expect(publishes, 0);
+    expect(await coordinator.materialize(snapshot), 'transfer-1');
+    expect(publishes, 1);
+  });
+
+  test('text clipboard revision revokes an unmaterialized offer', () async {
+    var publishes = 0;
+    final coordinator = FileClipboardOfferBroker(
+      publisher: (_) async => 'transfer-${++publishes}',
+      canceller: (_) async {},
+    );
+    coordinator.arm(files(50, ['/tmp/a.txt']));
+
+    await coordinator.invalidate();
+
+    expect(coordinator.hasOffer, isFalse);
+    expect(publishes, 0);
+  });
+
+  test('paste cannot resurrect an expired offer', () async {
+    var publishes = 0;
+    final coordinator = FileClipboardOfferBroker(
+      publisher: (_) async => 'transfer-${++publishes}',
+      canceller: (_) async {},
+      offerLifetime: Duration.zero,
+    );
+    final snapshot = files(60, ['/tmp/a.txt']);
+    coordinator.arm(snapshot);
+
+    expect(await coordinator.materialize(snapshot), isNull);
+    expect(coordinator.hasOffer, isFalse);
+    expect(publishes, 0);
+  });
+
+  test('offer lease no longer expires after paste starts transfer', () async {
+    final transfer = Completer<String>();
+    final coordinator = FileClipboardOfferBroker(
+      publisher: (_) => transfer.future,
+      canceller: (_) async {},
+      offerLifetime: const Duration(milliseconds: 10),
+    );
+    final snapshot = files(61, ['/tmp/large.bin']);
+    coordinator.arm(snapshot);
+    final result = coordinator.materialize(snapshot);
+
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(coordinator.hasOffer, isTrue);
+    transfer.complete('transfer-large');
+    expect(await result, 'transfer-large');
+  });
 
   test(
     'clipboard temp lease is cleaned only after ownership changes',

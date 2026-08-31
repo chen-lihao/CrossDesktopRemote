@@ -16,6 +16,7 @@ class WindowsHostPlatformAdapter implements HostPlatformAdapter {
     captureFrameReadiness: false,
     colorDiagnostics: false,
     permissionSettings: false,
+    capturePermissionSettings: false,
   );
 
   @override
@@ -32,6 +33,7 @@ class WindowsHostPlatformAdapter implements HostPlatformAdapter {
       }
       return HostPermissionState(
         inputGranted: true,
+        screenCaptureGranted: true,
         limitation: native.limitation,
       );
     } on MissingPluginException {
@@ -60,6 +62,13 @@ class WindowsHostPlatformAdapter implements HostPlatformAdapter {
 
   @override
   Future<bool> openPermissionSettings() async => false;
+
+  @override
+  Future<HostPermissionState> requestScreenCapturePermission() =>
+      checkPermissions();
+
+  @override
+  Future<bool> openScreenCapturePermissionSettings() async => false;
 
   @override
   Future<void> sendPointer(HostPointerEvent event) {
