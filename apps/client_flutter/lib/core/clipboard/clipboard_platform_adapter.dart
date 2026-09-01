@@ -50,7 +50,6 @@ abstract interface class ClipboardPlatformAdapter {
   Stream<ClipboardSnapshot> get changes;
   Future<ClipboardSnapshot> readSnapshot();
   Future<ClipboardSnapshot> writeText(String text);
-  Future<ClipboardSnapshot> writeFiles(List<String> paths);
 }
 
 class MethodChannelClipboardPlatformAdapter
@@ -71,6 +70,10 @@ class MethodChannelClipboardPlatformAdapter
 
   final MethodChannel _methodChannel;
   final EventChannel _eventChannel;
+  late final Stream<ClipboardSnapshot> _changes = _eventChannel
+      .receiveBroadcastStream()
+      .map(ClipboardSnapshot.fromMap)
+      .asBroadcastStream();
 
   @override
   bool get supported => Platform.isMacOS || Platform.isWindows;
@@ -82,8 +85,7 @@ class MethodChannelClipboardPlatformAdapter
   bool get automaticMonitoringSupported => true;
 
   @override
-  Stream<ClipboardSnapshot> get changes =>
-      _eventChannel.receiveBroadcastStream().map(ClipboardSnapshot.fromMap);
+  Stream<ClipboardSnapshot> get changes => _changes;
 
   @override
   Future<ClipboardSnapshot> readSnapshot() async {
@@ -96,16 +98,6 @@ class MethodChannelClipboardPlatformAdapter
   Future<ClipboardSnapshot> writeText(String text) async {
     return ClipboardSnapshot.fromMap(
       await _methodChannel.invokeMethod<Object?>('writeText', {'text': text}),
-    );
-  }
-
-  @override
-  Future<ClipboardSnapshot> writeFiles(List<String> paths) async {
-    if (paths.isEmpty) throw ArgumentError.value(paths, 'paths', '文件列表为空');
-    return ClipboardSnapshot.fromMap(
-      await _methodChannel.invokeMethod<Object?>('writeFiles', {
-        'paths': paths,
-      }),
     );
   }
 }
@@ -151,11 +143,6 @@ class UserInitiatedClipboardPlatformAdapter
     return _snapshot(text);
   }
 
-  @override
-  Future<ClipboardSnapshot> writeFiles(List<String> paths) {
-    throw UnsupportedError('iPad 暂不支持系统文件剪贴板');
-  }
-
   ClipboardSnapshot _snapshot(String? text) {
     final bytes = text == null ? 0 : utf8.encode(text).length;
     return ClipboardSnapshot(
@@ -198,17 +185,15 @@ class UnsupportedClipboardPlatformAdapter implements ClipboardPlatformAdapter {
   Future<ClipboardSnapshot> writeText(String text) {
     throw UnsupportedError('Clipboard synchronization is unavailable');
   }
-
-  @override
-  Future<ClipboardSnapshot> writeFiles(List<String> paths) {
-    throw UnsupportedError('File clipboard synchronization is unavailable');
-  }
 }
 
 ClipboardPlatformAdapter createClipboardPlatformAdapter() {
   if (Platform.isMacOS || Platform.isWindows) {
-    return MethodChannelClipboardPlatformAdapter();
+    return _sharedDesktopClipboardAdapter ??=
+        MethodChannelClipboardPlatformAdapter();
   }
   if (Platform.isIOS) return UserInitiatedClipboardPlatformAdapter();
   return const UnsupportedClipboardPlatformAdapter();
 }
+
+ClipboardPlatformAdapter? _sharedDesktopClipboardAdapter;

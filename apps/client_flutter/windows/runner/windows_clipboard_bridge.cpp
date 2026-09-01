@@ -101,91 +101,13 @@ void WindowsClipboardBridge::HandleMethodCall(
     result->Success(Snapshot());
     return;
   }
-  if (call.method_name() != "writeText" &&
-      call.method_name() != "writeFiles") {
+  if (call.method_name() != "writeText") {
     result->NotImplemented();
     return;
   }
   const auto* arguments = std::get_if<EncodableMap>(call.arguments());
   if (arguments == nullptr) {
     result->Error("invalid_clipboard_text", "Expected an argument map");
-    return;
-  }
-  if (call.method_name() == "writeFiles") {
-    const auto entry = arguments->find(EncodableValue("paths"));
-    const auto* encoded_paths =
-        entry == arguments->end()
-            ? nullptr
-            : std::get_if<flutter::EncodableList>(&entry->second);
-    if (encoded_paths == nullptr || encoded_paths->empty() ||
-        encoded_paths->size() > kMaximumClipboardFiles) {
-      result->Error("invalid_clipboard_files",
-                    "Expected 1-1024 UTF-8 file paths");
-      return;
-    }
-    std::vector<std::wstring> paths;
-    for (const auto& encoded : *encoded_paths) {
-      const auto* utf8_path = std::get_if<std::string>(&encoded);
-      const std::wstring path =
-          utf8_path == nullptr ? std::wstring() : WideFromUtf8(*utf8_path);
-      if (path.empty() ||
-          GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        result->Error("invalid_clipboard_files",
-                      "A clipboard file no longer exists");
-        return;
-      }
-      paths.push_back(path);
-    }
-    HGLOBAL file_drop = BuildFileDrop(paths);
-    HGLOBAL preferred_effect = BuildPreferredDropEffect();
-    if (file_drop == nullptr || preferred_effect == nullptr) {
-      if (file_drop != nullptr) GlobalFree(file_drop);
-      if (preferred_effect != nullptr) GlobalFree(preferred_effect);
-      result->Error("clipboard_write_failed",
-                    "Unable to allocate Windows file clipboard data");
-      return;
-    }
-    if (!OpenClipboardWithRetry()) {
-      GlobalFree(file_drop);
-      GlobalFree(preferred_effect);
-      result->Error("clipboard_busy", "The Windows clipboard is busy");
-      return;
-    }
-    if (!EmptyClipboard()) {
-      GlobalFree(file_drop);
-      GlobalFree(preferred_effect);
-      CloseClipboard();
-      result->Error("clipboard_write_failed",
-                    "Unable to take ownership of the Windows clipboard");
-      return;
-    }
-    const UINT preferred_effect_format =
-        RegisterClipboardFormat(CFSTR_PREFERREDDROPEFFECT);
-    if (preferred_effect_format == 0 ||
-        SetClipboardData(preferred_effect_format, preferred_effect) == nullptr) {
-      GlobalFree(file_drop);
-      GlobalFree(preferred_effect);
-      CloseClipboard();
-      result->Error("clipboard_write_failed",
-                    "Unable to publish the preferred file copy operation");
-      return;
-    }
-    preferred_effect = nullptr;
-    if (SetClipboardData(CF_HDROP, file_drop) == nullptr) {
-      GlobalFree(file_drop);
-      CloseClipboard();
-      result->Error("clipboard_write_failed",
-                    "Unable to publish Windows file paths");
-      return;
-    }
-    file_drop = nullptr;
-    CloseClipboard();
-    if (!VerifyFileDrop(paths)) {
-      result->Error("clipboard_write_failed",
-                    "Windows did not commit the materialized file clipboard");
-      return;
-    }
-    result->Success(FileSnapshot(paths, "materialized-cf-hdrop"));
     return;
   }
   const auto entry = arguments->find(EncodableValue("text"));
@@ -296,88 +218,6 @@ EncodableValue WindowsClipboardBridge::Snapshot() {
     value[EncodableValue("text")] = EncodableValue(text);
   }
   return EncodableValue(value);
-}
-
-EncodableValue WindowsClipboardBridge::FileSnapshot(
-    const std::vector<std::wstring>& paths, const char* delivery) {
-  flutter::EncodableList encoded_paths;
-  for (const auto& path : paths) {
-    encoded_paths.emplace_back(Utf8FromWide(path));
-  }
-  return EncodableValue(EncodableMap{
-      {EncodableValue("revision"),
-       EncodableValue(static_cast<int64_t>(GetClipboardSequenceNumber()))},
-      {EncodableValue("hasText"), EncodableValue(false)},
-      {EncodableValue("tooLarge"), EncodableValue(false)},
-      {EncodableValue("utf8Bytes"), EncodableValue(int32_t{0})},
-      {EncodableValue("filePaths"), EncodableValue(encoded_paths)},
-      {EncodableValue("fileDelivery"), EncodableValue(std::string(delivery))},
-  });
-}
-
-HGLOBAL WindowsClipboardBridge::BuildFileDrop(
-    const std::vector<std::wstring>& paths) {
-  size_t characters = 1;
-  for (const auto& path : paths) characters += path.size() + 1;
-  const size_t allocation_size =
-      sizeof(DROPFILES) + characters * sizeof(wchar_t);
-  HGLOBAL memory =
-      GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, allocation_size);
-  if (memory == nullptr) return nullptr;
-  auto* drop = static_cast<DROPFILES*>(GlobalLock(memory));
-  if (drop == nullptr) {
-    GlobalFree(memory);
-    return nullptr;
-  }
-  drop->pFiles = static_cast<DWORD>(sizeof(DROPFILES));
-  drop->fWide = TRUE;
-  auto* destination = reinterpret_cast<wchar_t*>(
-      reinterpret_cast<BYTE*>(drop) + sizeof(DROPFILES));
-  for (const auto& path : paths) {
-    std::memcpy(destination, path.c_str(),
-                (path.size() + 1) * sizeof(wchar_t));
-    destination += path.size() + 1;
-  }
-  *destination = L'\0';
-  GlobalUnlock(memory);
-  return memory;
-}
-
-HGLOBAL WindowsClipboardBridge::BuildPreferredDropEffect() {
-  HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
-  if (memory == nullptr) return nullptr;
-  auto* effect = static_cast<DWORD*>(GlobalLock(memory));
-  if (effect == nullptr) {
-    GlobalFree(memory);
-    return nullptr;
-  }
-  *effect = DROPEFFECT_COPY;
-  GlobalUnlock(memory);
-  return memory;
-}
-
-bool WindowsClipboardBridge::VerifyFileDrop(
-    const std::vector<std::wstring>& paths) {
-  if (!OpenClipboardWithRetry()) return false;
-  const HDROP drop = reinterpret_cast<HDROP>(GetClipboardData(CF_HDROP));
-  bool matches = drop != nullptr &&
-                 DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0) ==
-                     static_cast<UINT>(paths.size());
-  for (UINT index = 0;
-       matches && index < static_cast<UINT>(paths.size()); ++index) {
-    const UINT length = DragQueryFileW(drop, index, nullptr, 0);
-    std::wstring actual(static_cast<size_t>(length) + 1, L'\0');
-    if (DragQueryFileW(drop, index, actual.data(), length + 1) == 0) {
-      matches = false;
-      break;
-    }
-    actual.resize(length);
-    matches = CompareStringOrdinal(actual.c_str(), -1,
-                                   paths[index].c_str(), -1, TRUE) ==
-              CSTR_EQUAL;
-  }
-  CloseClipboard();
-  return matches;
 }
 
 bool WindowsClipboardBridge::OpenClipboardWithRetry() {

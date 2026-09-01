@@ -103,12 +103,23 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
   Future<String> sendFiles(
     List<String> paths, {
     ExplicitFileTransferPurpose purpose = ExplicitFileTransferPurpose.explicit,
+    String? destinationLeaseId,
   }) async {
     if (paths.isEmpty) throw ArgumentError.value(paths, 'paths', '未选择文件');
+    if (destinationLeaseId != null &&
+        (purpose != ExplicitFileTransferPurpose.clipboard ||
+            !_validDestinationLeaseId(destinationLeaseId))) {
+      throw ArgumentError.value(
+        destinationLeaseId,
+        'destinationLeaseId',
+        '目标目录租约无效',
+      );
+    }
     return _prepareAndOffer(
       paths,
       includeDirectories: purpose == ExplicitFileTransferPurpose.clipboard,
       purpose: purpose,
+      destinationLeaseId: destinationLeaseId,
     );
   }
 
@@ -116,12 +127,14 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     [path],
     includeDirectories: true,
     purpose: ExplicitFileTransferPurpose.explicit,
+    destinationLeaseId: null,
   );
 
   Future<String> _prepareAndOffer(
     List<String> paths, {
     required bool includeDirectories,
     required ExplicitFileTransferPurpose purpose,
+    required String? destinationLeaseId,
   }) async {
     if (!transportReady) {
       throw StateError('远程设备尚未就绪或不支持文件传输');
@@ -133,6 +146,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
       state: ExplicitFileTransferState.preparing,
       createdAt: DateTime.now(),
       purpose: purpose,
+      destinationLeaseId: destinationLeaseId,
       message: '正在读取文件信息并计算 SHA-256',
     );
     _tasks[id] = task;
@@ -378,6 +392,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
       entryCount: entryCount,
       totalBytes: totalBytes,
       purpose: ExplicitFileTransferPurpose.fromWire(message['purpose']),
+      destinationLeaseId: _readDestinationLeaseId(message),
     );
   }
 
@@ -421,6 +436,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     if (existing != null) {
       if (existing.direction != ExplicitFileTransferDirection.incoming ||
           existing.purpose != assembly.purpose ||
+          existing.destinationLeaseId != assembly.destinationLeaseId ||
           !_sameManifest(existing, assembly)) {
         await _sendTransferError(existing, '重连后文件清单发生变化');
         return;
@@ -454,10 +470,11 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
       state: ExplicitFileTransferState.awaitingAcceptance,
       createdAt: DateTime.now(),
       purpose: assembly.purpose,
+      destinationLeaseId: assembly.destinationLeaseId,
       entries: List.unmodifiable(assembly.entries),
       totalBytes: assembly.totalBytes,
       message: assembly.purpose == ExplicitFileTransferPurpose.clipboard
-          ? '正在准备文件剪贴板'
+          ? '正在准备活动目录文件粘贴'
           : '请选择接收目录并确认',
     );
     if (assembly.purpose == ExplicitFileTransferPurpose.explicit) {
@@ -817,13 +834,9 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
       task
         ..state = ExplicitFileTransferState.completed
         ..transferredBytes = task.totalBytes
-        ..message = task.isClipboard ? '文件剪贴板缓存已就绪' : '文件传输完成';
+        ..message = task.isClipboard ? '文件已保存到活动目录' : '文件传输完成';
       await _sendCompleted(task);
-      _notice(
-        task.isClipboard
-            ? '文件剪贴板缓存已就绪，粘贴位置由目标应用决定'
-            : '文件已保存到 ${task.destinationRoot}',
-      );
+      _notice('文件已保存到 ${task.destinationRoot}');
     }
     _notify();
   }
@@ -832,13 +845,9 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     if (task.entries.any((entry) => entry.isFile)) return;
     task
       ..state = ExplicitFileTransferState.completed
-      ..message = task.isClipboard ? '文件剪贴板缓存已就绪' : '空目录传输完成';
+      ..message = task.isClipboard ? '文件已保存到活动目录' : '空目录传输完成';
     await _sendCompleted(task);
-    _notice(
-      task.isClipboard
-          ? '文件剪贴板缓存已就绪，粘贴位置由目标应用决定'
-          : '目录已保存到 ${task.destinationRoot}',
-    );
+    _notice('目录已保存到 ${task.destinationRoot}');
   }
 
   Future<void> _finalizeCompletePartials(_MutableTransferTask task) async {
@@ -1077,6 +1086,8 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
       'entryCount': task.entries.length,
       'totalBytes': task.totalBytes,
       'purpose': task.purpose.wireName,
+      if (task.destinationLeaseId != null)
+        'destinationLeaseId': task.destinationLeaseId,
     });
     var sequence = 0;
     var batch = <Map<String, dynamic>>[];
@@ -1311,6 +1322,15 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     return id;
   }
 
+  String? _readDestinationLeaseId(Map<String, dynamic> message) {
+    final value = message['destinationLeaseId'];
+    if (value == null) return null;
+    if (value is! String || !_validDestinationLeaseId(value)) {
+      throw const FormatException('目标目录租约无效');
+    }
+    return value;
+  }
+
   int _readPositiveInt(Object? value, {required bool allowZero}) {
     if (value is! num ||
         value.toInt() != value ||
@@ -1379,6 +1399,9 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
   }
 }
 
+bool _validDestinationLeaseId(String value) =>
+    RegExp(r'^[0-9a-f]{32}$').hasMatch(value);
+
 class _MutableTransferTask {
   _MutableTransferTask({
     required this.id,
@@ -1386,6 +1409,7 @@ class _MutableTransferTask {
     required this.state,
     required this.createdAt,
     this.purpose = ExplicitFileTransferPurpose.explicit,
+    this.destinationLeaseId,
     this.entries = const [],
     this.totalBytes = 0,
     this.message,
@@ -1395,6 +1419,7 @@ class _MutableTransferTask {
   final ExplicitFileTransferDirection direction;
   final DateTime createdAt;
   final ExplicitFileTransferPurpose purpose;
+  final String? destinationLeaseId;
   ExplicitFileTransferState state;
   List<ExplicitFileTransferEntry> entries;
   int totalBytes;
@@ -1417,6 +1442,7 @@ class _MutableTransferTask {
         totalBytes: totalBytes,
         createdAt: createdAt,
         purpose: purpose,
+        destinationLeaseId: destinationLeaseId,
         destinationRoot: destinationRoot,
         message: message,
       );
@@ -1428,12 +1454,14 @@ class _IncomingManifestAssembly {
     required this.entryCount,
     required this.totalBytes,
     required this.purpose,
+    required this.destinationLeaseId,
   });
 
   final String transferId;
   final int entryCount;
   final int totalBytes;
   final ExplicitFileTransferPurpose purpose;
+  final String? destinationLeaseId;
   final List<ExplicitFileTransferEntry> entries = [];
   int nextSequence = 0;
 }

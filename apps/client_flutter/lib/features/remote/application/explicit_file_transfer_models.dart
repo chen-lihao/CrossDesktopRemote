@@ -115,6 +115,7 @@ class ExplicitFileTransferTaskSnapshot {
     required this.totalBytes,
     required this.createdAt,
     this.purpose = ExplicitFileTransferPurpose.explicit,
+    this.destinationLeaseId,
     this.destinationRoot,
     this.message,
   });
@@ -127,6 +128,7 @@ class ExplicitFileTransferTaskSnapshot {
   final int totalBytes;
   final DateTime createdAt;
   final ExplicitFileTransferPurpose purpose;
+  final String? destinationLeaseId;
   final String? destinationRoot;
   final String? message;
 

@@ -30,6 +30,8 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>CrossDesktopRemote 需要访问局域网，以等待控制端并建立远程桌面会话。</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>CrossDesktopRemote 需要读取 Finder 当前目录，以便将远程粘贴文件保存到您按下粘贴时激活的文件夹。</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>

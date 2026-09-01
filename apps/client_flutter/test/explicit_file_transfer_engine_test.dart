@@ -75,9 +75,11 @@ void main() {
     final source = File('${sandbox.path}${Platform.pathSeparator}paste.txt');
     await source.writeAsString('clipboard');
 
-    final transferId = await sender.sendFiles([
-      source.path,
-    ], purpose: ExplicitFileTransferPurpose.clipboard);
+    final transferId = await sender.sendFiles(
+      [source.path],
+      purpose: ExplicitFileTransferPurpose.clipboard,
+      destinationLeaseId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    );
     await _waitFor(
       () => receiver.tasks.any(
         (task) => task.id == transferId && task.awaitsAcceptance,
@@ -88,7 +90,8 @@ void main() {
       (task) => task.id == transferId,
     );
     expect(incoming.isClipboard, isTrue);
-    expect(incoming.message, '正在准备文件剪贴板');
+    expect(incoming.destinationLeaseId, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    expect(incoming.message, '正在准备活动目录文件粘贴');
 
     final cache = await Directory(
       '${sandbox.path}${Platform.pathSeparator}clipboard-cache',
@@ -102,7 +105,7 @@ void main() {
     final completed = receiver.tasks.singleWhere(
       (task) => task.id == transferId,
     );
-    expect(completed.message, '文件剪贴板缓存已就绪');
+    expect(completed.message, '文件已保存到活动目录');
   });
 
   test(

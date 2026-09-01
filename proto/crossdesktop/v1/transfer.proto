@@ -77,6 +77,10 @@ message TransferOffer {
   repeated TransferEntry entries = 4;
   uint64 total_bytes = 5;
   bool clipboard_initiated = 6;
+
+  // Opaque destination lease returned by FilePasteReady. It is never a path
+  // and is meaningful only to the receiving session.
+  string destination_lease_id = 7;
 }
 
 message TransferDecision {

@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'package:cross_desktop_remote/core/clipboard/clipboard_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
 import 'package:cross_desktop_remote/core/files/explicit_file_transfer_platform_adapter.dart';
+import 'package:cross_desktop_remote/core/files/file_paste_target_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/host_platform_adapter_factory.dart';
 import 'package:cross_desktop_remote/core/input/remote_input_reset.dart';
@@ -55,14 +56,6 @@ ClipboardSyncMode _platformClipboardMode(
   return role == RemoteRole.controller
       ? ClipboardSyncMode.controllerToHost
       : ClipboardSyncMode.hostToController;
-}
-
-String? _fileClipboardSignature(ClipboardSnapshot snapshot) {
-  if (!snapshot.hasFiles) return null;
-  final paths = snapshot.filePaths
-      .map((path) => '${path.length}:$path')
-      .join('|');
-  return '${snapshot.revision}:$paths';
 }
 
 bool _isModifierWireKey(String key) => const {
@@ -151,6 +144,7 @@ class RemoteSessionController extends ChangeNotifier {
     HostPlatformAdapter? hostPlatformAdapter,
     ClipboardPlatformAdapter? clipboardPlatformAdapter,
     ExplicitFileTransferPlatformAdapter? fileTransferPlatformAdapter,
+    FilePasteTargetPlatformAdapter? filePasteTargetPlatformAdapter,
     Stream<DesktopWindowLifecycleEvent>? hostWindowLifecycleEvents,
     RemoteQualityProfile initialQuality = RemoteQualityProfile.automatic,
     ClipboardSyncMode initialClipboardMode = ClipboardSyncMode.bidirectional,
@@ -165,21 +159,22 @@ class RemoteSessionController extends ChangeNotifier {
        _fileTransferPlatform =
            fileTransferPlatformAdapter ??
            createExplicitFileTransferPlatformAdapter(),
+       _filePasteTargetPlatform =
+           filePasteTargetPlatformAdapter ??
+           createFilePasteTargetPlatformAdapter(),
        _selectedQuality = initialQuality,
        _clipboardMode = _platformClipboardMode(initialClipboardMode, role),
        _clipboardSync = TextClipboardSyncEngine(
          localIsController: role == RemoteRole.controller,
          initialMode: _platformClipboardMode(initialClipboardMode, role),
        ) {
-    _fileClipboardOffers = FileClipboardOfferBroker(
-      publisher: (paths) => _fileTransfer.sendFiles(
+    _fileCopyPaste = FileCopyPasteCoordinator(
+      publisher: (paths, destinationLeaseId) => _fileTransfer.sendFiles(
         paths,
         purpose: ExplicitFileTransferPurpose.clipboard,
+        destinationLeaseId: destinationLeaseId,
       ),
       canceller: _cancelSupersededFileClipboardTransfer,
-    );
-    _clipboardTempLeases = ClipboardTempLeaseManager(
-      cleanup: _fileTransferPlatform.cleanupClipboardReceiveDirectory,
     );
     _fileTransfer.addListener(_handleFileTransferChanged);
     _fileTransferNoticeSubscription = _fileTransfer.notices.listen(_emitNotice);
@@ -194,21 +189,27 @@ class RemoteSessionController extends ChangeNotifier {
   final HostPlatformAdapter _hostPlatform;
   final ClipboardPlatformAdapter _clipboardPlatform;
   final ExplicitFileTransferPlatformAdapter _fileTransferPlatform;
+  final FilePasteTargetPlatformAdapter _filePasteTargetPlatform;
   final TextClipboardSyncEngine _clipboardSync;
   final ClipboardApplyGate _clipboardApplyGate = ClipboardApplyGate();
-  final FileClipboardApplyGate _fileClipboardApplyGate =
-      FileClipboardApplyGate();
-  final FileClipboardEchoGuard _fileClipboardEchoGuard =
-      FileClipboardEchoGuard();
   final ExplicitFileTransferEngine _fileTransfer = ExplicitFileTransferEngine();
-  late final FileClipboardOfferBroker _fileClipboardOffers;
-  late final ClipboardTempLeaseManager _clipboardTempLeases;
+  late final FileCopyPasteCoordinator _fileCopyPaste;
+  final Map<String, FilePasteDestinationLease> _filePasteLeaseByTransferId = {};
   final Map<String, List<String>> _stagedOutgoingFiles = {};
   final Set<String> _acceptingFileClipboardTransfers = {};
-  final Set<String> _materializingFileClipboardTransfers = {};
   final Set<String> _appliedFileClipboardTransfers = {};
   final Set<String> _retiredFileClipboardTransfers = {};
   final Stream<DesktopWindowLifecycleEvent> _hostWindowLifecycleEvents;
+
+  FileClipboardOfferBroker get _fileClipboardOffers => _fileCopyPaste.offers;
+  FilePasteIntentGate get _filePasteIntentGate => _fileCopyPaste.intents;
+  FilePasteDestinationLeaseRegistry get _filePasteDestinationLeases =>
+      _fileCopyPaste.destinations;
+  FilePasteCommitGate get _filePasteCommitGate => _fileCopyPaste.commits;
+  Map<String, RemotePasteTransferBinding> get _remotePasteTransferByIntent =>
+      _fileCopyPaste.remoteTransfersByIntent;
+  Set<String> get _trackedRemotePasteIntents =>
+      _fileCopyPaste.trackedRemotePasteIntents;
 
   /// Apple keeps the physically verified fixed 1080p ScreenCaptureKit canvas.
   /// Windows can capture a 2K source without entering the Apple display-switch
@@ -249,6 +250,7 @@ class RemoteSessionController extends ChangeNotifier {
   StreamSubscription<DesktopWindowLifecycleEvent>?
   _hostWindowLifecycleSubscription;
   StreamSubscription<ClipboardSnapshot>? _clipboardSubscription;
+  StreamSubscription<String>? _filePasteIntentSubscription;
   StreamSubscription<String>? _fileTransferNoticeSubscription;
   Timer? _displayRefreshTimer;
   Timer? _inputPermissionPollTimer;
@@ -301,7 +303,7 @@ class RemoteSessionController extends ChangeNotifier {
   int _remoteActiveContentGeometryVersion = 0;
   bool _remoteSupportsTextClipboardV1 = false;
   bool _remoteSupportsExplicitFileTransferV1 = false;
-  bool _remoteSupportsFileClipboardV1 = false;
+  bool _remoteSupportsDestinationLeasedFilePasteV1 = false;
   bool _remoteSupportsAtomicShortcutV1 = false;
   bool _remoteSupportsScopedInputResetV1 = false;
   bool _remoteClipboardSupportsApplied = false;
@@ -313,9 +315,9 @@ class RemoteSessionController extends ChangeNotifier {
   ClipboardSyncMode _clipboardMode;
   ClipboardSyncMode? _remoteClipboardMode;
   ClipboardOffer? _queuedClipboardOffer;
+  late final String _filePasteOwnerId =
+      '${role.name}:${identityHashCode(this)}';
   String? _fileClipboardPasteTransferId;
-  String? _remotePreparedFileClipboardSignature;
-  String? _latestIncomingFileClipboardTransferId;
   bool _fileClipboardPastePreparing = false;
   bool _synchronizingFileClipboardTransfers = false;
   bool _fileClipboardSynchronizationRequested = false;
@@ -328,6 +330,19 @@ class RemoteSessionController extends ChangeNotifier {
   RemoteVideoFrameSize? _outboundVideoFrameSize;
   RemoteVideoFrameSize? _inboundVideoFrameSize;
   HostCaptureFrameState? _lastHostCaptureFrameState;
+
+  RemoteFileClipboardOffer? get _remoteFileClipboardOffer =>
+      _fileCopyPaste.remoteOffer;
+  set _remoteFileClipboardOffer(RemoteFileClipboardOffer? value) =>
+      _fileCopyPaste.remoteOffer = value;
+  FileClipboardOfferIdentity? get _announcedLocalFileOffer =>
+      _fileCopyPaste.announcedLocalOffer;
+  set _announcedLocalFileOffer(FileClipboardOfferIdentity? value) =>
+      _fileCopyPaste.announcedLocalOffer = value;
+  String get _filePasteSessionId => _fileCopyPaste.localSessionId;
+  String? get _remoteFilePasteSessionId => _fileCopyPaste.remoteSessionId;
+  set _remoteFilePasteSessionId(String? value) =>
+      _fileCopyPaste.remoteSessionId = value;
   RemoteVideoGeometryState _videoGeometryState =
       RemoteVideoGeometryState.stable;
   RemoteColorDiagnostics? _colorDiagnostics;
@@ -378,10 +393,12 @@ class RemoteSessionController extends ChangeNotifier {
       _fileTransferPlatform.supportsReceivedExport;
   bool get remoteSupportsExplicitFileTransferV1 =>
       _remoteSupportsExplicitFileTransferV1;
-  bool get remoteSupportsFileClipboardV1 => _remoteSupportsFileClipboardV1;
+  bool get remoteSupportsDestinationLeasedFilePasteV1 =>
+      _remoteSupportsDestinationLeasedFilePasteV1;
   bool get fileClipboardReady =>
       fileClipboardSupported &&
-      _remoteSupportsFileClipboardV1 &&
+      _remoteSupportsDestinationLeasedFilePasteV1 &&
+      _filePasteTargetPlatform.supported &&
       explicitFileTransferReady &&
       _clipboardChannel?.state == RTCDataChannelState.RTCDataChannelOpen;
   bool get explicitFileTransferReady =>
@@ -402,14 +419,22 @@ class RemoteSessionController extends ChangeNotifier {
       _fileClipboardPastePreparing || _fileClipboardPasteTransferId != null;
   bool get fileClipboardOfferPending => _fileClipboardOffers.hasOffer;
   String get fileClipboardPasteStatus {
-    if (_fileClipboardPastePreparing) return '正在分析文件剪贴板';
+    if (_fileClipboardPastePreparing) return '正在锁定远程目标目录';
     final task = fileClipboardPasteTask;
     if (task == null) return '';
     final progress = task.progress;
     final progressLabel = progress == null
         ? ''
         : ' ${(progress * 100).toStringAsFixed(0)}%';
-    return '正在传输文件剪贴板$progressLabel · ${task.state.label}';
+    return '正在传输到锁定目录$progressLabel · ${task.state.label}';
+  }
+
+  Future<void> cancelFileClipboardOffer() async {
+    if (!_fileClipboardOffers.hasOffer || fileClipboardPastePending) return;
+    _revokeAnnouncedLocalFileClipboardOffer();
+    await _fileClipboardOffers.invalidate();
+    _setClipboardStatus(ClipboardSyncStatus.ready, '已取消待粘贴文件');
+    notifyListeners();
   }
 
   int get pendingIncomingFileTransferCount =>
@@ -546,6 +571,15 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   Future<void> _initializeClipboardMonitoring() async {
+    if (_filePasteTargetPlatform.supported &&
+        _filePasteIntentSubscription == null) {
+      _filePasteIntentSubscription = _filePasteTargetPlatform.pasteIntents
+          .listen((ownerId) {
+            if (ownerId == _filePasteOwnerId) {
+              unawaited(_handleLocalRemoteFilePasteIntent());
+            }
+          });
+    }
     if (!_clipboardPlatform.supported || _clipboardSubscription != null) {
       _updateClipboardStatus();
       return;
@@ -578,30 +612,24 @@ class RemoteSessionController extends ChangeNotifier {
       'version': clipboardWireVersion,
       'mode': effectiveMode.name,
       'supportsApplied': true,
-      'supportsFileClipboard': fileClipboardSupported,
+      'supportsFileClipboard': false,
+      'supportsDestinationLeasedFilePaste': fileClipboardSupported,
+      'filePasteSessionId': _filePasteSessionId,
     });
     _updateClipboardStatus();
     notifyListeners();
   }
 
   void _handleLocalClipboardChange(ClipboardSnapshot snapshot) {
-    if (_remotePreparedFileClipboardSignature !=
-        _fileClipboardSignature(snapshot)) {
-      _remotePreparedFileClipboardSignature = null;
-    }
-    _clipboardTempLeases.observeClipboard(snapshot);
+    _clearRemoteFileClipboardOffer();
     if (snapshot.hasFiles) {
-      if (_fileClipboardEchoGuard.consumeIfExpected(snapshot)) {
-        unawaited(_fileClipboardOffers.invalidate());
-        _updateClipboardStatus();
-        notifyListeners();
-        return;
-      }
       _fileClipboardOffers.arm(snapshot);
+      _announceLocalFileClipboardOffer(snapshot);
       _setClipboardStatus(ClipboardSyncStatus.ready, '已记录文件，远程粘贴时开始传输');
       notifyListeners();
       return;
     }
+    _revokeAnnouncedLocalFileClipboardOffer();
     unawaited(_fileClipboardOffers.invalidate());
     final offer = _clipboardSync.observeLocalChange(snapshot);
     if (snapshot.tooLarge) {
@@ -627,9 +655,141 @@ class RemoteSessionController extends ChangeNotifier {
     _updateClipboardStatus();
   }
 
+  void _announceLocalFileClipboardOffer(ClipboardSnapshot snapshot) {
+    final sessionId = _activeFilePasteSessionId;
+    final offerId = _fileClipboardOffers.currentOfferId;
+    final generation = _fileClipboardOffers.currentGeneration;
+    if (sessionId == null ||
+        offerId == null ||
+        generation == null ||
+        !_remoteSupportsDestinationLeasedFilePasteV1 ||
+        !_remoteAllowsClipboardInbound ||
+        _clipboardChannel?.state != RTCDataChannelState.RTCDataChannelOpen) {
+      return;
+    }
+    final identity = FileClipboardOfferIdentity(
+      sessionId: sessionId,
+      offerId: offerId,
+      generation: generation,
+      revision: snapshot.revision,
+    );
+    _announcedLocalFileOffer = identity;
+    _sendClipboard(
+      remoteFileOfferMessage(
+        sessionId: identity.sessionId,
+        offerId: offerId,
+        generation: generation,
+        revision: snapshot.revision,
+        names: snapshot.filePaths.map(_fileName).toList(growable: false),
+      ),
+    );
+  }
+
+  void _revokeAnnouncedLocalFileClipboardOffer() {
+    final offer = _announcedLocalFileOffer;
+    _announcedLocalFileOffer = null;
+    if (offer != null) {
+      _sendClipboard(
+        remoteFileOfferRevokeMessage(
+          sessionId: offer.sessionId,
+          offerId: offer.offerId,
+          generation: offer.generation,
+        ),
+      );
+    }
+  }
+
+  void _clearRemoteFileClipboardOffer() {
+    if (_remoteFileClipboardOffer == null) return;
+    _remoteFileClipboardOffer = null;
+    unawaited(
+      _filePasteTargetPlatform.setRemoteOfferAvailable(
+        ownerId: _filePasteOwnerId,
+        available: false,
+      ),
+    );
+  }
+
+  Future<void> _announceCurrentFileClipboardOffer() async {
+    if (!_clipboardPlatform.supported ||
+        !_remoteSupportsDestinationLeasedFilePasteV1) {
+      return;
+    }
+    try {
+      final snapshot = await _clipboardPlatform.readSnapshot();
+      if (!snapshot.hasFiles) return;
+      _fileClipboardOffers.arm(snapshot);
+      _announceLocalFileClipboardOffer(snapshot);
+    } catch (_) {
+      // Clipboard ownership may change while the data channel opens.
+    }
+  }
+
+  Future<void> _handleLocalRemoteFilePasteIntent() async {
+    final offer = _remoteFileClipboardOffer;
+    if (offer == null ||
+        !_remoteSupportsDestinationLeasedFilePasteV1 ||
+        !explicitFileTransferReady) {
+      return;
+    }
+    final ticket = _filePasteIntentGate.begin(
+      sessionId: offer.sessionId,
+      offerId: offer.id,
+      generation: offer.generation,
+    );
+    FilePasteDestinationLease? lease;
+    try {
+      final target = await _filePasteTargetPlatform.captureActiveTarget();
+      if (!target.writable) {
+        throw StateError('${target.application} 当前目录不可写');
+      }
+      lease = _filePasteDestinationLeases.create(
+        transaction: ticket.transaction,
+        target: target,
+      );
+      await _filePasteTargetPlatform.setRemoteOfferAvailable(
+        ownerId: _filePasteOwnerId,
+        available: false,
+      );
+      _remoteFileClipboardOffer = null;
+      _sendClipboard(
+        remoteFilePasteRequestMessage(
+          transaction: ticket.transaction,
+          destinationLeaseId: lease.id,
+        ),
+      );
+      final acceptedLeaseId = await ticket.ready.timeout(
+        const Duration(seconds: 12),
+        onTimeout: () => null,
+      );
+      if (acceptedLeaseId != lease.id) {
+        _filePasteDestinationLeases.revoke(lease.id);
+        _emitNotice('远端文件 Offer 已失效，本次未传输', level: RemoteNoticeLevel.warning);
+        return;
+      }
+      _remoteFileClipboardOffer = null;
+      _emitNotice('已锁定本机 ${target.application} · ${target.displayName}，等待远端文件');
+    } catch (error) {
+      if (lease != null) _filePasteDestinationLeases.revoke(lease.id);
+      _emitNotice('无法启动远端文件粘贴：$error', level: RemoteNoticeLevel.error);
+    } finally {
+      _filePasteIntentGate.cancel(ticket.transaction.pasteIntentId);
+    }
+  }
+
+  static String _fileName(String path) {
+    final normalized = path
+        .replaceAll(r'\', '/')
+        .replaceFirst(RegExp(r'/+$'), '');
+    return normalized.split('/').last;
+  }
+
+  String? get _activeFilePasteSessionId =>
+      role == RemoteRole.host ? _filePasteSessionId : _remoteFilePasteSessionId;
+
   Future<String?> _publishLocalFileClipboard(
     ClipboardSnapshot snapshot, {
-    bool explicitPaste = false,
+    required String destinationLeaseId,
   }) async {
     if (!snapshot.hasFiles ||
         !_clipboardMode.allowsOutbound(
@@ -638,14 +798,16 @@ class RemoteSessionController extends ChangeNotifier {
       return null;
     }
     if (!fileClipboardReady || !_remoteAllowsClipboardInbound) {
-      if (explicitPaste) {
-        _emitNotice('远程设备尚未就绪或不支持文件剪贴板', level: RemoteNoticeLevel.warning);
-      }
+      _emitNotice('远程设备尚未就绪或不支持活动目录文件粘贴', level: RemoteNoticeLevel.warning);
       return null;
     }
     _setClipboardStatus(ClipboardSyncStatus.sending, '远程粘贴已触发，正在传输文件');
     try {
-      final transferId = await _fileClipboardOffers.materialize(snapshot);
+      _fileClipboardOffers.arm(snapshot);
+      final transferId = await _fileClipboardOffers.materialize(
+        snapshot,
+        destinationLeaseId: destinationLeaseId,
+      );
       notifyListeners();
       return transferId;
     } catch (error) {
@@ -683,7 +845,7 @@ class RemoteSessionController extends ChangeNotifier {
       _clipboardStatus = ClipboardSyncStatus.disabled;
       _clipboardStatusMessage = _clipboardStatus.label;
     } else if ((!_remoteSupportsTextClipboardV1 &&
-            !_remoteSupportsFileClipboardV1) ||
+            !_remoteSupportsDestinationLeasedFilePasteV1) ||
         _clipboardChannel?.state != RTCDataChannelState.RTCDataChannelOpen) {
       _clipboardStatus = ClipboardSyncStatus.waitingForPeer;
       _clipboardStatusMessage = _clipboardStatus.label;
@@ -713,6 +875,7 @@ class RemoteSessionController extends ChangeNotifier {
 
     await _closeSession(notifyPeer: false);
     _closing = false;
+    _fileCopyPaste.beginSession();
     _error = null;
     _hostInvitationExpiresAt = null;
     _hostInvitationCode = null;
@@ -1047,54 +1210,99 @@ class RemoteSessionController extends ChangeNotifier {
     required int inputEpoch,
   }) async {
     if (!fileClipboardReady) {
-      _emitNotice('远程设备不支持文件剪贴板，请使用“文件传输”', level: RemoteNoticeLevel.warning);
+      _emitNotice(
+        '远程设备不支持活动目录文件粘贴，请使用“文件传输”',
+        level: RemoteNoticeLevel.warning,
+      );
       return false;
-    }
-    final signature = _fileClipboardSignature(snapshot);
-    if (signature != null &&
-        signature == _remotePreparedFileClipboardSignature) {
-      return true;
     }
     _fileClipboardPastePreparing = true;
     notifyListeners();
     String? preparedTransferId;
-    var appliedToRemoteClipboard = false;
+    FilePasteIntentTicket? ticket;
+    String? destinationLeaseId;
+    var committedToDestination = false;
     try {
+      _fileClipboardOffers.arm(snapshot);
+      final sessionId = _activeFilePasteSessionId;
+      final offerId = _fileClipboardOffers.currentOfferId;
+      final generation = _fileClipboardOffers.currentGeneration;
+      if (sessionId == null || offerId == null || generation == null) {
+        _emitNotice('本机文件 Offer 已失效，请重新复制文件', level: RemoteNoticeLevel.warning);
+        return false;
+      }
+      ticket = _filePasteIntentGate.begin(
+        sessionId: sessionId,
+        offerId: offerId,
+        generation: generation,
+      );
+      _sendClipboard(
+        filePastePrepareMessage(
+          transaction: ticket.transaction,
+          revision: snapshot.revision,
+        ),
+      );
+      destinationLeaseId = await ticket.ready.timeout(
+        const Duration(seconds: 12),
+        onTimeout: () => null,
+      );
+      if (destinationLeaseId == null) {
+        _emitNotice(
+          '未能锁定远程 Finder/文件资源管理器目录，本次未传输',
+          level: RemoteNoticeLevel.warning,
+        );
+        return false;
+      }
+      if (_remoteInputEpoch != inputEpoch) {
+        _emitNotice('检测到其他输入，本次文件粘贴已取消');
+        return false;
+      }
       final transferId = await _publishLocalFileClipboard(
         snapshot,
-        explicitPaste: true,
+        destinationLeaseId: destinationLeaseId,
       );
       if (transferId == null) return false;
       preparedTransferId = transferId;
       _fileClipboardPasteTransferId = transferId;
       _fileClipboardPastePreparing = false;
-      _emitNotice('正在传输文件，完成后将自动继续粘贴');
+      _emitNotice('已锁定远程目标目录，正在传输文件');
       notifyListeners();
-      final applied = await _fileClipboardApplyGate.waitFor(transferId);
+      final applied = await _filePasteCommitGate.waitFor(
+        transferId,
+        transaction: ticket.transaction,
+        destinationLeaseId: destinationLeaseId,
+      );
       if (!applied) {
-        _emitNotice('文件剪贴板未能写入远程系统，已取消本次粘贴', level: RemoteNoticeLevel.error);
+        _emitNotice('文件未能提交到锁定的远程目录', level: RemoteNoticeLevel.error);
         return false;
       }
-      appliedToRemoteClipboard = true;
-      _remotePreparedFileClipboardSignature = signature;
-      if (_remoteInputEpoch != inputEpoch) {
-        _emitNotice(
-          '文件已同步；检测到传输期间有其他操作，请再次按远程粘贴快捷键',
-          level: RemoteNoticeLevel.success,
-        );
-        return false;
-      }
-      _emitNotice('文件已就绪，正在继续远程粘贴', level: RemoteNoticeLevel.success);
-      return true;
+      committedToDestination = true;
+      _emitNotice('文件已保存到按下粘贴时锁定的远程目录', level: RemoteNoticeLevel.success);
+      // The explicit transfer has already committed the files. Never inject a
+      // second OS Paste shortcut, which would duplicate or redirect them.
+      return false;
     } finally {
+      if (ticket != null) {
+        _filePasteIntentGate.cancel(ticket.transaction.pasteIntentId);
+      }
       if (preparedTransferId != null) {
-        if (appliedToRemoteClipboard) {
+        if (committedToDestination) {
           _fileClipboardOffers.releaseTransfer(preparedTransferId);
         } else {
           unawaited(
             _fileClipboardOffers.invalidateTransfer(preparedTransferId),
           );
         }
+      }
+      if (!committedToDestination &&
+          ticket != null &&
+          destinationLeaseId != null) {
+        _sendClipboard(
+          filePasteCancelMessage(
+            transaction: ticket.transaction,
+            destinationLeaseId: destinationLeaseId,
+          ),
+        );
       }
       _fileClipboardPastePreparing = false;
       _fileClipboardPasteTransferId = null;
@@ -1221,69 +1429,67 @@ class RemoteSessionController extends ChangeNotifier {
               !_retiredFileClipboardTransfers.contains(task.id),
         )
         .toList(growable: false);
-    final latestIncoming = tasks.where((task) => task.isIncoming).firstOrNull;
-    if (latestIncoming != null) {
-      _latestIncomingFileClipboardTransferId = latestIncoming.id;
-    }
     for (final task in tasks) {
-      if (task.isIncoming &&
-          _latestIncomingFileClipboardTransferId != null &&
-          task.id != _latestIncomingFileClipboardTransferId) {
-        _retiredFileClipboardTransfers.add(task.id);
-        if (task.awaitsAcceptance) {
-          await _fileTransfer.reject(task.id);
-          _clipboardTempLeases.retireTransfer(task.id, immediately: true);
-        } else if (task.canCancel) {
-          await _fileTransfer.cancel(task.id);
-          _clipboardTempLeases.retireTransfer(task.id, immediately: true);
-        }
-        continue;
-      }
       if (task.isIncoming) {
-        if (task.isIncoming && task.awaitsAcceptance) {
-          if (!_remoteSupportsFileClipboardV1 ||
-              !_clipboardPlatform.fileClipboardSupported) {
+        if (task.awaitsAcceptance) {
+          if (!_remoteSupportsDestinationLeasedFilePasteV1 ||
+              !_clipboardPlatform.fileClipboardSupported ||
+              task.destinationLeaseId == null) {
             await _fileTransfer.reject(task.id);
             continue;
           }
           if (!_acceptingFileClipboardTransfers.add(task.id)) continue;
           try {
-            final destination = await _fileTransferPlatform
-                .createClipboardReceiveDirectory(task.id);
-            _clipboardTempLeases.registerReceiving(task.id, destination);
-            await _fileTransfer.accept(task.id, destination);
-            _setClipboardStatus(ClipboardSyncStatus.receiving, '正在后台接收文件剪贴板');
+            final lease = _filePasteDestinationLeases.take(
+              task.destinationLeaseId!,
+            );
+            if (lease == null) {
+              await _fileTransfer.reject(task.id);
+              _emitNotice(
+                '粘贴目标租约已失效，本次未写入任何文件',
+                level: RemoteNoticeLevel.warning,
+              );
+              continue;
+            }
+            if (!await _filePasteTargetPlatform.validateTarget(lease.target)) {
+              await _fileTransfer.reject(task.id);
+              _emitNotice(
+                '粘贴目标已被替换、删除或失去写入权限，本次未写入任何文件',
+                level: RemoteNoticeLevel.warning,
+              );
+              continue;
+            }
+            await _fileTransfer.accept(task.id, lease.target.path);
+            _filePasteLeaseByTransferId[task.id] = lease;
+            _setClipboardStatus(
+              ClipboardSyncStatus.receiving,
+              '正在传输到 ${lease.target.application} · ${lease.target.displayName}',
+            );
           } catch (error) {
-            _clipboardTempLeases.retireTransfer(task.id, immediately: true);
-            _emitNotice('文件剪贴板接收失败：$error', level: RemoteNoticeLevel.error);
+            if (task.awaitsAcceptance) {
+              await _fileTransfer.reject(task.id);
+            }
+            _emitNotice('活动目录文件接收失败：$error', level: RemoteNoticeLevel.error);
           } finally {
             _acceptingFileClipboardTransfers.remove(task.id);
           }
           continue;
         }
-        if (task.isIncoming &&
-            task.state == ExplicitFileTransferState.completed &&
-            !_appliedFileClipboardTransfers.contains(task.id) &&
-            _materializingFileClipboardTransfers.add(task.id)) {
-          try {
-            final paths = await _completedIncomingTransferPaths(task.id);
-            _fileClipboardEchoGuard.expect(paths);
-            final appliedSnapshot = await _clipboardPlatform.writeFiles(paths);
-            _clipboardTempLeases.markClipboardOwned(
-              task.id,
-              paths: appliedSnapshot.filePaths.isEmpty
-                  ? paths
-                  : appliedSnapshot.filePaths,
-              revision: appliedSnapshot.revision,
-            );
-            _appliedFileClipboardTransfers.add(task.id);
-            _sendClipboard(fileClipboardAppliedMessage(task.id));
-            _setClipboardStatus(ClipboardSyncStatus.ready, '远程文件已写入系统剪贴板');
-          } catch (error) {
-            _emitNotice('写入系统文件剪贴板失败：$error', level: RemoteNoticeLevel.error);
-          } finally {
-            _materializingFileClipboardTransfers.remove(task.id);
+        if (task.state == ExplicitFileTransferState.completed &&
+            _appliedFileClipboardTransfers.add(task.id)) {
+          final lease = _filePasteLeaseByTransferId.remove(task.id);
+          if (lease == null) {
+            _emitNotice('文件已接收，但粘贴事务身份已丢失', level: RemoteNoticeLevel.error);
+            continue;
           }
+          _sendClipboard(
+            filePasteCommittedMessage(
+              transaction: lease.transaction,
+              destinationLeaseId: lease.id,
+              transferId: task.id,
+            ),
+          );
+          _setClipboardStatus(ClipboardSyncStatus.ready, '远程文件已保存到锁定的活动目录');
           continue;
         }
         if ({
@@ -1291,7 +1497,7 @@ class RemoteSessionController extends ChangeNotifier {
           ExplicitFileTransferState.rejected,
           ExplicitFileTransferState.cancelled,
         }.contains(task.state)) {
-          _clipboardTempLeases.retireTransfer(task.id, immediately: true);
+          _filePasteLeaseByTransferId.remove(task.id);
         }
       }
       if (!task.isIncoming &&
@@ -1300,7 +1506,7 @@ class RemoteSessionController extends ChangeNotifier {
             ExplicitFileTransferState.rejected,
             ExplicitFileTransferState.cancelled,
           }.contains(task.state)) {
-        _fileClipboardApplyGate.fail(task.id);
+        _filePasteCommitGate.fail(task.id);
       }
     }
   }
@@ -1714,7 +1920,8 @@ class RemoteSessionController extends ChangeNotifier {
   Future<void> _ensureClipboardDataChannel() async {
     if (role != RemoteRole.host ||
         !_clipboardPlatform.supported ||
-        (!_remoteSupportsTextClipboardV1 && !_remoteSupportsFileClipboardV1) ||
+        (!_remoteSupportsTextClipboardV1 &&
+            !_remoteSupportsDestinationLeasedFilePasteV1) ||
         _clipboardChannel != null ||
         _peerConnection == null) {
       return;
@@ -1897,7 +2104,7 @@ class RemoteSessionController extends ChangeNotifier {
       case 'clipboard':
         if (_clipboardPlatform.supported &&
             (_remoteSupportsTextClipboardV1 ||
-                _remoteSupportsFileClipboardV1)) {
+                _remoteSupportsDestinationLeasedFilePasteV1)) {
           _attachClipboardChannel(channel);
         } else {
           unawaited(channel.close());
@@ -1968,13 +2175,16 @@ class RemoteSessionController extends ChangeNotifier {
           'version': clipboardWireVersion,
           'mode': _clipboardMode.name,
           'supportsApplied': true,
-          'supportsFileClipboard': fileClipboardSupported,
+          'supportsFileClipboard': false,
+          'supportsDestinationLeasedFilePaste': fileClipboardSupported,
+          'filePasteSessionId': _filePasteSessionId,
         });
       } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
         _remoteClipboardMode = null;
         _remoteClipboardSupportsApplied = false;
         _clipboardApplyGate.reset();
-        _fileClipboardApplyGate.reset();
+        _filePasteCommitGate.reset();
+        _clearRemoteFileClipboardOffer();
       }
       _updateClipboardStatus();
       notifyListeners();
@@ -2054,6 +2264,11 @@ class RemoteSessionController extends ChangeNotifier {
             orElse: () => ClipboardSyncMode.disabled,
           );
           _remoteClipboardSupportsApplied = decoded['supportsApplied'] == true;
+          final remoteFilePasteSessionId = decoded['filePasteSessionId'];
+          if (remoteFilePasteSessionId is String &&
+              RegExp(r'^[0-9a-f]{32}$').hasMatch(remoteFilePasteSessionId)) {
+            _remoteFilePasteSessionId = remoteFilePasteSessionId;
+          }
           _updateClipboardStatus();
           notifyListeners();
           final queuedOffer = _queuedClipboardOffer;
@@ -2061,6 +2276,7 @@ class RemoteSessionController extends ChangeNotifier {
           if (queuedOffer != null && _remoteAllowsClipboardInbound) {
             _sendClipboard(queuedOffer.toMessage());
           }
+          unawaited(_announceCurrentFileClipboardOffer());
         case 'offer':
           final request = _clipboardSync.acceptOffer(
             ClipboardOffer.fromMessage(decoded),
@@ -2086,10 +2302,61 @@ class RemoteSessionController extends ChangeNotifier {
           if (_clipboardApplyGate.accept(decoded)) {
             _setClipboardStatus(ClipboardSyncStatus.ready, '远程剪贴板已写入');
           }
-        case 'file-applied':
-          if (_fileClipboardApplyGate.accept(decoded)) {
-            _setClipboardStatus(ClipboardSyncStatus.ready, '远程文件剪贴板已写入');
+        case 'file-paste-committed':
+          if (_filePasteCommitGate.accept(decoded)) {
+            _setClipboardStatus(ClipboardSyncStatus.ready, '远程文件已提交到目标目录');
           }
+        case 'file-paste-ready':
+        case 'file-paste-rejected':
+          _filePasteIntentGate.accept(decoded);
+        case 'file-paste-prepare':
+          await _handleFilePastePrepare(decoded);
+        case 'file-paste-cancel':
+          final leaseId = decoded['destinationLeaseId'];
+          if (leaseId is String) {
+            final transaction = FilePasteTransactionIdentity.fromMessage(
+              decoded,
+            );
+            _filePasteDestinationLeases.revoke(
+              leaseId,
+              transaction: transaction,
+            );
+          }
+        case 'file-offer':
+          final offer = RemoteFileClipboardOffer.fromMessage(decoded);
+          if (offer.sessionId != _activeFilePasteSessionId) {
+            throw const FormatException('远端文件 Offer 不属于当前会话');
+          }
+          _remoteFileClipboardOffer = offer;
+          try {
+            await _filePasteTargetPlatform.setRemoteOfferAvailable(
+              ownerId: _filePasteOwnerId,
+              available: true,
+            );
+            _emitNotice(
+              '远端已复制 ${offer.itemCount} 项文件；在本机 Finder/文件资源管理器按粘贴即可接收',
+            );
+          } catch (error) {
+            _emitNotice(
+              '无法监听本机文件粘贴快捷键：$error',
+              level: RemoteNoticeLevel.warning,
+            );
+          }
+        case 'file-offer-revoke':
+          final sessionId = decoded['sessionId'];
+          final offerId = decoded['offerId'];
+          final generation = decoded['generation'];
+          final currentOffer = _remoteFileClipboardOffer;
+          if (sessionId is String &&
+              offerId is String &&
+              generation is num &&
+              currentOffer?.sessionId == sessionId &&
+              currentOffer?.id == offerId &&
+              currentOffer?.generation == generation.toInt()) {
+            _clearRemoteFileClipboardOffer();
+          }
+        case 'file-paste-request':
+          await _handleRemoteFilePasteRequest(decoded);
       }
     } on FormatException catch (error) {
       _setClipboardStatus(
@@ -2099,6 +2366,197 @@ class RemoteSessionController extends ChangeNotifier {
     } catch (error) {
       _setClipboardStatus(ClipboardSyncStatus.error, '剪贴板同步失败：$error');
     }
+  }
+
+  Future<void> _handleFilePastePrepare(Map<String, dynamic> message) async {
+    final transaction = FilePasteTransactionIdentity.fromMessage(message);
+    final remoteOffer = _remoteFileClipboardOffer;
+    if (!_remoteSupportsDestinationLeasedFilePasteV1 ||
+        !_filePasteTargetPlatform.supported ||
+        transaction.sessionId != _filePasteSessionId ||
+        remoteOffer == null ||
+        remoteOffer.sessionId != transaction.sessionId ||
+        remoteOffer.id != transaction.offerId ||
+        remoteOffer.generation != transaction.generation) {
+      _sendClipboard(
+        filePasteRejectedMessage(
+          transaction: transaction,
+          reason: '文件 Offer 或会话已失效',
+        ),
+      );
+      return;
+    }
+    try {
+      final target = await _filePasteTargetPlatform.captureActiveTarget();
+      if (!target.writable) {
+        throw StateError('${target.application} 当前目录不可写');
+      }
+      final lease = _filePasteDestinationLeases.create(
+        transaction: transaction,
+        target: target,
+      );
+      _sendClipboard(
+        filePasteReadyMessage(
+          transaction: transaction,
+          destinationLeaseId: lease.id,
+        ),
+      );
+      _clearRemoteFileClipboardOffer();
+      _setClipboardStatus(
+        ClipboardSyncStatus.receiving,
+        '已锁定 ${target.application} · ${target.displayName}',
+      );
+    } catch (error) {
+      _sendClipboard(
+        filePasteRejectedMessage(transaction: transaction, reason: '$error'),
+      );
+      _emitNotice('无法确定粘贴目标：$error', level: RemoteNoticeLevel.warning);
+    }
+  }
+
+  Future<void> _handleRemoteFilePasteRequest(
+    Map<String, dynamic> message,
+  ) async {
+    final transaction = FilePasteTransactionIdentity.fromMessage(message);
+    final destinationLeaseId = message['destinationLeaseId'];
+    final validLeaseId =
+        destinationLeaseId is String &&
+        RegExp(r'^[0-9a-f]{32}$').hasMatch(destinationLeaseId);
+    final validOffer =
+        transaction.sessionId == _activeFilePasteSessionId &&
+        _fileClipboardOffers.currentOfferId == transaction.offerId &&
+        _fileClipboardOffers.currentGeneration == transaction.generation;
+    if (!validLeaseId || !validOffer) {
+      _sendClipboard(
+        filePasteRejectedMessage(
+          transaction: transaction,
+          reason: '文件 Offer 或会话已失效',
+        ),
+      );
+      return;
+    }
+    final existingTransfer =
+        _remotePasteTransferByIntent[transaction.pasteIntentId];
+    if (existingTransfer != null) {
+      if (existingTransfer.transaction != transaction ||
+          existingTransfer.destinationLeaseId != destinationLeaseId) {
+        _sendClipboard(
+          filePasteRejectedMessage(
+            transaction: transaction,
+            reason: '粘贴事务已绑定到其他目标目录',
+          ),
+        );
+        return;
+      }
+      _sendClipboard(
+        filePasteReadyMessage(
+          transaction: transaction,
+          destinationLeaseId: destinationLeaseId,
+        ),
+      );
+      return;
+    }
+    try {
+      final snapshot = await _clipboardPlatform.readSnapshot();
+      if (!snapshot.hasFiles ||
+          _fileClipboardOffers.currentOfferId != transaction.offerId ||
+          _fileClipboardOffers.currentGeneration != transaction.generation) {
+        _sendClipboard(
+          filePasteRejectedMessage(
+            transaction: transaction,
+            reason: '本机剪贴板已变化',
+          ),
+        );
+        return;
+      }
+      final transferId = await _publishLocalFileClipboard(
+        snapshot,
+        destinationLeaseId: destinationLeaseId,
+      );
+      if (transferId == null) {
+        _sendClipboard(
+          filePasteRejectedMessage(transaction: transaction, reason: '文件传输未就绪'),
+        );
+        return;
+      }
+      final binding = (
+        transferId: transferId,
+        destinationLeaseId: destinationLeaseId,
+        transaction: transaction,
+      );
+      final winner = _remotePasteTransferByIntent.putIfAbsent(
+        transaction.pasteIntentId,
+        () => binding,
+      );
+      if (winner != binding) {
+        if (winner.transaction != transaction ||
+            winner.destinationLeaseId != destinationLeaseId) {
+          _sendClipboard(
+            filePasteRejectedMessage(
+              transaction: transaction,
+              reason: '粘贴事务已绑定到其他目标目录',
+            ),
+          );
+          return;
+        }
+        _sendClipboard(
+          filePasteReadyMessage(
+            transaction: transaction,
+            destinationLeaseId: destinationLeaseId,
+          ),
+        );
+        return;
+      }
+      _sendClipboard(
+        filePasteReadyMessage(
+          transaction: transaction,
+          destinationLeaseId: destinationLeaseId,
+        ),
+      );
+      _announcedLocalFileOffer = null;
+      _fileClipboardPasteTransferId = transferId;
+      notifyListeners();
+      if (_trackedRemotePasteIntents.add(transaction.pasteIntentId)) {
+        unawaited(
+          _trackRemoteInitiatedFilePaste(
+            transferId: transferId,
+            transaction: transaction,
+            destinationLeaseId: destinationLeaseId,
+          ),
+        );
+      }
+    } catch (error) {
+      _sendClipboard(
+        filePasteRejectedMessage(transaction: transaction, reason: '$error'),
+      );
+      _emitNotice('远端文件粘贴准备失败：$error', level: RemoteNoticeLevel.error);
+    }
+  }
+
+  Future<void> _trackRemoteInitiatedFilePaste({
+    required String transferId,
+    required FilePasteTransactionIdentity transaction,
+    required String destinationLeaseId,
+  }) async {
+    final committed = await _filePasteCommitGate.waitFor(
+      transferId,
+      transaction: transaction,
+      destinationLeaseId: destinationLeaseId,
+    );
+    if (committed) {
+      _fileClipboardOffers.releaseTransfer(transferId);
+      _emitNotice('远端文件已保存到控制端锁定的活动目录', level: RemoteNoticeLevel.success);
+    } else {
+      await _fileClipboardOffers.invalidateTransfer(transferId);
+      _emitNotice('远端文件未能提交到控制端目录', level: RemoteNoticeLevel.error);
+    }
+    if (_fileClipboardPasteTransferId == transferId) {
+      _fileClipboardPasteTransferId = null;
+    }
+    _remotePasteTransferByIntent.remove(transaction.pasteIntentId);
+    _trackedRemotePasteIntents.remove(transaction.pasteIntentId);
+    _updateClipboardStatus();
+    notifyListeners();
   }
 
   Future<void> _handleControlMessage(String payload) async {
@@ -3402,8 +3860,8 @@ class RemoteSessionController extends ChangeNotifier {
         _remoteSupportsExplicitFileTransferV1 = peerCapabilities.contains(
           explicitFileTransferV1Capability,
         );
-        _remoteSupportsFileClipboardV1 = peerCapabilities.contains(
-          fileClipboardV1Capability,
+        _remoteSupportsDestinationLeasedFilePasteV1 = peerCapabilities.contains(
+          destinationLeasedFilePasteV1Capability,
         );
         _remoteSupportsAtomicShortcutV1 = peerCapabilities.contains(
           atomicShortcutV1Capability,
@@ -4482,6 +4940,8 @@ class RemoteSessionController extends ChangeNotifier {
   Future<void> _closeSession({required bool notifyPeer}) async {
     _closing = true;
     _cancelConnectionRecovery();
+    _revokeAnnouncedLocalFileClipboardOffer();
+    _clearRemoteFileClipboardOffer();
     if (notifyPeer && _signaling.isConnected) {
       try {
         _signaling.send({'type': 'hangup'});
@@ -4501,7 +4961,6 @@ class RemoteSessionController extends ChangeNotifier {
     _retiredFileClipboardTransfers.addAll(
       await _fileTransfer.retireClipboardTasks(),
     );
-    _clipboardTempLeases.retireSessionNonOwners();
     _fileTransfer.detachTransport();
     _explicitFileTransferTransportAttached = false;
     await _fileTransferControlChannel?.close();
@@ -4558,7 +5017,7 @@ class RemoteSessionController extends ChangeNotifier {
     _remoteActiveContentGeometryVersion = 0;
     _remoteSupportsTextClipboardV1 = false;
     _remoteSupportsExplicitFileTransferV1 = false;
-    _remoteSupportsFileClipboardV1 = false;
+    _remoteSupportsDestinationLeasedFilePasteV1 = false;
     _remoteSupportsAtomicShortcutV1 = false;
     _remoteSupportsScopedInputResetV1 = false;
     _remoteClipboardSupportsApplied = false;
@@ -4566,14 +5025,11 @@ class RemoteSessionController extends ChangeNotifier {
     _queuedClipboardOffer = null;
     _clipboardSync.resetSession();
     _clipboardApplyGate.reset();
-    _fileClipboardApplyGate.reset();
-    _fileClipboardEchoGuard.reset();
+    _fileCopyPaste.resetSession();
+    _filePasteLeaseByTransferId.clear();
     _fileClipboardPasteTransferId = null;
-    _remotePreparedFileClipboardSignature = null;
-    _latestIncomingFileClipboardTransferId = null;
     _fileClipboardPastePreparing = false;
     _acceptingFileClipboardTransfers.clear();
-    _materializingFileClipboardTransfers.clear();
     _appliedFileClipboardTransfers.clear();
     _lastHostCaptureFrameState = null;
     _hostInvitationExpiresAt = null;
@@ -4673,7 +5129,6 @@ class RemoteSessionController extends ChangeNotifier {
     }
     _stagedOutgoingFiles.clear();
     unawaited(_fileClipboardOffers.invalidate());
-    unawaited(_clipboardTempLeases.dispose());
     unawaited(_disposeResources());
     unawaited(_notices.close());
     super.dispose();
@@ -4684,6 +5139,8 @@ class RemoteSessionController extends ChangeNotifier {
     _hostWindowLifecycleSubscription = null;
     await _clipboardSubscription?.cancel();
     _clipboardSubscription = null;
+    await _filePasteIntentSubscription?.cancel();
+    _filePasteIntentSubscription = null;
     await _fileTransferNoticeSubscription?.cancel();
     _fileTransferNoticeSubscription = null;
     await _closeSession(notifyPeer: true);

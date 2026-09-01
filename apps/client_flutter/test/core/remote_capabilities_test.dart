@@ -120,7 +120,8 @@ void main() {
     );
     expect(capabilities, contains(textClipboardV1Capability));
     expect(capabilities, contains(explicitFileTransferV1Capability));
-    expect(capabilities, contains(fileClipboardV1Capability));
+    expect(capabilities, isNot(contains(fileClipboardV1Capability)));
+    expect(capabilities, contains(destinationLeasedFilePasteV1Capability));
 
     expect(
       buildRemoteClientCapabilities(

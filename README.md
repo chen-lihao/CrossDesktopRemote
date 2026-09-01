@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 启动并连接信令服务后自动进入可连接状态，不再通过页面角色切换控制共享。每台客户端会生成不可编辑的安装级机器码；文件/剪贴板阶段 1～5 已接入协议与 Rust 核心、桌面文本剪贴板、Mac/Windows/iPad 显式文件传输、iPad 用户授权边界，以及 Mac↔Windows 文件剪贴板安全物化、原子代次和临时目录租约。Windows/iPad 双机物理验收仍未完成。
+> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 启动并连接信令服务后自动进入可连接状态。每台客户端会生成不可编辑的安装级机器码；文本剪贴板和 Mac/Windows/iPad 显式文件传输已接入。桌面文件复制粘贴已改为统一的 `Offer → PasteIntent → DestinationLease → 显式传输 → Commit` 事务：复制阶段不读取或发送文件，粘贴瞬间锁定 Finder/Explorer 活动目录，文件内容只走现有可恢复传输引擎，不再写入远端系统文件剪贴板。Windows MSVC 与三端物理验收仍未完成。
 
 ## 项目定位
 
@@ -246,6 +246,17 @@ Mac/Windows 启动并连接信令服务后会自动上线并生成连接码；�
 
 物理设备验收步骤见 [Windows 控制 Mac 验收](./docs/Windows控制Mac验收.md)。
 
+### 桌面文件复制粘贴
+
+- `Ctrl/Command+C` 只创建包含随机 Offer ID、revision 和显示名称的内存元数据；不会计算文件摘要、创建传输任务或发送文件字节。
+- `Ctrl/Command+V` 才创建 PasteIntent。接收端在该时刻读取前台 Finder/Explorer 目录并签发不可猜测的一次性 DestinationLease；后续移动鼠标或切换文件夹不会改变该次传输的目标。
+- 文件内容统一复用显式文件传输引擎：16 KiB 网络帧、背压、暂停/取消、恢复位图、SHA-256、`.cdrpart` 和原子落盘。所有 Prepare/Ready/Cancel/Commit 都绑定 `sessionId + offerId + generation + pasteIntentId`，最终提交再绑定 `destinationLeaseId + transferId`，跨会话迟到消息和重复 V 不能误命中当前事务。
+- 目标目录租约保存规范化路径、平台目录身份（macOS device/inode；Windows volume/file-index）和创建时写权限；接收任务开始前重新验证身份与写权限。目录被删除、替换或失去权限时只拒绝该事务，不回退桌面或临时目录。
+- 本地复制文字、复制另一批文件、会话关闭或 Offer 到期会撤销尚未开始的 Offer；已经取得目标租约的传输成为独立事务，不会被之后的剪贴板或鼠标变化重定向。
+- Windows 只在前台是 Explorer/桌面且存在远端文件 Offer 时拦截 `Ctrl+V`；macOS 只在前台是 Finder 时拦截 `Command+V`。进程内控制/被控双会话由所有权仲裁器共享一个原生监听，不会互相注销。
+- macOS 读取 Finder 活动目录需要“自动化（Finder）”，监听全局粘贴需要“辅助功能”。桌面 Runner 因需要写入用户在 Finder 中选择的任意活动目录，采用直接分发的非 App Sandbox 构建；如果未来进入 Mac App Store，必须改为用户选择目录书签或 File Provider 工作流。
+- 未声明 `destination-leased-file-paste-v1` 的旧客户端不会进入旧的系统文件剪贴板物化流程，只保留远控、文本剪贴板和显式“文件传输”入口。iPad 继续使用 Document Picker、应用托管接收和导出/分享，不安装桌面全局快捷键监听。
+
 ### Windows 被控端（首轮单屏）
 
 - Windows Runner通过版本化能力握手开放被控角色；握手缺失或不兼容时拒绝开始共享。
@@ -327,7 +338,7 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；桌面DNS-SD、统一跨平台切屏事务、非阻塞显示几何和输入路径；可靠输入FIFO与无状态motion；macOS/Windows文本与文件剪贴板；Mac/Windows/iPad显式文件通道和传输中心；文件复制Offer/Paste门禁、受控临时目录租约；持久化信令服务器配置与WebSocket握手检查；macOS录屏/输入独立权限矩阵；暂停/恢复/取消、`.cdrpart`原子落盘与会话内续传；`analyze`零告警、200项测试通过且1项按设计跳过，macOS/iOS Debug构建成功 | Windows MSVC构建、Windows/iPad各30次主副屏往返和Mac/Windows/iPad双机文件/剪贴板物理验收；20 GB、磁盘满、输入P95与应用重启后续传 |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；桌面DNS-SD、统一跨平台切屏事务、非阻塞显示几何和输入路径；可靠输入FIFO与无状态motion；macOS/Windows文本剪贴板；Mac/Windows/iPad显式文件通道和传输中心；桌面文件`Offer/PasteIntent/DestinationLease/Commit`事务由`FileCopyPasteCoordinator`统一持有，并向活动目录原子落盘；持久化信令服务器配置与WebSocket握手检查；macOS录屏/输入独立权限矩阵；暂停/恢复/取消、`.cdrpart`原子落盘与会话内续传；`analyze`零告警、204项测试通过且1项按设计跳过，macOS/iOS Debug构建成功 | Windows MSVC构建、Windows/iPad各30次主副屏往返和Mac/Windows/iPad双机文件/剪贴板物理验收；20 GB、磁盘满、输入P95与应用重启后续传 |
 | Rust | `fmt`、Clippy；27个workspace单测；传输状态机、限额、Manifest/路径、恢复位图、SHA-256、WebRTC背压抽象与任务C ABI | 桌面MVP磁盘数据泵仍在Dart应用服务；下沉Rust/原生层和发布打包待接入 |
 | Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、lease/generation 原子轮换、邀请/来源两级限流、`retryAfter`；16 项测试通过 | 可信身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
 | Protobuf | v1基础消息、剪贴板/文件传输协议、显式能力协商和旧客户端降级；Buf lint、Java/Rust/Dart生成和编译 | 平台互操作、模糊测试和breaking基线待增加 |

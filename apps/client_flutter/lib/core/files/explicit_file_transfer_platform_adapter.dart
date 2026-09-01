@@ -11,8 +11,6 @@ abstract interface class ExplicitFileTransferPlatformAdapter {
   Future<List<String>> pickOutgoingFiles();
   Future<void> cleanupOutgoingFiles(List<String> paths);
   Future<String> createReceiveDirectory(String transferId);
-  Future<String> createClipboardReceiveDirectory(String transferId);
-  Future<void> cleanupClipboardReceiveDirectory(String path);
   Future<void> cleanupOrphanedClipboardReceiveDirectories({
     Duration maxAge = const Duration(hours: 24),
   });
@@ -64,16 +62,7 @@ class DesktopExplicitFileTransferPlatformAdapter
     throw UnsupportedError('Desktop receive directory is selected by the user');
   }
 
-  @override
-  Future<String> createClipboardReceiveDirectory(String transferId) async {
-    final safeId = transferId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
-    final root = _clipboardRoot;
-    await root.create(recursive: true);
-    return (await root.createTemp('$safeId-')).path;
-  }
-
-  @override
-  Future<void> cleanupClipboardReceiveDirectory(String path) async {
+  Future<void> _cleanupManagedClipboardDirectory(String path) async {
     final directory = Directory(path);
     if (!await directory.exists()) return;
     final root = _clipboardRoot;
@@ -134,7 +123,7 @@ class DesktopExplicitFileTransferPlatformAdapter
       final stat = await entity.stat();
       if (!stat.modified.isBefore(cutoff)) return;
       if (managed) {
-        await cleanupClipboardReceiveDirectory(entity.path);
+        await _cleanupManagedClipboardDirectory(entity.path);
       } else {
         final parent = Directory(entity.parent.path);
         final resolvedParent = await parent.resolveSymbolicLinks();
@@ -214,14 +203,6 @@ class IosExplicitFileTransferPlatformAdapter
   }
 
   @override
-  Future<String> createClipboardReceiveDirectory(String transferId) {
-    throw UnsupportedError('iPad 暂不支持系统文件剪贴板');
-  }
-
-  @override
-  Future<void> cleanupClipboardReceiveDirectory(String path) async {}
-
-  @override
   Future<void> cleanupOrphanedClipboardReceiveDirectories({
     Duration maxAge = const Duration(hours: 24),
   }) async {}
@@ -267,13 +248,6 @@ class UnsupportedExplicitFileTransferPlatformAdapter
   @override
   Future<String> createReceiveDirectory(String transferId) async =>
       _unsupported();
-
-  @override
-  Future<String> createClipboardReceiveDirectory(String transferId) async =>
-      _unsupported();
-
-  @override
-  Future<void> cleanupClipboardReceiveDirectory(String path) async {}
 
   @override
   Future<void> cleanupOrphanedClipboardReceiveDirectories({

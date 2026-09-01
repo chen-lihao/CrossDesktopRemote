@@ -41,6 +41,9 @@ bool FlutterWindow::OnCreate() {
       flutter_controller_->engine()->messenger());
   clipboard_bridge_ = std::make_unique<WindowsClipboardBridge>(
       flutter_controller_->engine()->messenger(), GetHandle());
+  file_paste_target_bridge_ =
+      std::make_unique<WindowsFilePasteTargetBridge>(
+          flutter_controller_->engine()->messenger(), GetHandle());
   lan_discovery_bridge_ = std::make_unique<WindowsLanDiscoveryBridge>(
       flutter_controller_->engine()->messenger(), GetHandle());
 
@@ -119,6 +122,7 @@ void FlutterWindow::OnDestroy() {
   KillTimer(GetHandle(), kDeferredFlutterRedrawTimer);
   lan_discovery_bridge_.reset();
   clipboard_bridge_.reset();
+  file_paste_target_bridge_.reset();
   host_bridge_.reset();
   window_channel_.reset();
   if (flutter_controller_) {
@@ -176,6 +180,10 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     return 0;
   }
   if (clipboard_bridge_ && clipboard_bridge_->HandleWindowMessage(message)) {
+    return 0;
+  }
+  if (file_paste_target_bridge_ &&
+      file_paste_target_bridge_->HandleWindowMessage(message, wparam)) {
     return 0;
   }
 

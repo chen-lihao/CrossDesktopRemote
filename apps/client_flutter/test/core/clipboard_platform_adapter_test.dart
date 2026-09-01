@@ -65,29 +65,6 @@ void main() {
     expect(calls.map((call) => call.method), ['getSnapshot', 'writeText']);
   });
 
-  test('method channel writes a bounded file list', () async {
-    MethodCall? invocation;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(methodChannel, (call) async {
-          invocation = call;
-          return {
-            'revision': 7,
-            'hasText': false,
-            'tooLarge': false,
-            'utf8Bytes': 0,
-            'filePaths': (call.arguments as Map)['paths'],
-          };
-        });
-    final adapter = MethodChannelClipboardPlatformAdapter(
-      methodChannel: methodChannel,
-      eventChannel: const EventChannel('clipboard-test-events'),
-    );
-
-    final snapshot = await adapter.writeFiles(['/tmp/report.pdf']);
-    expect(invocation?.method, 'writeFiles');
-    expect(snapshot.filePaths, ['/tmp/report.pdf']);
-  });
-
   test(
     'user initiated adapter never monitors and reads only on demand',
     () async {

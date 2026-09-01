@@ -3,16 +3,6 @@ import ApplicationServices
 import FlutterMacOS
 import dnssd
 
-@discardableResult
-func crossDesktopRemoteWriteFileURLs(
-  _ urls: [URL],
-  to pasteboard: NSPasteboard
-) -> Bool {
-  let objects: [NSPasteboardWriting] = urls.map { $0 as NSURL }
-  pasteboard.clearContents()
-  return pasteboard.writeObjects(objects)
-}
-
 func crossDesktopRemoteAbsolutePointerPosition(
   normalizedX: Double,
   normalizedY: Double,
@@ -254,6 +244,7 @@ final class CrossDesktopRemoteSyntheticKeyboard {
 class MainFlutterWindow: NSWindow {
   private var inputChannel: FlutterMethodChannel?
   private var clipboardBridge: AppleClipboardBridge?
+  private var filePasteTargetBridge: AppleFilePasteTargetBridge?
   private var lanDiscoveryBridge: AppleLanDiscoveryBridge?
   private var pressedMouseButtons: Set<String> = []
   private let syntheticKeyboard = CrossDesktopRemoteSyntheticKeyboard()
@@ -301,6 +292,9 @@ class MainFlutterWindow: NSWindow {
     }
     registerInputChannel(binaryMessenger: flutterViewController.engine.binaryMessenger)
     clipboardBridge = AppleClipboardBridge(
+      binaryMessenger: flutterViewController.engine.binaryMessenger
+    )
+    filePasteTargetBridge = AppleFilePasteTargetBridge(
       binaryMessenger: flutterViewController.engine.binaryMessenger
     )
     lanDiscoveryBridge = AppleLanDiscoveryBridge(
@@ -817,6 +811,289 @@ class MainFlutterWindow: NSWindow {
   }
 }
 
+private func crossDesktopRemoteFilePasteEventTap(
+  proxy: CGEventTapProxy,
+  type: CGEventType,
+  event: CGEvent,
+  userInfo: UnsafeMutableRawPointer?
+) -> Unmanaged<CGEvent>? {
+  guard let userInfo else { return Unmanaged.passUnretained(event) }
+  let bridge = Unmanaged<AppleFilePasteTargetBridge>
+    .fromOpaque(userInfo)
+    .takeUnretainedValue()
+  return bridge.handleEventTap(type: type, event: event)
+}
+
+private final class AppleFilePasteTargetBridge: NSObject, FlutterStreamHandler {
+  private struct TargetError: Error {
+    let code: String
+    let message: String
+    let details: Any?
+  }
+
+  private let methodChannel: FlutterMethodChannel
+  private let eventChannel: FlutterEventChannel
+  private var eventSink: FlutterEventSink?
+  private var eventTap: CFMachPort?
+  private var eventTapSource: CFRunLoopSource?
+  private var remoteOfferAvailable = false
+  private var suppressVKeyUp = false
+  private var removeTapAfterVKeyUp = false
+
+  init(binaryMessenger: FlutterBinaryMessenger) {
+    methodChannel = FlutterMethodChannel(
+      name: "com.crossdesktopremote.cross_desktop_remote/file_paste_target",
+      binaryMessenger: binaryMessenger
+    )
+    eventChannel = FlutterEventChannel(
+      name: "com.crossdesktopremote.cross_desktop_remote/file_paste_intents",
+      binaryMessenger: binaryMessenger
+    )
+    super.init()
+    methodChannel.setMethodCallHandler { [weak self] call, result in
+      guard let self else {
+        result(FlutterError(code: "paste_target_unavailable", message: "Paste target bridge is unavailable", details: nil))
+        return
+      }
+      if call.method == "setRemoteOfferAvailable" {
+        guard
+          let arguments = call.arguments as? [String: Any],
+          let available = arguments["available"] as? Bool
+        else {
+          result(FlutterError(code: "invalid_arguments", message: "Missing remote offer state", details: nil))
+          return
+        }
+        self.remoteOfferAvailable = available
+        if available && self.eventSink != nil {
+          self.removeTapAfterVKeyUp = false
+          guard self.installEventTap() else {
+            result(FlutterError(code: "paste_shortcut_permission_required", message: "请授予辅助功能权限，以便在 Finder 中接收远程文件粘贴快捷键", details: nil))
+            return
+          }
+        } else if !available {
+          if self.suppressVKeyUp {
+            self.removeTapAfterVKeyUp = true
+          } else {
+            self.removeEventTap()
+          }
+        }
+        result(nil)
+        return
+      }
+      if call.method == "validateTarget" {
+        guard
+          let arguments = call.arguments as? [String: Any],
+          let path = arguments["path"] as? String,
+          let expectedIdentity = arguments["directoryIdentity"] as? String
+        else {
+          result(FlutterError(code: "invalid_arguments", message: "Missing directory identity", details: nil))
+          return
+        }
+        do {
+          let target = try Self.directoryTarget(path: path, application: "Finder")
+          result(
+            target["directoryIdentity"] as? String == expectedIdentity &&
+              target["writable"] as? Bool == true
+          )
+        } catch {
+          result(false)
+        }
+        return
+      }
+      guard call.method == "captureActiveTarget" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      do {
+        result(try Self.captureActiveFinderTarget())
+      } catch let error as TargetError {
+        result(
+          FlutterError(
+            code: error.code,
+            message: error.message,
+            details: error.details
+          )
+        )
+      } catch {
+        result(
+          FlutterError(
+            code: "paste_target_failed",
+            message: error.localizedDescription,
+            details: nil
+          )
+        )
+      }
+    }
+    eventChannel.setStreamHandler(self)
+  }
+
+  deinit {
+    removeEventTap()
+    methodChannel.setMethodCallHandler(nil)
+    eventChannel.setStreamHandler(nil)
+  }
+
+  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+    eventSink = events
+    if remoteOfferAvailable && !installEventTap() {
+      return FlutterError(
+        code: "paste_shortcut_permission_required",
+        message: "请授予辅助功能权限，以便在 Finder 中接收远程文件粘贴快捷键",
+        details: nil
+      )
+    }
+    return nil
+  }
+
+  func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    eventSink = nil
+    removeEventTap()
+    return nil
+  }
+
+  fileprivate func handleEventTap(
+    type: CGEventType,
+    event: CGEvent
+  ) -> Unmanaged<CGEvent>? {
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+      if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
+      return Unmanaged.passUnretained(event)
+    }
+    if
+      type == .keyUp,
+      event.getIntegerValueField(.keyboardEventKeycode) == 9,
+      suppressVKeyUp
+    {
+      suppressVKeyUp = false
+      if removeTapAfterVKeyUp {
+        DispatchQueue.main.async { [weak self] in self?.removeEventTap() }
+      }
+      return nil
+    }
+    guard
+      remoteOfferAvailable,
+      type == .keyDown,
+      event.getIntegerValueField(.keyboardEventKeycode) == 9,
+      event.getIntegerValueField(.keyboardEventAutorepeat) == 0,
+      event.flags.contains(.maskCommand),
+      !event.flags.contains(.maskControl),
+      !event.flags.contains(.maskAlternate),
+      NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder"
+    else {
+      return Unmanaged.passUnretained(event)
+    }
+    suppressVKeyUp = true
+    DispatchQueue.main.async { [weak self] in self?.eventSink?(nil) }
+    return nil
+  }
+
+  private func installEventTap() -> Bool {
+    if eventTap != nil { return true }
+    let mask =
+      (CGEventMask(1) << CGEventType.keyDown.rawValue) |
+      (CGEventMask(1) << CGEventType.keyUp.rawValue)
+    guard let tap = CGEvent.tapCreate(
+      tap: .cgSessionEventTap,
+      place: .headInsertEventTap,
+      options: .defaultTap,
+      eventsOfInterest: mask,
+      callback: crossDesktopRemoteFilePasteEventTap,
+      userInfo: Unmanaged.passUnretained(self).toOpaque()
+    ) else {
+      return false
+    }
+    let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+    eventTap = tap
+    eventTapSource = source
+    CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+    CGEvent.tapEnable(tap: tap, enable: true)
+    return true
+  }
+
+  private func removeEventTap() {
+    removeTapAfterVKeyUp = false
+    suppressVKeyUp = false
+    if let source = eventTapSource {
+      CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+    }
+    eventTapSource = nil
+    if let eventTap { CFMachPortInvalidate(eventTap) }
+    eventTap = nil
+  }
+
+  private static func captureActiveFinderTarget() throws -> [String: Any] {
+    guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder" else {
+      throw TargetError(
+        code: "unsupported_paste_target",
+        message: "请先在 Finder 中打开并激活目标目录",
+        details: nil
+      )
+    }
+    let source = """
+      tell application "Finder"
+        if (count of Finder windows) is 0 then
+          set targetFolder to desktop
+        else
+          set targetFolder to target of front Finder window
+        end if
+        return POSIX path of (targetFolder as alias)
+      end tell
+      """
+    var scriptError: NSDictionary?
+    guard
+      let descriptor = NSAppleScript(source: source)?.executeAndReturnError(&scriptError),
+      let rawPath = descriptor.stringValue,
+      !rawPath.isEmpty
+    else {
+      throw TargetError(
+        code: "paste_target_permission_required",
+        message: "无法读取 Finder 当前目录，请允许 CrossDesktopRemote 控制 Finder",
+        details: scriptError
+      )
+    }
+    return try directoryTarget(path: rawPath, application: "Finder")
+  }
+
+  private static func directoryTarget(
+    path: String,
+    application: String
+  ) throws -> [String: Any] {
+    let url = URL(fileURLWithPath: path)
+      .resolvingSymlinksInPath()
+      .standardizedFileURL
+    var isDirectory: ObjCBool = false
+    guard
+      FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+      isDirectory.boolValue
+    else {
+      throw TargetError(
+        code: "paste_target_unavailable",
+        message: "Finder 当前目录不存在或不可访问",
+        details: path
+      )
+    }
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    guard
+      let device = attributes[.systemNumber] as? NSNumber,
+      let inode = attributes[.systemFileNumber] as? NSNumber
+    else {
+      throw TargetError(
+        code: "paste_target_identity_unavailable",
+        message: "无法确认 Finder 目标目录身份",
+        details: path
+      )
+    }
+    let writable = FileManager.default.isWritableFile(atPath: url.path)
+    return [
+      "path": url.path,
+      "displayName": FileManager.default.displayName(atPath: url.path),
+      "application": application,
+      "directoryIdentity": "\(device.uint64Value):\(inode.uint64Value)",
+      "writable": writable,
+    ]
+  }
+}
+
 private final class AppleClipboardBridge: NSObject, FlutterStreamHandler {
   private static let maximumTextBytes = 256 * 1024
   private let methodChannel: FlutterMethodChannel
@@ -863,38 +1140,6 @@ private final class AppleClipboardBridge: NSObject, FlutterStreamHandler {
           return
         }
         result(self.snapshot())
-      case "writeFiles":
-        guard
-          let arguments = call.arguments as? [String: Any],
-          let paths = arguments["paths"] as? [String],
-          !paths.isEmpty
-        else {
-          result(FlutterError(code: "invalid_clipboard_files", message: "Expected a non-empty file path list", details: nil))
-          return
-        }
-        let fileManager = FileManager.default
-        let urls = paths.compactMap { path -> URL? in
-          guard path.hasPrefix("/"), fileManager.fileExists(atPath: path) else { return nil }
-          return URL(fileURLWithPath: path).standardizedFileURL
-        }
-        guard urls.count == paths.count else {
-          result(FlutterError(code: "invalid_clipboard_files", message: "A clipboard file no longer exists", details: nil))
-          return
-        }
-        let pasteboard = NSPasteboard.general
-        guard crossDesktopRemoteWriteFileURLs(urls, to: pasteboard) else {
-          result(FlutterError(code: "clipboard_write_failed", message: "Unable to write file URLs to the macOS clipboard", details: nil))
-          return
-        }
-        self.lastChangeCount = pasteboard.changeCount
-        result([
-          "revision": pasteboard.changeCount,
-          "hasText": false,
-          "tooLarge": false,
-          "utf8Bytes": 0,
-          "filePaths": urls.map(\.path),
-          "fileDelivery": "materialized-file-url",
-        ])
       default:
         result(FlutterMethodNotImplemented)
       }

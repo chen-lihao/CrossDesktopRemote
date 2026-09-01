@@ -64,11 +64,95 @@ message ClipboardRelease {
   string clipboard_id = 2;
 }
 
+// A file paste is a destination-side transaction. Copying only publishes
+// metadata. The destination captures its active Finder/Explorer folder when
+// the user presses Paste, returns an opaque lease, and file bytes then travel
+// through the normal resumable transfer protocol.
+message FilePastePrepare {
+  RequestContext context = 1;
+  string session_id = 2;
+  string offer_id = 3;
+  uint64 generation = 4;
+  string paste_intent_id = 5;
+  uint64 revision = 6;
+}
+
+message FilePasteReady {
+  RequestContext context = 1;
+  string session_id = 2;
+  string offer_id = 3;
+  uint64 generation = 4;
+  string paste_intent_id = 5;
+  string destination_lease_id = 6;
+}
+
+message FilePasteRejected {
+  RequestContext context = 1;
+  string session_id = 2;
+  string offer_id = 3;
+  uint64 generation = 4;
+  string paste_intent_id = 5;
+  ErrorStatus error = 6;
+}
+
+message FilePasteCancel {
+  RequestContext context = 1;
+  string session_id = 2;
+  string offer_id = 3;
+  uint64 generation = 4;
+  string paste_intent_id = 5;
+  string destination_lease_id = 6;
+}
+
+message FilePasteCommitted {
+  RequestContext context = 1;
+  string session_id = 2;
+  string offer_id = 3;
+  uint64 generation = 4;
+  string paste_intent_id = 5;
+  string destination_lease_id = 6;
+  string transfer_id = 7;
+}
+
+message RemoteFileOffer {
+  RequestContext context = 1;
+  string session_id = 2;
+  string offer_id = 3;
+  uint64 generation = 4;
+  uint64 revision = 5;
+  repeated string display_names = 6;
+  uint32 item_count = 7;
+}
+
+message RemoteFileOfferRevoke {
+  RequestContext context = 1;
+  string session_id = 2;
+  string offer_id = 3;
+  uint64 generation = 4;
+}
+
+message RemoteFilePasteRequest {
+  RequestContext context = 1;
+  string session_id = 2;
+  string offer_id = 3;
+  uint64 generation = 4;
+  string paste_intent_id = 5;
+  string destination_lease_id = 6;
+}
+
 message ClipboardEnvelope {
   oneof message {
     ClipboardOffer offer = 1;
     ClipboardDataRequest data_request = 2;
     ClipboardDataChunk data_chunk = 3;
     ClipboardRelease release = 4;
+    FilePastePrepare file_paste_prepare = 5;
+    FilePasteReady file_paste_ready = 6;
+    FilePasteRejected file_paste_rejected = 7;
+    FilePasteCancel file_paste_cancel = 8;
+    FilePasteCommitted file_paste_committed = 9;
+    RemoteFileOffer remote_file_offer = 10;
+    RemoteFileOfferRevoke remote_file_offer_revoke = 11;
+    RemoteFilePasteRequest remote_file_paste_request = 12;
   }
 }

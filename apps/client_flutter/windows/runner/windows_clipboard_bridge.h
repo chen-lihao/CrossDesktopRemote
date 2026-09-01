@@ -30,11 +30,6 @@ class WindowsClipboardBridge {
       const flutter::MethodCall<EncodableValue>& call,
       std::unique_ptr<FlutterResult> result);
   EncodableValue Snapshot();
-  EncodableValue FileSnapshot(const std::vector<std::wstring>& paths,
-                              const char* delivery);
-  HGLOBAL BuildFileDrop(const std::vector<std::wstring>& paths);
-  HGLOBAL BuildPreferredDropEffect();
-  bool VerifyFileDrop(const std::vector<std::wstring>& paths);
   bool OpenClipboardWithRetry();
   void EmitSnapshot();
 

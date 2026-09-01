@@ -49,6 +49,49 @@ sourceSets {
 	}
 }
 
+def protocolRoot = file('../../proto')
+def generatedProtocolJava = layout.buildDirectory.dir('generated/sources/proto/main/java')
+def protocolSources = [
+	'crossdesktop/v1/common.proto',
+	'crossdesktop/v1/clipboard.proto',
+	'crossdesktop/v1/transfer.proto',
+	'crossdesktop/v1/capability.proto',
+	'crossdesktop/v1/device.proto',
+	'crossdesktop/v1/input.proto',
+	'crossdesktop/v1/session.proto',
+	'crossdesktop/v1/signaling.proto',
+].collect { new File(protocolRoot, it) }
+
+tasks.register('generateProtocolJava', Exec) {
+	description = 'Generates a clean Java Protobuf tree for the control plane.'
+	group = 'build'
+	inputs.files(protocolSources)
+	outputs.dir(generatedProtocolJava)
+	// The shared generation script and IDEs can modify this ignored directory
+	// outside Gradle. Always rebuild it so an orphaned Java class can never be
+	// considered an up-to-date output and mixed with the current descriptors.
+	outputs.upToDateWhen { false }
+
+	doFirst {
+		def outputDirectory = generatedProtocolJava.get().asFile
+		delete(outputDirectory)
+		outputDirectory.mkdirs()
+	}
+
+	def protocExecutable = providers.environmentVariable('CROSSDESKTOP_PROTOC')
+		.orElse('protoc')
+	commandLine(
+		protocExecutable.get(),
+		"--proto_path=${protocolRoot.absolutePath}",
+		"--java_out=${generatedProtocolJava.get().asFile.absolutePath}",
+		*protocolSources.collect { it.absolutePath },
+	)
+}
+
+tasks.named('compileJava') {
+	dependsOn tasks.named('generateProtocolJava')
+}
+
 tasks.named('test') {
 	useJUnitPlatform()
 }

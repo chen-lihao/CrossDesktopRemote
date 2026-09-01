@@ -7,6 +7,8 @@ const textureCropRenderingV1Capability = 'texture-crop-rendering-v1';
 const textClipboardV1Capability = 'text-clipboard-v1';
 const explicitFileTransferV1Capability = 'explicit-file-transfer-v1';
 const fileClipboardV1Capability = 'file-clipboard-v1';
+const destinationLeasedFilePasteV1Capability =
+    'destination-leased-file-paste-v1';
 const atomicShortcutV1Capability = 'atomic-shortcut-v1';
 const scopedInputResetV1Capability = 'scoped-input-reset-v1';
 const iosActiveContentGeometryV3Enabled = bool.fromEnvironment(
@@ -53,7 +55,9 @@ List<String> buildRemoteClientCapabilities({
   if (clipboardSupported &&
       explicitFileTransferSupported &&
       fileClipboardSupported) {
-    capabilities.add(fileClipboardV1Capability);
+    if (normalizedPlatform == 'macos' || normalizedPlatform == 'windows') {
+      capabilities.add(destinationLeasedFilePasteV1Capability);
+    }
   }
   capabilities.add(atomicShortcutV1Capability);
   capabilities.add(scopedInputResetV1Capability);

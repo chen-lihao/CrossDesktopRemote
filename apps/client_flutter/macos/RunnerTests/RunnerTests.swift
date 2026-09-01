@@ -39,47 +39,6 @@ class RunnerTests: XCTestCase {
     )
   }
 
-  func testMaterializedFileURLsRoundTripThroughPasteboard() throws {
-    let temporaryDirectory = FileManager.default.temporaryDirectory
-      .appendingPathComponent(UUID().uuidString, isDirectory: true)
-    try FileManager.default.createDirectory(
-      at: temporaryDirectory,
-      withIntermediateDirectories: true
-    )
-    defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
-
-    let firstURL = temporaryDirectory.appendingPathComponent("报告.txt")
-    let secondURL = temporaryDirectory.appendingPathComponent("资料", isDirectory: true)
-    try Data("clipboard".utf8).write(to: firstURL)
-    try FileManager.default.createDirectory(
-      at: secondURL,
-      withIntermediateDirectories: false
-    )
-
-    let pasteboard = NSPasteboard.withUniqueName()
-    defer { pasteboard.releaseGlobally() }
-
-    XCTAssertTrue(
-      crossDesktopRemoteWriteFileURLs(
-        [firstURL, secondURL],
-        to: pasteboard
-      )
-    )
-    let fileURLs = try XCTUnwrap(
-      pasteboard.readObjects(
-        forClasses: [NSURL.self],
-        options: [.urlReadingFileURLsOnly: true]
-      ) as? [URL]
-    )
-    XCTAssertEqual(
-      fileURLs.map(\.standardizedFileURL),
-      [firstURL, secondURL].map(\.standardizedFileURL)
-    )
-    XCTAssertTrue(
-      pasteboard.types?.contains(.fileURL) == true
-    )
-  }
-
   func testCommandShortcutPostsBalancedModifierSequence() {
     let keyboard = CrossDesktopRemoteSyntheticKeyboard()
     var strokes: [CrossDesktopRemoteSyntheticKeyStroke] = []

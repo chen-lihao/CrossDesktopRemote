@@ -990,10 +990,14 @@ class _FileClipboardPasteProgress extends StatelessWidget {
     return ListenableBuilder(
       listenable: session,
       builder: (context, _) {
-        if (!session.fileClipboardPastePending) {
+        final transferPending = session.fileClipboardPastePending;
+        final offerPending = session.fileClipboardOfferPending;
+        if (!transferPending && !offerPending) {
           return const SizedBox.shrink();
         }
-        final progress = session.fileClipboardPasteTask?.progress;
+        final progress = transferPending
+            ? session.fileClipboardPasteTask?.progress
+            : null;
         final colorScheme = Theme.of(context).colorScheme;
         return Material(
           color: colorScheme.primaryContainer,
@@ -1003,12 +1007,24 @@ class _FileClipboardPasteProgress extends StatelessWidget {
               children: [
                 const Icon(Icons.content_paste_go_outlined, size: 18),
                 const SizedBox(width: 10),
-                Expanded(child: Text(session.fileClipboardPasteStatus)),
-                const SizedBox(width: 12),
-                SizedBox(
-                  width: 120,
-                  child: LinearProgressIndicator(value: progress),
+                Expanded(
+                  child: Text(
+                    transferPending
+                        ? session.fileClipboardPasteStatus
+                        : '已记录文件；在远程 Finder/文件资源管理器按粘贴后才开始传输',
+                  ),
                 ),
+                if (transferPending) ...[
+                  const SizedBox(width: 12),
+                  SizedBox(
+                    width: 120,
+                    child: LinearProgressIndicator(value: progress),
+                  ),
+                ] else
+                  TextButton(
+                    onPressed: session.cancelFileClipboardOffer,
+                    child: const Text('取消'),
+                  ),
               ],
             ),
           ),
