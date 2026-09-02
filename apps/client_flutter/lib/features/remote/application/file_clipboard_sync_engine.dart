@@ -210,8 +210,11 @@ class FileCopyPasteCoordinator {
   RemoteFileClipboardOffer? remoteOffer;
   FileClipboardOfferIdentity? announcedLocalOffer;
 
-  void beginSession() {
-    localSessionId = createFilePasteOpaqueId();
+  void beginSession({String? sessionId}) {
+    if (sessionId != null && !_validOpaqueId(sessionId)) {
+      throw ArgumentError.value(sessionId, 'sessionId', '会话标识无效');
+    }
+    localSessionId = sessionId ?? createFilePasteOpaqueId();
     remoteSessionId = null;
     remoteOffer = null;
     announcedLocalOffer = null;

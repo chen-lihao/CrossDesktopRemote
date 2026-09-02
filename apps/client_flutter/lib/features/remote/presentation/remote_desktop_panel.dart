@@ -507,6 +507,8 @@ class RemoteDesktopPanel extends StatefulWidget {
     this.onTextInputModeChanged,
     this.desktopFullScreen = false,
     this.onDesktopFullScreenChanged,
+    this.windowedWorkspace = false,
+    this.toolbarLeading,
   });
 
   final RemoteSessionController session;
@@ -515,6 +517,8 @@ class RemoteDesktopPanel extends StatefulWidget {
   final ValueChanged<RemoteTextInputMode>? onTextInputModeChanged;
   final bool desktopFullScreen;
   final Future<bool> Function(bool enabled)? onDesktopFullScreenChanged;
+  final bool windowedWorkspace;
+  final Widget? toolbarLeading;
 
   @override
   State<RemoteDesktopPanel> createState() => _RemoteDesktopPanelState();
@@ -542,7 +546,8 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
   }
 
   Future<void> _openFullScreen() async {
-    if (Platform.isWindows && widget.onDesktopFullScreenChanged != null) {
+    if ((Platform.isWindows || Platform.isMacOS || Platform.isLinux) &&
+        widget.onDesktopFullScreenChanged != null) {
       final changed = await widget.onDesktopFullScreenChanged!(true);
       if (changed && mounted) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -662,6 +667,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
           ? Colors.black.withValues(alpha: 0.9)
           : Theme.of(context).colorScheme.surfaceContainerHighest,
       child: _RemoteToolbar(
+        leading: widget.toolbarLeading,
         session: widget.session,
         pointerMode: inputSettings.pointerMode,
         viewFit: _viewFit,
@@ -758,7 +764,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
         return ValueListenableBuilder<RemoteInputSettings>(
           valueListenable: _inputSettings,
           builder: (context, inputSettings, _) {
-            if (widget.desktopFullScreen) {
+            if (widget.desktopFullScreen || widget.windowedWorkspace) {
               return Material(
                 color: Colors.black,
                 child: Column(
@@ -767,12 +773,12 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
                     _buildToolbar(
                       context,
                       inputSettings,
-                      desktopFullScreen: true,
+                      desktopFullScreen: widget.desktopFullScreen,
                     ),
                     Expanded(
                       child: _buildRemoteSurface(
                         inputSettings,
-                        desktopFullScreen: true,
+                        desktopFullScreen: widget.desktopFullScreen,
                       ),
                     ),
                   ],
@@ -1289,31 +1295,13 @@ class _RemoteToolbar extends StatelessWidget {
                             icon: const Icon(Icons.swap_horiz),
                           ),
                         ),
-                      PopupMenuButton<RemoteQualityProfile>(
-                        enabled: !session.qualityPending,
-                        tooltip: '传输清晰度：${session.qualityStatusLabel}',
-                        initialValue: session.selectedQuality,
-                        onSelected: session.selectQuality,
-                        itemBuilder: (context) => [
-                          for (final profile in RemoteQualityProfile.values)
-                            if (!profile.desktopControllerOnly ||
-                                Platform.isMacOS ||
-                                Platform.isWindows ||
-                                Platform.isLinux)
-                              PopupMenuItem(
-                                value: profile,
-                                child: ListTile(
-                                  dense: true,
-                                  contentPadding: EdgeInsets.zero,
-                                  leading: Icon(
-                                    profile == session.selectedQuality
-                                        ? Icons.check_circle
-                                        : Icons.high_quality_outlined,
-                                  ),
-                                  title: Text(profile.label),
-                                ),
+                      IconButton(
+                        tooltip: '分辨率与帧率：${session.qualityStatusLabel}',
+                        onPressed: session.qualityPending
+                            ? null
+                            : () => unawaited(
+                                _showVideoPolicyDialog(context, session),
                               ),
-                        ],
                         icon: session.qualityPending
                             ? const SizedBox.square(
                                 dimension: 18,
@@ -3489,4 +3477,146 @@ class _RemotePointerControlBar extends StatelessWidget {
       ),
     );
   }
+}
+
+Future<void> _showVideoPolicyDialog(
+  BuildContext context,
+  RemoteSessionController session,
+) async {
+  var policy = session.selectedVideoPolicy;
+  final edgeController = TextEditingController(
+    text: '${policy.customLongEdge}',
+  );
+  final fpsController = TextEditingController(
+    text: '${policy.customFramesPerSecond}',
+  );
+  final bitrateController = TextEditingController(
+    text: policy.maxBitrateMbps?.toString() ?? '',
+  );
+  final selected = await showDialog<RemoteVideoPolicy>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
+        title: const Text('分辨率与帧率'),
+        content: SizedBox(
+          width: 430,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<RemoteResolutionMode>(
+                  initialValue: policy.resolution,
+                  decoration: const InputDecoration(labelText: '分辨率'),
+                  items: [
+                    for (final value in RemoteResolutionMode.values)
+                      DropdownMenuItem(value: value, child: Text(value.label)),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      setState(
+                        () => policy = policy.copyWith(resolution: value),
+                      );
+                    }
+                  },
+                ),
+                if (policy.resolution == RemoteResolutionMode.custom) ...[
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: edgeController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '长边像素（320～7680）',
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                DropdownButtonFormField<RemoteFrameRateMode>(
+                  initialValue: policy.frameRate,
+                  decoration: const InputDecoration(labelText: '帧率'),
+                  items: [
+                    for (final value in RemoteFrameRateMode.values)
+                      DropdownMenuItem(value: value, child: Text(value.label)),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      setState(
+                        () => policy = policy.copyWith(frameRate: value),
+                      );
+                    }
+                  },
+                ),
+                if (policy.frameRate == RemoteFrameRateMode.custom) ...[
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: fpsController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '帧率（5～120 fps）',
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                TextField(
+                  controller: bitrateController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '最大码率 Mbps（留空为自动）',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<RemoteVideoPreference>(
+                  initialValue: policy.preference,
+                  decoration: const InputDecoration(labelText: '降级策略'),
+                  items: [
+                    for (final value in RemoteVideoPreference.values)
+                      DropdownMenuItem(value: value, child: Text(value.label)),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      setState(
+                        () => policy = policy.copyWith(preference: value),
+                      );
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final edge = int.tryParse(edgeController.text);
+              final fps = int.tryParse(fpsController.text);
+              final bitrate = bitrateController.text.trim().isEmpty
+                  ? null
+                  : int.tryParse(bitrateController.text);
+              Navigator.pop(
+                context,
+                policy.copyWith(
+                  customLongEdge: (edge ?? policy.customLongEdge).clamp(
+                    320,
+                    7680,
+                  ),
+                  customFramesPerSecond: (fps ?? policy.customFramesPerSecond)
+                      .clamp(5, 120),
+                  maxBitrateMbps: bitrate?.clamp(1, 100),
+                  automaticBitrate: bitrate == null,
+                ),
+              );
+            },
+            child: const Text('应用'),
+          ),
+        ],
+      ),
+    ),
+  );
+  edgeController.dispose();
+  fpsController.dispose();
+  bitrateController.dispose();
+  if (selected != null) session.selectVideoPolicy(selected);
 }

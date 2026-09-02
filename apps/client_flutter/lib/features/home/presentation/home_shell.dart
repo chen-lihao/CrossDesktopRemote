@@ -7,6 +7,7 @@ import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/devices/presentation/devices_page.dart';
 import 'package:cross_desktop_remote/features/remote/application/host_availability_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_coordinator.dart';
 import 'package:cross_desktop_remote/features/sessions/presentation/sessions_page.dart';
 import 'package:cross_desktop_remote/features/sessions/application/session_history_controller.dart';
 import 'package:cross_desktop_remote/features/settings/presentation/settings_page.dart';
@@ -49,11 +50,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   late final DeviceIdentityController _identity;
   late final SessionHistoryController _history;
   late final RemoteSessionController _controllerSession;
+  late final RemoteViewerCoordinator _remoteViewer;
   RemoteSessionController? _hostSession;
   HostAvailabilityController? _hostAvailability;
   late LanDiscoveryService _discovery;
   late List<Widget> _pages;
-  bool _desktopRemoteFullScreen = false;
 
   @override
   void initState() {
@@ -88,13 +89,16 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       role: RemoteRole.controller,
       localDeviceId: _identity.deviceId,
       initialQuality: _settings.defaultQuality,
+      initialVideoPolicy: _settings.defaultVideoPolicy,
       initialClipboardMode: _settings.clipboardSyncMode,
     );
+    _remoteViewer = RemoteViewerCoordinator();
     if (_capabilities.canHost) {
       _hostSession = RemoteSessionController(
         role: RemoteRole.host,
         localDeviceId: _identity.deviceId,
         initialQuality: _settings.defaultQuality,
+        initialVideoPolicy: _settings.defaultVideoPolicy,
         initialClipboardMode: _settings.clipboardSyncMode,
       );
       _hostAvailability = HostAvailabilityController(
@@ -111,12 +115,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         discoveryService: _discovery,
         identity: _identity,
         settings: _settings,
-        onDesktopFullScreenChanged: _handleDesktopFullScreenChanged,
+        onOpenRemoteDesktop: _openRemoteDesktop,
       ),
       SessionsPage(
         sessions: [_controllerSession, ?_hostSession],
         history: _history,
-        onOpenDevices: () => _select(HomeSection.devices.index),
+        onOpenRemoteDesktop: _openRemoteDesktop,
       ),
       SettingsPage(
         settings: _settings,
@@ -127,9 +131,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   void _handleSettingsChanged() {
-    _controllerSession.setIdleQuality(_settings.defaultQuality);
+    _controllerSession.setIdleVideoPolicy(_settings.defaultVideoPolicy);
     _controllerSession.setClipboardMode(_settings.clipboardSyncMode);
-    _hostSession?.setIdleQuality(_settings.defaultQuality);
+    _hostSession?.setIdleVideoPolicy(_settings.defaultVideoPolicy);
     _hostSession?.setClipboardMode(_settings.clipboardSyncMode);
     final availability = _hostAvailability;
     if (availability != null) {
@@ -141,9 +145,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
   }
 
-  void _handleDesktopFullScreenChanged(bool enabled) {
-    if (!mounted || _desktopRemoteFullScreen == enabled) return;
-    setState(() => _desktopRemoteFullScreen = enabled);
+  void _openRemoteDesktop() {
+    if (!_controllerSession.hasRemoteVideo) {
+      _select(HomeSection.devices.index);
+      return;
+    }
+    unawaited(
+      _remoteViewer.open(
+        context: context,
+        session: _controllerSession,
+        settings: _settings,
+      ),
+    );
   }
 
   @override
@@ -175,30 +188,28 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             body: SafeArea(
               child: Row(
                 children: [
-                  if (!_desktopRemoteFullScreen) ...[
-                    NavigationRail(
-                      extended: constraints.maxWidth >= 1180,
-                      selectedIndex: _selectedIndex,
-                      onDestinationSelected: _select,
-                      leading: const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 20),
-                        child: Tooltip(
-                          message: 'CrossDesktopRemote',
-                          child: Icon(Icons.desktop_windows_outlined),
-                        ),
+                  NavigationRail(
+                    extended: constraints.maxWidth >= 1180,
+                    selectedIndex: _selectedIndex,
+                    onDestinationSelected: _select,
+                    leading: const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 20),
+                      child: Tooltip(
+                        message: 'CrossDesktopRemote',
+                        child: Icon(Icons.desktop_windows_outlined),
                       ),
-                      destinations: _destinations
-                          .map(
-                            (destination) => NavigationRailDestination(
-                              icon: destination.icon,
-                              selectedIcon: destination.selectedIcon,
-                              label: Text(destination.label),
-                            ),
-                          )
-                          .toList(growable: false),
                     ),
-                    const VerticalDivider(width: 1),
-                  ],
+                    destinations: _destinations
+                        .map(
+                          (destination) => NavigationRailDestination(
+                            icon: destination.icon,
+                            selectedIcon: destination.selectedIcon,
+                            label: Text(destination.label),
+                          ),
+                        )
+                        .toList(growable: false),
+                  ),
+                  const VerticalDivider(width: 1),
                   Expanded(
                     key: const ValueKey('workspace'),
                     child: IndexedStack(
@@ -213,25 +224,21 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         }
 
         return Scaffold(
-          appBar: _desktopRemoteFullScreen
-              ? null
-              : AppBar(
-                  title: const Text(
-                    'CrossDesktopRemote',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
+          appBar: AppBar(
+            title: const Text(
+              'CrossDesktopRemote',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
           body: SafeArea(
             child: IndexedStack(index: _selectedIndex, children: _pages),
           ),
-          bottomNavigationBar: _desktopRemoteFullScreen
-              ? null
-              : NavigationBar(
-                  selectedIndex: _selectedIndex,
-                  onDestinationSelected: _select,
-                  destinations: _destinations,
-                ),
+          bottomNavigationBar: NavigationBar(
+            selectedIndex: _selectedIndex,
+            onDestinationSelected: _select,
+            destinations: _destinations,
+          ),
         );
       },
     );
@@ -242,6 +249,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_discovery.dispose());
     _history.dispose();
+    _remoteViewer.close();
     _hostAvailability?.dispose();
     _hostSession?.dispose();
     _controllerSession.dispose();

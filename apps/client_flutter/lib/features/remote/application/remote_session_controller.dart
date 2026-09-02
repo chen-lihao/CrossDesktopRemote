@@ -24,6 +24,7 @@ import 'package:cross_desktop_remote/features/remote/application/remote_input_se
 import 'package:cross_desktop_remote/features/remote/application/remote_input_state_coordinator.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_media_stats.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_quality_adaptation.dart';
+import 'package:cross_desktop_remote/features/remote/application/remote_session_kernel.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/application/explicit_file_transfer_engine.dart';
 import 'package:cross_desktop_remote/features/remote/application/explicit_file_transfer_models.dart';
@@ -147,6 +148,7 @@ class RemoteSessionController extends ChangeNotifier {
     FilePasteTargetPlatformAdapter? filePasteTargetPlatformAdapter,
     Stream<DesktopWindowLifecycleEvent>? hostWindowLifecycleEvents,
     RemoteQualityProfile initialQuality = RemoteQualityProfile.automatic,
+    RemoteVideoPolicy? initialVideoPolicy,
     ClipboardSyncMode initialClipboardMode = ClipboardSyncMode.bidirectional,
   }) : _localDeviceId = localDeviceId.trim().toLowerCase(),
        _signaling = signalingClient ?? SignalingClient(),
@@ -163,6 +165,8 @@ class RemoteSessionController extends ChangeNotifier {
            filePasteTargetPlatformAdapter ??
            createFilePasteTargetPlatformAdapter(),
        _selectedQuality = initialQuality,
+       _selectedVideoPolicy =
+           initialVideoPolicy ?? RemoteVideoPolicy.fromLegacy(initialQuality),
        _clipboardMode = _platformClipboardMode(initialClipboardMode, role),
        _clipboardSync = TextClipboardSyncEngine(
          localIsController: role == RemoteRole.controller,
@@ -184,6 +188,7 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   final RemoteRole role;
+  late final RemoteSessionKernel _kernel = RemoteSessionKernel(role: role.name);
   String _localDeviceId;
   final SignalingClient _signaling;
   final HostPlatformAdapter _hostPlatform;
@@ -214,10 +219,12 @@ class RemoteSessionController extends ChangeNotifier {
   /// Apple keeps the physically verified fixed 1080p ScreenCaptureKit canvas.
   /// Windows can capture a 2K source without entering the Apple display-switch
   /// transaction, so its first performance prototype receives a higher cap.
-  int get _sessionCaptureLongEdge =>
-      _hostPlatform.type == HostPlatformType.windows
-      ? _windowsSessionCaptureLongEdge
-      : _appleSessionCaptureLongEdge;
+  int get _sessionCaptureLongEdge => math.max(
+    _hostPlatform.type == HostPlatformType.windows
+        ? _windowsSessionCaptureLongEdge
+        : _appleSessionCaptureLongEdge,
+    (_selectedVideoPolicy.targetLongEdge ?? 0).clamp(0, 3840),
+  );
   final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
   final StreamController<RemoteNotice> _notices =
       StreamController<RemoteNotice>.broadcast(sync: true);
@@ -288,6 +295,9 @@ class RemoteSessionController extends ChangeNotifier {
   String? _renderedDisplayId;
   String? _remoteDeviceId;
   String? _remoteHostPlatform;
+  String? _localNetworkAddress;
+  String? _remoteNetworkAddress;
+  String? _signalingServerUrl;
   bool _remoteSupportsPhysicalKeyboard = false;
   String? _controlError;
   String? _error;
@@ -299,6 +309,9 @@ class RemoteSessionController extends ChangeNotifier {
   int _hostInvitationGeneration = 0;
   HostInvitationState _hostInvitationState = HostInvitationState.unavailable;
   bool _supportsInvitationRotation = false;
+  bool _supportsServerInvitationPush = false;
+  bool _remoteSupportsVideoPolicyV2 = false;
+  bool _remoteSupportsMultiDisplayStreamV1 = false;
   bool _remoteSupportsActiveContentGeometry = false;
   int _remoteActiveContentGeometryVersion = 0;
   bool _remoteSupportsTextClipboardV1 = false;
@@ -312,6 +325,7 @@ class RemoteSessionController extends ChangeNotifier {
   Completer<Map<String, dynamic>>? _sessionRepairCompleter;
   String? _sessionRepairRequestId;
   RemoteQualityProfile _selectedQuality;
+  RemoteVideoPolicy _selectedVideoPolicy;
   ClipboardSyncMode _clipboardMode;
   ClipboardSyncMode? _remoteClipboardMode;
   ClipboardOffer? _queuedClipboardOffer;
@@ -324,6 +338,7 @@ class RemoteSessionController extends ChangeNotifier {
   ClipboardSyncStatus _clipboardStatus = ClipboardSyncStatus.unavailable;
   String _clipboardStatusMessage = '当前平台不支持';
   RemoteQualityProfile? _queuedQualityProfile;
+  RemoteVideoPolicy? _queuedVideoPolicy;
   int? _actualVideoWidth;
   int? _actualVideoHeight;
   RemoteVideoFrameSize? _expectedVideoFrameSize;
@@ -363,6 +378,9 @@ class RemoteSessionController extends ChangeNotifier {
   String? get _pendingDisplayId => _displaySwitch.targetDisplayId;
 
   RemoteSessionState get state => _state;
+  String? get sessionId => _kernel.sessionId;
+  String get localDeviceId => _localDeviceId;
+  Stream<RemoteSessionDomainEvent> get domainEvents => _kernel.events;
   Stream<RemoteNotice> get notices => _notices.stream;
   String get statusMessage => _statusMessage;
   String? get error => _error;
@@ -372,9 +390,13 @@ class RemoteSessionController extends ChangeNotifier {
   int get hostInvitationGeneration => _hostInvitationGeneration;
   HostInvitationState get hostInvitationState => _hostInvitationState;
   bool get supportsInvitationRotation => _supportsInvitationRotation;
+  bool get supportsServerInvitationPush => _supportsServerInvitationPush;
+  bool get remoteSupportsMultiDisplayStreamV1 =>
+      _remoteSupportsMultiDisplayStreamV1;
   bool get screenCaptureGranted => _screenCaptureGranted;
   bool? get accessibilityGranted => _accessibilityGranted;
   RemoteQualityProfile get selectedQuality => _selectedQuality;
+  RemoteVideoPolicy get selectedVideoPolicy => _selectedVideoPolicy;
   ClipboardSyncMode get clipboardMode => _clipboardMode;
   ClipboardSyncMode? get remoteClipboardMode => _remoteClipboardMode;
   ClipboardSyncStatus get clipboardStatus => _clipboardStatus;
@@ -457,8 +479,8 @@ class RemoteSessionController extends ChangeNotifier {
   RemoteVideoGeometryState get videoGeometryState => _videoGeometryState;
   double? get inputRoundTripMs => _inputRoundTripMs;
   int get droppedMotionEvents => _droppedMotionEvents;
-  RemoteVideoTarget get activeVideoTarget => RemoteVideoTarget.forProfile(
-    _selectedQuality,
+  RemoteVideoTarget get activeVideoTarget => RemoteVideoTarget.forPolicy(
+    _selectedVideoPolicy,
     automaticTier: _qualityAdaptation.tier,
   );
   String get qualityStatusLabel {
@@ -491,7 +513,9 @@ class RemoteSessionController extends ChangeNotifier {
   String? get selectedDisplayId => _selectedDisplayId;
   String? get renderedDisplayId => _renderedDisplayId;
   String? get remoteDeviceId => _remoteDeviceId;
-  String get localDeviceId => _localDeviceId;
+  String? get localNetworkAddress => _localNetworkAddress;
+  String? get remoteNetworkAddress => _remoteNetworkAddress;
+  String? get signalingServerUrl => _signalingServerUrl;
   String? get remoteHostPlatform => _remoteHostPlatform;
   bool get remoteSupportsPhysicalKeyboard => _remoteSupportsPhysicalKeyboard;
   RemoteColorDiagnostics? get colorDiagnostics => _colorDiagnostics;
@@ -875,7 +899,8 @@ class RemoteSessionController extends ChangeNotifier {
 
     await _closeSession(notifyPeer: false);
     _closing = false;
-    _fileCopyPaste.beginSession();
+    final sessionId = _kernel.begin(localDeviceId: _localDeviceId);
+    _fileCopyPaste.beginSession(sessionId: sessionId);
     _error = null;
     _hostInvitationExpiresAt = null;
     _hostInvitationCode = null;
@@ -905,6 +930,7 @@ class RemoteSessionController extends ChangeNotifier {
         clientPlatform: Platform.operatingSystem,
         clientCapabilities: clientCapabilities,
       );
+      _signalingServerUrl = serverUrl;
       await _createPeerConnection();
       _setState(RemoteSessionState.connecting, '正在连接信令服务');
       await _signaling.connect(
@@ -1391,6 +1417,26 @@ class RemoteSessionController extends ChangeNotifier {
       _fileTransfer.cancel(transferId);
 
   void _handleFileTransferChanged() {
+    for (final task in _fileTransfer.tasks) {
+      _kernel.recordTransfer(
+        transferId: task.id,
+        direction: task.direction.name,
+        state: task.state.name,
+        transferredBytes: task.transferredBytes,
+        totalBytes: task.totalBytes,
+        destinationRoot: task.destinationRoot,
+        items: task.entries
+            .map(
+              (entry) => RemoteTransferItemMetadata(
+                relativePath: entry.relativePath,
+                sizeBytes: entry.sizeBytes,
+                kind: entry.kind.name,
+                sourcePath: entry.sourcePath,
+              ),
+            )
+            .toList(growable: false),
+      );
+    }
     for (final entry in _stagedOutgoingFiles.entries.toList(growable: false)) {
       final task = _fileTransfer.tasks
           .where((item) => item.id == entry.key)
@@ -1670,6 +1716,10 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   void setIdleQuality(RemoteQualityProfile profile) {
+    setIdleVideoPolicy(RemoteVideoPolicy.fromLegacy(profile));
+  }
+
+  void setIdleVideoPolicy(RemoteVideoPolicy policy) {
     if (!{
       RemoteSessionState.idle,
       RemoteSessionState.initializing,
@@ -1678,15 +1728,20 @@ class RemoteSessionController extends ChangeNotifier {
     }.contains(_state)) {
       return;
     }
-    if (_selectedQuality == profile) return;
-    if (profile == RemoteQualityProfile.automatic) {
+    if (_selectedVideoPolicy == policy) return;
+    if (policy.fullyAutomatic) {
       _qualityAdaptation.reset();
     }
-    _selectedQuality = profile;
+    _selectedVideoPolicy = policy;
+    _selectedQuality = policy.legacyProfile;
     notifyListeners();
   }
 
   void selectQuality(RemoteQualityProfile profile) {
+    selectVideoPolicy(RemoteVideoPolicy.fromLegacy(profile));
+  }
+
+  void selectVideoPolicy(RemoteVideoPolicy policy) {
     if (role != RemoteRole.controller) {
       return;
     }
@@ -1695,14 +1750,38 @@ class RemoteSessionController extends ChangeNotifier {
       return;
     }
     if (_displaySwitchPending) {
-      _queuedQualityProfile = profile;
+      _queuedVideoPolicy = policy;
       _emitNotice('已记录清晰度调整，将在显示器切换后应用');
       return;
     }
-    _requestQuality(profile);
+    if (_remoteSupportsVideoPolicyV2) {
+      _requestVideoPolicy(policy);
+    } else {
+      _requestQuality(policy.legacyProfile);
+    }
+  }
+
+  void _requestVideoPolicy(RemoteVideoPolicy policy) {
+    _startQualityRequestTimeout();
+    _sendControl({
+      'type': 'set-video-policy',
+      'version': 2,
+      'policy': policy.toMessage(),
+    });
+    _emitNotice('正在应用 ${policy.label}');
   }
 
   void _requestQuality(RemoteQualityProfile profile) {
+    _startQualityRequestTimeout();
+    _sendControl({
+      'type': 'set-quality',
+      'version': 2,
+      'profile': profile.name,
+    });
+    _emitNotice('正在切换到${profile.label}');
+  }
+
+  void _startQualityRequestTimeout() {
     _qualityPending = true;
     _qualityRequestTimer?.cancel();
     _qualityRequestTimer = Timer(const Duration(seconds: 8), () {
@@ -1712,16 +1791,20 @@ class RemoteSessionController extends ChangeNotifier {
       _emitNotice('画质切换超时，请检查远程连接', level: RemoteNoticeLevel.warning);
     });
     notifyListeners();
-    _sendControl({
-      'type': 'set-quality',
-      'version': 2,
-      'profile': profile.name,
-    });
-    _emitNotice('正在切换到${profile.label}');
   }
 
   void _flushQueuedQualityRequest() {
     if (role != RemoteRole.controller || _displaySwitchPending) return;
+    final policy = _queuedVideoPolicy;
+    if (policy != null) {
+      _queuedVideoPolicy = null;
+      if (_remoteSupportsVideoPolicyV2) {
+        _requestVideoPolicy(policy);
+      } else {
+        _requestQuality(policy.legacyProfile);
+      }
+      return;
+    }
     final profile = _queuedQualityProfile;
     if (profile == null) return;
     _queuedQualityProfile = null;
@@ -2023,7 +2106,7 @@ class RemoteSessionController extends ChangeNotifier {
       _mediaDiagnostics = diagnostics;
       notifyListeners();
       if (role == RemoteRole.host &&
-          _selectedQuality == RemoteQualityProfile.automatic &&
+          _selectedVideoPolicy.fullyAutomatic &&
           !_hostDisplaySwitchInProgress &&
           !_adaptiveQualityUpdateInProgress &&
           !_automaticQualityIsSuppressed) {
@@ -2042,7 +2125,7 @@ class RemoteSessionController extends ChangeNotifier {
   Future<void> _applyAdaptiveVideoTarget(RemoteAdaptiveVideoTier tier) async {
     if (_adaptiveQualityUpdateInProgress ||
         _closing ||
-        _selectedQuality != RemoteQualityProfile.automatic) {
+        !_selectedVideoPolicy.fullyAutomatic) {
       return;
     }
     _adaptiveQualityUpdateInProgress = true;
@@ -2736,6 +2819,27 @@ class RemoteSessionController extends ChangeNotifier {
         await _applyVideoQuality(
           RemoteQualityProfile.fromWireValue(message['profile'] as String?),
         );
+      case 'set-video-policy':
+        if (_hostDisplaySwitchInProgress) {
+          _sendControl({
+            'type': 'quality-error',
+            'version': 2,
+            'message': '显示器切换期间暂不调整视频策略',
+          });
+          return;
+        }
+        final rawPolicy = message['policy'];
+        if (rawPolicy is! Map) {
+          _sendControl({
+            'type': 'quality-error',
+            'version': 2,
+            'message': '视频策略格式无效',
+          });
+          return;
+        }
+        await _applyVideoPolicy(
+          RemoteVideoPolicy.fromMessage(rawPolicy.cast<String, dynamic>()),
+        );
       case 'refresh-quality':
         _publishQualityState();
       case 'refresh-color-diagnostics':
@@ -2766,6 +2870,7 @@ class RemoteSessionController extends ChangeNotifier {
       case 'host-status':
         final previousInputAccess = _accessibilityGranted;
         _remoteDeviceId = message['deviceId'] as String?;
+        _kernel.updatePeer(_remoteDeviceId);
         _remoteHostPlatform = message['hostPlatform'] as String?;
         _remoteSupportsPhysicalKeyboard = wireBool(
           message['supportsPhysicalKeyboard'],
@@ -2849,9 +2954,18 @@ class RemoteSessionController extends ChangeNotifier {
           _flushQueuedQualityRequest();
         }
       case 'quality-state':
-        _selectedQuality = RemoteQualityProfile.fromWireValue(
-          message['profile'] as String?,
-        );
+        final rawPolicy = message['videoPolicy'];
+        if (rawPolicy is Map) {
+          _selectedVideoPolicy = RemoteVideoPolicy.fromMessage(
+            rawPolicy.cast<String, dynamic>(),
+          );
+          _selectedQuality = _selectedVideoPolicy.legacyProfile;
+        } else {
+          _selectedQuality = RemoteQualityProfile.fromWireValue(
+            message['profile'] as String?,
+          );
+          _selectedVideoPolicy = RemoteVideoPolicy.fromLegacy(_selectedQuality);
+        }
         if (_selectedQuality == RemoteQualityProfile.automatic) {
           _qualityAdaptation.adopt(
             RemoteAdaptiveVideoTier.fromWireValue(
@@ -3240,8 +3354,8 @@ class RemoteSessionController extends ChangeNotifier {
       await sender.replaceTrack(replacementTrack);
       replacementAttached = true;
       _localStream = replacementStream;
-      await _applyVideoQuality(
-        _selectedQuality,
+      await _applyVideoPolicy(
+        _selectedVideoPolicy,
         reportFailure: false,
         publishState: false,
       );
@@ -3270,8 +3384,8 @@ class RemoteSessionController extends ChangeNotifier {
         try {
           await sender.replaceTrack(previousTrack);
           _localStream = previousStream;
-          await _applyVideoQuality(
-            _selectedQuality,
+          await _applyVideoPolicy(
+            _selectedVideoPolicy,
             reportFailure: false,
             publishState: false,
           );
@@ -3441,28 +3555,40 @@ class RemoteSessionController extends ChangeNotifier {
     bool reportFailure = true,
     bool publishState = true,
     RemoteDisplay? display,
+  }) => _applyVideoPolicy(
+    RemoteVideoPolicy.fromLegacy(profile),
+    reportFailure: reportFailure,
+    publishState: publishState,
+    display: display,
+  );
+
+  Future<void> _applyVideoPolicy(
+    RemoteVideoPolicy policy, {
+    bool reportFailure = true,
+    bool publishState = true,
+    RemoteDisplay? display,
   }) async {
     try {
       final sender = _videoSender;
       if (sender == null) {
         throw StateError('视频发送器尚未就绪');
       }
-      if (profile == RemoteQualityProfile.automatic &&
-          _selectedQuality != RemoteQualityProfile.automatic) {
+      if (policy.fullyAutomatic && !_selectedVideoPolicy.fullyAutomatic) {
         _qualityAdaptation.reset();
       }
-      final target = RemoteVideoTarget.forProfile(
-        profile,
+      final target = RemoteVideoTarget.forPolicy(
+        policy,
         automaticTier: _qualityAdaptation.tier,
       );
       final qualityDisplay = display ?? selectedDisplay;
       final parameters = sender.parameters;
-      parameters.degradationPreference =
-          profile == RemoteQualityProfile.automatic
-          ? RTCDegradationPreference.BALANCED
-          : target.prioritizeFrameRate
-          ? RTCDegradationPreference.MAINTAIN_FRAMERATE
-          : RTCDegradationPreference.MAINTAIN_RESOLUTION;
+      parameters.degradationPreference = switch (policy.preference) {
+        RemoteVideoPreference.balanced => RTCDegradationPreference.BALANCED,
+        RemoteVideoPreference.smoothness =>
+          RTCDegradationPreference.MAINTAIN_FRAMERATE,
+        RemoteVideoPreference.clarity =>
+          RTCDegradationPreference.MAINTAIN_RESOLUTION,
+      };
       final encodings = parameters.encodings;
       if (encodings == null || encodings.isEmpty) {
         throw StateError('当前视频编码器不支持动态画质切换');
@@ -3478,7 +3604,8 @@ class RemoteSessionController extends ChangeNotifier {
       if (!applied) {
         throw StateError('视频编码器拒绝了新的画质参数');
       }
-      _selectedQuality = profile;
+      _selectedVideoPolicy = policy;
+      _selectedQuality = policy.legacyProfile;
       _updateExpectedVideoSize(
         _effectiveScaleForCurrentCapture(target, qualityDisplay),
         display: qualityDisplay,
@@ -3658,6 +3785,7 @@ class RemoteSessionController extends ChangeNotifier {
       'type': 'quality-state',
       'version': 2,
       'profile': _selectedQuality.name,
+      'videoPolicy': _selectedVideoPolicy.toMessage(),
       'width': _actualVideoWidth,
       'height': _actualVideoHeight,
       'outboundWidth': _outboundVideoFrameSize?.width,
@@ -3782,12 +3910,8 @@ class RemoteSessionController extends ChangeNotifier {
   Future<void> _handleSignalingMessage(Map<String, dynamic> message) async {
     switch (message['type']) {
       case 'ready':
+        _localNetworkAddress = message['clientAddress'] as String?;
         if (role == RemoteRole.host) {
-          _hostInvitationCode = message['room'] as String?;
-          _hostInvitationLeaseId = message['invitationLeaseId'] as String?;
-          _hostInvitationGeneration =
-              (message['invitationGeneration'] as num?)?.toInt() ?? 1;
-          _hostInvitationState = HostInvitationState.active;
           final capabilities =
               (message['capabilities'] as List<dynamic>? ?? const [])
                   .whereType<String>()
@@ -3795,37 +3919,28 @@ class RemoteSessionController extends ChangeNotifier {
           _supportsInvitationRotation = capabilities.contains(
             'invitation-rotation',
           );
-          final rawRemaining = message['invitationExpiresInMillis'];
-          final rawExpiry = message['invitationExpiresAtUnixMillis'];
-          _hostInvitationExpiresAt = rawRemaining is num
-              ? DateTime.now().add(
-                  Duration(milliseconds: rawRemaining.toInt().clamp(0, 300000)),
-                )
-              : rawExpiry is num
-              ? DateTime.fromMillisecondsSinceEpoch(rawExpiry.toInt())
-              : null;
+          _supportsServerInvitationPush = capabilities.contains(
+            'server-invitation-push',
+          );
+          _applyHostInvitationSnapshot(message, fallbackGeneration: 1);
         }
         _setState(RemoteSessionState.waitingForPeer, '已进入房间，等待另一台设备');
       case 'invitation-rotated':
-        _hostInvitationCode = message['room'] as String?;
-        _hostInvitationLeaseId = message['invitationLeaseId'] as String?;
-        _hostInvitationGeneration =
-            (message['invitationGeneration'] as num?)?.toInt() ??
-            (_hostInvitationGeneration + 1);
-        _hostInvitationState = HostInvitationState.active;
-        final rawRemaining = message['invitationExpiresInMillis'];
-        final rawExpiry = message['invitationExpiresAtUnixMillis'];
-        _hostInvitationExpiresAt = rawRemaining is num
-            ? DateTime.now().add(
-                Duration(milliseconds: rawRemaining.toInt().clamp(0, 300000)),
-              )
-            : rawExpiry is num
-            ? DateTime.fromMillisecondsSinceEpoch(rawExpiry.toInt())
-            : null;
+        _applyHostInvitationSnapshot(
+          message,
+          fallbackGeneration: _hostInvitationGeneration + 1,
+        );
         _invitationRotationCompleter?.complete();
         _invitationRotationCompleter = null;
         notifyListeners();
         _emitNotice('连接码已刷新', level: RemoteNoticeLevel.success);
+      case 'invitation-updated':
+        if (role != RemoteRole.host) return;
+        final applied = _applyHostInvitationSnapshot(message);
+        if (applied) {
+          notifyListeners();
+          _emitNotice('连接码已自动更新');
+        }
       case 'invitation-rotation-error':
         _hostInvitationState = _hostInvitationCode == null
             ? HostInvitationState.unavailable
@@ -3840,6 +3955,8 @@ class RemoteSessionController extends ChangeNotifier {
         notifyListeners();
       case 'peer-joined':
         _remoteDeviceId = message['peerDeviceId'] as String?;
+        _remoteNetworkAddress = message['peerAddress'] as String?;
+        _kernel.updatePeer(_remoteDeviceId);
         _hostInvitationExpiresAt = null;
         if (role == RemoteRole.host) {
           _hostInvitationState = HostInvitationState.consumed;
@@ -3868,6 +3985,12 @@ class RemoteSessionController extends ChangeNotifier {
         );
         _remoteSupportsScopedInputResetV1 = peerCapabilities.contains(
           scopedInputResetV1Capability,
+        );
+        _remoteSupportsVideoPolicyV2 = peerCapabilities.contains(
+          videoPolicyV2Capability,
+        );
+        _remoteSupportsMultiDisplayStreamV1 = peerCapabilities.contains(
+          multiDisplayStreamV1Capability,
         );
         if (role == RemoteRole.host) {
           _remoteActiveContentGeometryVersion = activeContentGeometryVersion(
@@ -3901,6 +4024,37 @@ class RemoteSessionController extends ChangeNotifier {
       case 'peer-unavailable':
         _setState(RemoteSessionState.waitingForPeer, '另一台设备尚未进入房间');
     }
+  }
+
+  bool _applyHostInvitationSnapshot(
+    Map<String, dynamic> message, {
+    int? fallbackGeneration,
+  }) {
+    final generation =
+        (message['invitationGeneration'] as num?)?.toInt() ??
+        fallbackGeneration;
+    if (generation == null || generation < _hostInvitationGeneration) {
+      return false;
+    }
+    final room = message['room'] as String?;
+    final leaseId = message['invitationLeaseId'] as String?;
+    if (room == null || room.isEmpty || leaseId == null || leaseId.isEmpty) {
+      return false;
+    }
+    _hostInvitationCode = room;
+    _hostInvitationLeaseId = leaseId;
+    _hostInvitationGeneration = generation;
+    _hostInvitationState = HostInvitationState.active;
+    final rawRemaining = message['invitationExpiresInMillis'];
+    final rawExpiry = message['invitationExpiresAtUnixMillis'];
+    _hostInvitationExpiresAt = rawRemaining is num
+        ? DateTime.now().add(
+            Duration(milliseconds: rawRemaining.toInt().clamp(0, 300000)),
+          )
+        : rawExpiry is num
+        ? DateTime.fromMillisecondsSinceEpoch(rawExpiry.toInt())
+        : null;
+    return true;
   }
 
   Future<void> _acceptOffer(Map<String, dynamic> message) async {
@@ -4014,7 +4168,7 @@ class RemoteSessionController extends ChangeNotifier {
     for (final track in stream.getVideoTracks()) {
       _videoSender = await _peerConnection!.addTrack(track, stream);
     }
-    await _applyVideoQuality(_selectedQuality);
+    await _applyVideoPolicy(_selectedVideoPolicy);
     unawaited(_refreshOutboundVideoDiagnostics());
     _subscribeToDisplayChanges();
     _publishHostState();
@@ -4422,8 +4576,8 @@ class RemoteSessionController extends ChangeNotifier {
       _outboundVideoFrameSize = null;
 
       try {
-        await _applyVideoQuality(
-          _selectedQuality,
+        await _applyVideoPolicy(
+          _selectedVideoPolicy,
           reportFailure: false,
           publishState: false,
           display: targetDisplay,
@@ -4557,8 +4711,8 @@ class RemoteSessionController extends ChangeNotifier {
             throw StateError('原显示器未恢复有效采集帧');
           }
           if (previousDisplay != null) {
-            await _applyVideoQuality(
-              _selectedQuality,
+            await _applyVideoPolicy(
+              _selectedVideoPolicy,
               reportFailure: false,
               publishState: false,
               display: previousDisplay,
@@ -4571,8 +4725,8 @@ class RemoteSessionController extends ChangeNotifier {
         try {
           await _videoSender?.replaceTrack(previousTrack);
           if (previousDisplay != null) {
-            await _applyVideoQuality(
-              _selectedQuality,
+            await _applyVideoPolicy(
+              _selectedVideoPolicy,
               reportFailure: false,
               publishState: false,
               display: previousDisplay,
@@ -4726,8 +4880,8 @@ class RemoteSessionController extends ChangeNotifier {
           : transaction.previousStream;
       final previousDisplay = _displayForId(transaction.previousDisplayId);
       if (previousDisplay != null) {
-        await _applyVideoQuality(
-          _selectedQuality,
+        await _applyVideoPolicy(
+          _selectedVideoPolicy,
           reportFailure: false,
           publishState: false,
           display: previousDisplay,
@@ -5012,6 +5166,8 @@ class RemoteSessionController extends ChangeNotifier {
     _renderedDisplayId = null;
     _remoteDeviceId = null;
     _remoteHostPlatform = null;
+    _localNetworkAddress = null;
+    _remoteNetworkAddress = null;
     _remoteSupportsPhysicalKeyboard = false;
     _remoteSupportsActiveContentGeometry = false;
     _remoteActiveContentGeometryVersion = 0;
@@ -5020,6 +5176,8 @@ class RemoteSessionController extends ChangeNotifier {
     _remoteSupportsDestinationLeasedFilePasteV1 = false;
     _remoteSupportsAtomicShortcutV1 = false;
     _remoteSupportsScopedInputResetV1 = false;
+    _remoteSupportsVideoPolicyV2 = false;
+    _remoteSupportsMultiDisplayStreamV1 = false;
     _remoteClipboardSupportsApplied = false;
     _remoteClipboardMode = null;
     _queuedClipboardOffer = null;
@@ -5038,6 +5196,7 @@ class RemoteSessionController extends ChangeNotifier {
     _hostInvitationGeneration = 0;
     _hostInvitationState = HostInvitationState.unavailable;
     _supportsInvitationRotation = false;
+    _supportsServerInvitationPush = false;
     _decoderOutputColorDiagnostics = null;
     _renderOutputColorDiagnostics = null;
     _receiverColorConversion = null;
@@ -5054,6 +5213,7 @@ class RemoteSessionController extends ChangeNotifier {
     _inputConfirmed = false;
     _qualityPending = false;
     _queuedQualityProfile = null;
+    _queuedVideoPolicy = null;
     _sessionRepairPending = false;
     _hostDisplaySwitchInProgress = false;
     _samplingMediaStats = false;
@@ -5103,6 +5263,13 @@ class RemoteSessionController extends ChangeNotifier {
   void _setState(RemoteSessionState next, String message) {
     _state = next;
     _statusMessage = message;
+    _kernel.recordState(state: next.name, message: message);
+    if (next == RemoteSessionState.disconnected ||
+        next == RemoteSessionState.failed) {
+      _kernel.end(
+        outcome: next == RemoteSessionState.failed ? message : 'disconnected',
+      );
+    }
     notifyListeners();
   }
 
@@ -5124,6 +5291,7 @@ class RemoteSessionController extends ChangeNotifier {
   @override
   void dispose() {
     _fileTransfer.removeListener(_handleFileTransferChanged);
+    unawaited(_kernel.dispose());
     for (final paths in _stagedOutgoingFiles.values) {
       unawaited(_fileTransferPlatform.cleanupOutgoingFiles(paths));
     }

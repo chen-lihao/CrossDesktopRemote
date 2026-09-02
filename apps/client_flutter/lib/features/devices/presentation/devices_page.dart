@@ -4,14 +4,12 @@ import 'dart:io';
 import 'package:cross_desktop_remote/core/discovery/lan_discovery_service.dart';
 import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/network/lan_address_service.dart';
-import 'package:cross_desktop_remote/core/platform/desktop_window_mode.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/remote/application/host_availability_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/explicit_file_transfer_center.dart';
-import 'package:cross_desktop_remote/features/remote/presentation/remote_desktop_panel.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -24,9 +22,8 @@ class DevicesPage extends StatefulWidget {
     required this.discoveryService,
     required this.identity,
     required this.settings,
+    required this.onOpenRemoteDesktop,
     this.addressService = const LanAddressService(),
-    this.windowModeController = const PlatformDesktopWindowModeController(),
-    this.onDesktopFullScreenChanged,
   });
 
   final RemoteSessionController controllerSession;
@@ -34,9 +31,8 @@ class DevicesPage extends StatefulWidget {
   final LanDiscoveryService discoveryService;
   final DeviceIdentityController identity;
   final AppSettingsController settings;
+  final VoidCallback onOpenRemoteDesktop;
   final LanAddressService addressService;
-  final DesktopWindowModeController windowModeController;
-  final ValueChanged<bool>? onDesktopFullScreenChanged;
 
   @override
   State<DevicesPage> createState() => _DevicesPageState();
@@ -73,11 +69,6 @@ class _DevicesPageState extends State<DevicesPage> {
   bool _publicationBusy = false;
   bool _serverTesting = false;
   String? _serverTestStatus;
-  bool _desktopFullScreen = false;
-  bool _windowModeChanging = false;
-  final GlobalKey _remoteDesktopPanelKey = GlobalKey(
-    debugLabel: 'persistent-remote-desktop-panel',
-  );
 
   @override
   void initState() {
@@ -339,9 +330,6 @@ class _DevicesPageState extends State<DevicesPage> {
   }
 
   void _handleControllerSessionChanged() {
-    if (_desktopFullScreen && !_controllerSession.hasRemoteVideo) {
-      unawaited(_setDesktopFullScreen(false, announce: false));
-    }
     if ({
       RemoteSessionState.disconnected,
       RemoteSessionState.failed,
@@ -468,10 +456,6 @@ class _DevicesPageState extends State<DevicesPage> {
 
   @override
   void dispose() {
-    if (_desktopFullScreen &&
-        widget.windowModeController.supportsNativeFullScreen) {
-      unawaited(_restoreWindowModeForDispose());
-    }
     _controllerSession.removeListener(_handleControllerSessionChanged);
     _hostAvailability?.removeListener(_handleHostAvailabilityChanged);
     widget.settings.removeListener(_handleSettingsChanged);
@@ -485,68 +469,11 @@ class _DevicesPageState extends State<DevicesPage> {
     super.dispose();
   }
 
-  Future<void> _restoreWindowModeForDispose() async {
-    try {
-      await widget.windowModeController.setFullScreen(false);
-    } catch (_) {
-      // The Windows engine may already be shutting down with the application.
-    }
-  }
-
-  Future<bool> _setDesktopFullScreen(
-    bool enabled, {
-    bool announce = true,
-  }) async {
-    if (_desktopFullScreen == enabled) return true;
-    if (_windowModeChanging ||
-        !widget.windowModeController.supportsNativeFullScreen) {
-      return false;
-    }
-    _windowModeChanging = true;
-    try {
-      await widget.windowModeController.setFullScreen(enabled);
-      if (!mounted) return false;
-      setState(() => _desktopFullScreen = enabled);
-      widget.onDesktopFullScreenChanged?.call(enabled);
-      return true;
-    } catch (error) {
-      if (mounted && announce) {
-        AppMessenger.show(
-          enabled ? '进入全屏失败：$error' : '退出全屏失败：$error',
-          level: AppMessageLevel.error,
-        );
-      }
-      return false;
-    } finally {
-      _windowModeChanging = false;
-    }
-  }
-
-  RemoteDesktopPanel _buildRemoteDesktopPanel() {
-    return RemoteDesktopPanel(
-      key: _remoteDesktopPanelKey,
-      session: _controllerSession,
-      initialInputSettings: widget.settings.inputSettings,
-      desktopFullScreen: _desktopFullScreen,
-      onDesktopFullScreenChanged: _setDesktopFullScreen,
-      onKeyboardModeChanged: (mode) =>
-          unawaited(widget.settings.setKeyboardMode(mode)),
-      onTextInputModeChanged: (mode) =>
-          unawaited(widget.settings.setTextInputMode(mode)),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: Listenable.merge([_controllerSession, ?_hostAvailability]),
       builder: (context, _) {
-        if (_desktopFullScreen && _controllerSession.hasRemoteVideo) {
-          return ColoredBox(
-            color: Colors.black,
-            child: _buildRemoteDesktopPanel(),
-          );
-        }
         return CustomScrollView(
           slivers: [
             SliverPadding(
@@ -590,7 +517,10 @@ class _DevicesPageState extends State<DevicesPage> {
                         _buildControllerConnectionCard(),
                         if (_controllerSession.hasRemoteVideo) ...[
                           const SizedBox(height: 16),
-                          _buildRemoteDesktopPanel(),
+                          _RemoteViewerLaunchCard(
+                            session: _controllerSession,
+                            onOpen: widget.onOpenRemoteDesktop,
+                          ),
                         ],
                       ],
                     ),
@@ -675,6 +605,60 @@ class _DevicesPageState extends State<DevicesPage> {
 
   void _setServerUrl(String value) {
     unawaited(widget.settings.setSignalingServerUrl(value));
+  }
+}
+
+class _RemoteViewerLaunchCard extends StatelessWidget {
+  const _RemoteViewerLaunchCard({required this.session, required this.onOpen});
+
+  final RemoteSessionController session;
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final display = session.selectedDisplay;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Row(
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primaryContainer,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Icon(Icons.desktop_windows_outlined),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '远程桌面已在独立工作区就绪',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${session.remoteDeviceId ?? '远程设备'} · '
+                    '${display?.name ?? '等待显示器信息'} · '
+                    '${session.qualityStatusLabel}',
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            FilledButton.icon(
+              onPressed: onOpen,
+              icon: const Icon(Icons.open_in_new),
+              label: const Text('打开远程桌面'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

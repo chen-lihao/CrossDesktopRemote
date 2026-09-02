@@ -1,4 +1,5 @@
 import 'package:cross_desktop_remote/core/protocol/wire_value_parsers.dart';
+import 'package:flutter/foundation.dart';
 
 class RemoteDisplay {
   const RemoteDisplay({
@@ -588,6 +589,234 @@ RemoteCaptureFrameGeometry? _captureGeometryFromValue(Object? value) {
 enum RemotePointerMode { direct, touchpad }
 
 enum RemoteViewFit { contain, cover }
+
+enum RemoteResolutionMode {
+  automatic('自动', null),
+  p720('720p', 1280),
+  p1080('1080p', 1920),
+  p1440('2K', 2560),
+  p2160('4K', 3840),
+  original('原始分辨率', null),
+  custom('自定义', null);
+
+  const RemoteResolutionMode(this.label, this.targetLongEdge);
+
+  final String label;
+  final int? targetLongEdge;
+}
+
+enum RemoteFrameRateMode {
+  automatic('自动', null),
+  fps30('30 fps', 30),
+  fps60('60 fps', 60),
+  fps90('90 fps', 90),
+  fps120('120 fps', 120),
+  custom('自定义', null);
+
+  const RemoteFrameRateMode(this.label, this.framesPerSecond);
+
+  final String label;
+  final int? framesPerSecond;
+}
+
+enum RemoteVideoPreference {
+  balanced('平衡'),
+  clarity('清晰度优先'),
+  smoothness('帧率优先');
+
+  const RemoteVideoPreference(this.label);
+
+  final String label;
+}
+
+@immutable
+class RemoteVideoPolicy {
+  const RemoteVideoPolicy({
+    this.resolution = RemoteResolutionMode.automatic,
+    this.frameRate = RemoteFrameRateMode.automatic,
+    this.customLongEdge = 1920,
+    this.customFramesPerSecond = 60,
+    this.maxBitrateMbps,
+    this.preference = RemoteVideoPreference.balanced,
+  });
+
+  factory RemoteVideoPolicy.fromLegacy(RemoteQualityProfile profile) {
+    return switch (profile) {
+      RemoteQualityProfile.automatic => const RemoteVideoPolicy(),
+      RemoteQualityProfile.smooth => const RemoteVideoPolicy(
+        resolution: RemoteResolutionMode.p720,
+        frameRate: RemoteFrameRateMode.fps60,
+        maxBitrateMbps: 5,
+        preference: RemoteVideoPreference.smoothness,
+      ),
+      RemoteQualityProfile.high => const RemoteVideoPolicy(
+        resolution: RemoteResolutionMode.p1080,
+        frameRate: RemoteFrameRateMode.fps30,
+        maxBitrateMbps: 9,
+      ),
+      RemoteQualityProfile.high60 => const RemoteVideoPolicy(
+        resolution: RemoteResolutionMode.p1080,
+        frameRate: RemoteFrameRateMode.fps60,
+        maxBitrateMbps: 14,
+        preference: RemoteVideoPreference.smoothness,
+      ),
+      RemoteQualityProfile.ultra => const RemoteVideoPolicy(
+        resolution: RemoteResolutionMode.p1440,
+        frameRate: RemoteFrameRateMode.fps30,
+        maxBitrateMbps: 16,
+      ),
+      RemoteQualityProfile.ultra60 => const RemoteVideoPolicy(
+        resolution: RemoteResolutionMode.p1440,
+        frameRate: RemoteFrameRateMode.fps60,
+        maxBitrateMbps: 24,
+        preference: RemoteVideoPreference.smoothness,
+      ),
+      RemoteQualityProfile.original => const RemoteVideoPolicy(
+        resolution: RemoteResolutionMode.original,
+        frameRate: RemoteFrameRateMode.fps30,
+        maxBitrateMbps: 35,
+        preference: RemoteVideoPreference.clarity,
+      ),
+      RemoteQualityProfile.original60 => const RemoteVideoPolicy(
+        resolution: RemoteResolutionMode.original,
+        frameRate: RemoteFrameRateMode.fps60,
+        maxBitrateMbps: 48,
+        preference: RemoteVideoPreference.clarity,
+      ),
+    };
+  }
+
+  factory RemoteVideoPolicy.fromMessage(Map<String, dynamic> message) {
+    T enumValue<T extends Enum>(List<T> values, String? name, T fallback) {
+      return values.firstWhere(
+        (value) => value.name == name,
+        orElse: () => fallback,
+      );
+    }
+
+    return RemoteVideoPolicy(
+      resolution: enumValue(
+        RemoteResolutionMode.values,
+        message['resolution'] as String?,
+        RemoteResolutionMode.automatic,
+      ),
+      frameRate: enumValue(
+        RemoteFrameRateMode.values,
+        message['frameRate'] as String?,
+        RemoteFrameRateMode.automatic,
+      ),
+      customLongEdge: ((message['customLongEdge'] as num?)?.toInt() ?? 1920)
+          .clamp(320, 7680),
+      customFramesPerSecond:
+          ((message['customFramesPerSecond'] as num?)?.toInt() ?? 60).clamp(
+            5,
+            120,
+          ),
+      maxBitrateMbps: (message['maxBitrateMbps'] as num?)?.toInt().clamp(
+        1,
+        100,
+      ),
+      preference: enumValue(
+        RemoteVideoPreference.values,
+        message['preference'] as String?,
+        RemoteVideoPreference.balanced,
+      ),
+    );
+  }
+
+  final RemoteResolutionMode resolution;
+  final RemoteFrameRateMode frameRate;
+  final int customLongEdge;
+  final int customFramesPerSecond;
+  final int? maxBitrateMbps;
+  final RemoteVideoPreference preference;
+
+  int? get targetLongEdge => switch (resolution) {
+    RemoteResolutionMode.custom => customLongEdge.clamp(320, 7680),
+    _ => resolution.targetLongEdge,
+  };
+
+  int? get requestedFramesPerSecond => switch (frameRate) {
+    RemoteFrameRateMode.custom => customFramesPerSecond.clamp(5, 120),
+    _ => frameRate.framesPerSecond,
+  };
+
+  bool get fullyAutomatic =>
+      resolution == RemoteResolutionMode.automatic &&
+      frameRate == RemoteFrameRateMode.automatic &&
+      maxBitrateMbps == null;
+
+  String get label =>
+      '${resolution.label} · ${frameRate.label}'
+      '${maxBitrateMbps == null ? '' : ' · $maxBitrateMbps Mbps'}';
+
+  RemoteQualityProfile get legacyProfile {
+    if (fullyAutomatic) return RemoteQualityProfile.automatic;
+    final edge = targetLongEdge;
+    final fps = requestedFramesPerSecond ?? 30;
+    if (resolution == RemoteResolutionMode.original) {
+      return fps > 30
+          ? RemoteQualityProfile.original60
+          : RemoteQualityProfile.original;
+    }
+    if ((edge ?? 1920) <= 1280) return RemoteQualityProfile.smooth;
+    if ((edge ?? 1920) <= 1920) {
+      return fps > 30 ? RemoteQualityProfile.high60 : RemoteQualityProfile.high;
+    }
+    return fps > 30 ? RemoteQualityProfile.ultra60 : RemoteQualityProfile.ultra;
+  }
+
+  Map<String, dynamic> toMessage() => {
+    'resolution': resolution.name,
+    'frameRate': frameRate.name,
+    'customLongEdge': customLongEdge.clamp(320, 7680),
+    'customFramesPerSecond': customFramesPerSecond.clamp(5, 120),
+    'maxBitrateMbps': maxBitrateMbps,
+    'preference': preference.name,
+  };
+
+  RemoteVideoPolicy copyWith({
+    RemoteResolutionMode? resolution,
+    RemoteFrameRateMode? frameRate,
+    int? customLongEdge,
+    int? customFramesPerSecond,
+    int? maxBitrateMbps,
+    bool automaticBitrate = false,
+    RemoteVideoPreference? preference,
+  }) {
+    return RemoteVideoPolicy(
+      resolution: resolution ?? this.resolution,
+      frameRate: frameRate ?? this.frameRate,
+      customLongEdge: customLongEdge ?? this.customLongEdge,
+      customFramesPerSecond:
+          customFramesPerSecond ?? this.customFramesPerSecond,
+      maxBitrateMbps: automaticBitrate
+          ? null
+          : maxBitrateMbps ?? this.maxBitrateMbps,
+      preference: preference ?? this.preference,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is RemoteVideoPolicy &&
+      other.resolution == resolution &&
+      other.frameRate == frameRate &&
+      other.customLongEdge == customLongEdge &&
+      other.customFramesPerSecond == customFramesPerSecond &&
+      other.maxBitrateMbps == maxBitrateMbps &&
+      other.preference == preference;
+
+  @override
+  int get hashCode => Object.hash(
+    resolution,
+    frameRate,
+    customLongEdge,
+    customFramesPerSecond,
+    maxBitrateMbps,
+    preference,
+  );
+}
 
 enum RemoteQualityProfile {
   automatic('自动', 1920, 7 * 1000 * 1000, 30),

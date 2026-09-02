@@ -76,6 +76,43 @@ class SignalingRoomRegistryTests {
 	}
 
 	@Test
+	void serverRotatesAnExpiredWaitingInvitationAndKeepsTheHostSession() {
+		var now = new AtomicLong(1_000);
+		var registry = new SignalingRoomRegistry(now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
+		var host = openSession("host", "192.168.1.10");
+		var controller = openSession("controller", "192.168.1.20");
+		var initial = registry.createHostInvitation(host);
+
+		now.addAndGet(Duration.ofMinutes(5).toMillis());
+		var rotations = registry.rotateExpiredHostInvitations();
+
+		assertThat(rotations).hasSize(1);
+		var rotated = rotations.get(0).invitation();
+		assertThat(rotated.generation()).isEqualTo(initial.generation() + 1);
+		assertThat(rotated.roomCode()).isNotEqualTo(initial.roomCode());
+		assertThat(registry.join(initial.roomCode(), SignalingRole.CONTROLLER, controller))
+				.isEqualTo(SignalingRoomRegistry.JoinResult.INVALID_ROOM);
+		assertThat(registry.join(rotated.roomCode(), SignalingRole.CONTROLLER, controller))
+				.isEqualTo(SignalingRoomRegistry.JoinResult.JOINED);
+	}
+
+	@Test
+	void serverDoesNotRotateAConsumedInvitation() {
+		var now = new AtomicLong(1_000);
+		var registry = new SignalingRoomRegistry(now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
+		var host = openSession("host", "192.168.1.10");
+		var controller = openSession("controller", "192.168.1.20");
+		var invitation = registry.createHostInvitation(host);
+		assertThat(registry.join(invitation.roomCode(), SignalingRole.CONTROLLER, controller))
+				.isEqualTo(SignalingRoomRegistry.JoinResult.JOINED);
+
+		now.addAndGet(Duration.ofMinutes(5).toMillis());
+
+		assertThat(registry.rotateExpiredHostInvitations()).isEmpty();
+		assertThat(registry.peer(invitation.roomCode(), SignalingRole.HOST)).contains(controller);
+	}
+
+	@Test
 	void expiresAHostRegistrationAndConsumesAValidCodeOnce() {
 		var now = new AtomicLong(1_000);
 		var registry = new SignalingRoomRegistry(now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);

@@ -12,12 +12,12 @@ class SessionsPage extends StatefulWidget {
     super.key,
     required this.sessions,
     required this.history,
-    required this.onOpenDevices,
+    required this.onOpenRemoteDesktop,
   });
 
   final List<RemoteSessionController> sessions;
   final SessionHistoryController history;
-  final VoidCallback onOpenDevices;
+  final VoidCallback onOpenRemoteDesktop;
 
   @override
   State<SessionsPage> createState() => _SessionsPageState();
@@ -60,7 +60,7 @@ class _SessionsPageState extends State<SessionsPage> {
                       style: Theme.of(context).textTheme.headlineMedium,
                     ),
                     const SizedBox(height: 6),
-                    const Text('查看当前连接质量和最近的本机会话元数据。'),
+                    const Text('查看当前连接质量、分页会话与文件传输审计记录。'),
                     const SizedBox(height: 24),
                     if (session != null) _buildActiveSession(context, session),
                     if (session != null) const SizedBox(height: 24),
@@ -98,8 +98,28 @@ class _SessionsPageState extends State<SessionsPage> {
                       for (final record in widget.history.records)
                         Padding(
                           padding: const EdgeInsets.only(bottom: 10),
-                          child: _HistoryTile(record: record),
+                          child: _HistoryTile(
+                            record: record,
+                            history: widget.history,
+                          ),
                         ),
+                    if (widget.history.hasMore)
+                      Center(
+                        child: OutlinedButton.icon(
+                          onPressed: widget.history.loadingMore
+                              ? null
+                              : () => unawaited(widget.history.loadNextPage()),
+                          icon: widget.history.loadingMore
+                              ? const SizedBox.square(
+                                  dimension: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.expand_more),
+                          label: const Text('加载更多（每页 10 条）'),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -213,7 +233,7 @@ class _SessionsPageState extends State<SessionsPage> {
                   label: const Text('复制诊断'),
                 ),
                 OutlinedButton.icon(
-                  onPressed: widget.onOpenDevices,
+                  onPressed: widget.onOpenRemoteDesktop,
                   icon: const Icon(Icons.desktop_windows_outlined),
                   label: const Text('打开远程桌面'),
                 ),
@@ -311,14 +331,16 @@ class _DiagnosticChip extends StatelessWidget {
 }
 
 class _HistoryTile extends StatelessWidget {
-  const _HistoryTile({required this.record});
+  const _HistoryTile({required this.record, required this.history});
 
   final SessionRecord record;
+  final SessionHistoryController history;
 
   @override
   Widget build(BuildContext context) {
+    final transfers = history.transfersFor(record.id);
     return Card(
-      child: ListTile(
+      child: ExpansionTile(
         leading: Icon(
           record.role == RemoteRole.host.name
               ? Icons.screen_share_outlined
@@ -327,9 +349,48 @@ class _HistoryTile extends StatelessWidget {
         title: Text(record.deviceName),
         subtitle: Text(
           '${_formatDate(record.startedAt)} · ${record.displayName} · '
-          '${record.quality} · ${_formatDuration(record.duration)}',
+          '${record.quality} · ${_formatDuration(record.duration)}\n'
+          '${record.localAddress ?? '未知本机 IP'} → '
+          '${record.remoteAddress ?? '未知对端 IP'}',
         ),
         trailing: Text(record.outcome),
+        onExpansionChanged: (expanded) {
+          if (expanded && transfers.isEmpty) {
+            unawaited(history.loadTransfers(record.id));
+          }
+        },
+        children: [
+          if (transfers.isEmpty)
+            const ListTile(
+              dense: true,
+              leading: Icon(Icons.swap_horiz),
+              title: Text('本次会话暂无文件传输记录'),
+            )
+          else
+            for (final transfer in transfers)
+              ListTile(
+                dense: true,
+                leading: Icon(
+                  transfer.direction == 'outgoing'
+                      ? Icons.upload_file_outlined
+                      : Icons.download_outlined,
+                ),
+                title: Text(
+                  transfer.relativePaths.isEmpty
+                      ? '文件传输'
+                      : transfer.relativePaths.join('、'),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(
+                  '来源：${transfer.sourcePaths.isEmpty ? '远程设备' : transfer.sourcePaths.join('、')}\n'
+                  '目标：${transfer.destinationRoot ?? '对端选定目录'}',
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                trailing: Text(transfer.state),
+              ),
+        ],
       ),
     );
   }

@@ -11,6 +11,8 @@ const destinationLeasedFilePasteV1Capability =
     'destination-leased-file-paste-v1';
 const atomicShortcutV1Capability = 'atomic-shortcut-v1';
 const scopedInputResetV1Capability = 'scoped-input-reset-v1';
+const videoPolicyV2Capability = 'video-policy-v2';
+const multiDisplayStreamV1Capability = 'multi-display-stream-v1';
 const iosActiveContentGeometryV3Enabled = bool.fromEnvironment(
   'CDR_IOS_ACTIVE_CONTENT_GEOMETRY_V3',
   defaultValue: true,
@@ -61,6 +63,7 @@ List<String> buildRemoteClientCapabilities({
   }
   capabilities.add(atomicShortcutV1Capability);
   capabilities.add(scopedInputResetV1Capability);
+  capabilities.add(videoPolicyV2Capability);
   return capabilities;
 }
 

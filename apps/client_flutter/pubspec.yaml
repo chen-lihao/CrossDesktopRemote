@@ -9,14 +9,18 @@ environment:
 dependencies:
   characters: ^1.4.1
   crypto: ^3.0.7
+  cryptography: ^2.9.0
   file_selector: ^1.1.0
   fixnum: ^1.1.1
   flutter:
     sdk: flutter
+  flutter_secure_storage: ^11.0.0
   flutter_webrtc:
     path: ../../third_party/flutter_webrtc
+  path_provider: ^2.1.6
   protobuf: ^6.0.0
   shared_preferences: ^2.5.5
+  sqlite3: ^3.5.2
 
 dev_dependencies:
   flutter_test:

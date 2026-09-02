@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
@@ -7,10 +8,21 @@ import 'package:cross_desktop_remote/features/remote/presentation/remote_input_s
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+enum RemoteDisplayPresentationMode {
+  singleWindow,
+  separateWindows;
+
+  String get label => switch (this) {
+    RemoteDisplayPresentationMode.singleWindow => '单窗口切换',
+    RemoteDisplayPresentationMode.separateWindows => '每个显示器独立窗口',
+  };
+}
+
 class AppSettingsController extends ChangeNotifier {
   AppSettingsController();
 
   static const _qualityKey = 'settings.default_quality';
+  static const _videoPolicyKey = 'settings.default_video_policy.v2';
   static const _pointerModeKey = 'settings.pointer_mode';
   static const _pointerSensitivityKey = 'settings.pointer_sensitivity';
   static const _scrollSensitivityKey = 'settings.scroll_sensitivity';
@@ -23,6 +35,7 @@ class AppSettingsController extends ChangeNotifier {
   static const _historyLimitKey = 'settings.session_history_limit';
   static const _advancedNetworkKey = 'settings.show_advanced_network';
   static const _incomingAccessKey = 'settings.incoming_access_enabled';
+  static const _displayPresentationKey = 'settings.remote_display_presentation';
 
   SharedPreferencesAsync? _preferences;
 
@@ -37,6 +50,7 @@ class AppSettingsController extends ChangeNotifier {
   }
 
   RemoteQualityProfile defaultQuality = RemoteQualityProfile.automatic;
+  RemoteVideoPolicy defaultVideoPolicy = const RemoteVideoPolicy();
   RemotePointerMode pointerMode = RemotePointerMode.touchpad;
   double pointerSensitivity = 1.25;
   double scrollSensitivity = 2;
@@ -51,6 +65,8 @@ class AppSettingsController extends ChangeNotifier {
   int sessionHistoryLimit = 50;
   bool showAdvancedNetwork = false;
   bool incomingAccessEnabled = true;
+  RemoteDisplayPresentationMode displayPresentationMode =
+      RemoteDisplayPresentationMode.singleWindow;
   bool loaded = false;
 
   SignalingServerProfile? get signalingServerProfile {
@@ -81,6 +97,19 @@ class AppSettingsController extends ChangeNotifier {
     defaultQuality = RemoteQualityProfile.fromWireValue(
       await store.getString(_qualityKey),
     );
+    final storedVideoPolicy = await store.getString(_videoPolicyKey);
+    if (storedVideoPolicy != null) {
+      try {
+        defaultVideoPolicy = RemoteVideoPolicy.fromMessage(
+          (jsonDecode(storedVideoPolicy) as Map).cast<String, dynamic>(),
+        );
+        defaultQuality = defaultVideoPolicy.legacyProfile;
+      } catch (_) {
+        defaultVideoPolicy = RemoteVideoPolicy.fromLegacy(defaultQuality);
+      }
+    } else {
+      defaultVideoPolicy = RemoteVideoPolicy.fromLegacy(defaultQuality);
+    }
     final storedPointerMode = await store.getString(_pointerModeKey);
     pointerMode = RemotePointerMode.values.firstWhere(
       (value) => value.name == (storedPointerMode ?? pointerMode.name),
@@ -113,15 +142,28 @@ class AppSettingsController extends ChangeNotifier {
     );
     showAdvancedNetwork = await store.getBool(_advancedNetworkKey) ?? false;
     incomingAccessEnabled = await store.getBool(_incomingAccessKey) ?? true;
+    final storedPresentation = await store.getString(_displayPresentationKey);
+    displayPresentationMode = RemoteDisplayPresentationMode.values.firstWhere(
+      (value) => value.name == storedPresentation,
+      orElse: () => RemoteDisplayPresentationMode.singleWindow,
+    );
     loaded = true;
     notifyListeners();
   }
 
   Future<void> setDefaultQuality(RemoteQualityProfile value) async {
-    if (defaultQuality == value) return;
-    defaultQuality = value;
+    await setDefaultVideoPolicy(RemoteVideoPolicy.fromLegacy(value));
+  }
+
+  Future<void> setDefaultVideoPolicy(RemoteVideoPolicy value) async {
+    if (defaultVideoPolicy == value) return;
+    defaultVideoPolicy = value;
+    defaultQuality = value.legacyProfile;
     notifyListeners();
-    await _persist((store) => store.setString(_qualityKey, value.name));
+    await _persist((store) async {
+      await store.setString(_qualityKey, defaultQuality.name);
+      await store.setString(_videoPolicyKey, jsonEncode(value.toMessage()));
+    });
   }
 
   Future<void> setPointerMode(RemotePointerMode value) async {
@@ -211,6 +253,17 @@ class AppSettingsController extends ChangeNotifier {
     incomingAccessEnabled = value;
     notifyListeners();
     await _persist((store) => store.setBool(_incomingAccessKey, value));
+  }
+
+  Future<void> setDisplayPresentationMode(
+    RemoteDisplayPresentationMode value,
+  ) async {
+    if (displayPresentationMode == value) return;
+    displayPresentationMode = value;
+    notifyListeners();
+    await _persist(
+      (store) => store.setString(_displayPresentationKey, value.name),
+    );
   }
 
   Future<void> _persist(

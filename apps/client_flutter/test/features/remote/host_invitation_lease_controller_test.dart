@@ -35,6 +35,25 @@ void main() {
     expect(controller.expiresAt, isNull);
   });
 
+  test('server-authoritative lease only counts down locally', () async {
+    var rotations = 0;
+    final controller = HostInvitationLeaseController(
+      onRotationDue: () async => rotations += 1,
+      safetyMargin: Duration.zero,
+    );
+    addTearDown(controller.dispose);
+
+    controller.arm(
+      DateTime.now().add(const Duration(milliseconds: 30)),
+      serverAuthoritative: true,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+
+    expect(rotations, 0);
+    expect(controller.serverAuthoritative, isTrue);
+    expect(controller.remaining, Duration.zero);
+  });
+
   test('coalesces concurrent manual rotations', () async {
     final release = Completer<void>();
     var rotations = 0;

@@ -3,7 +3,9 @@ package com.crossdesktopremote.controlplane.signaling;
 import java.net.InetSocketAddress;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -100,6 +102,36 @@ final class SignalingRoomRegistry {
 		}
 		rooms.remove(roomCode, current);
 		return Optional.of(createHostInvitation(session, current.generation() + 1));
+	}
+
+	/**
+	 * Rotates every expired, unconsumed invitation while keeping the host
+	 * WebSocket online. The scheduler calls this method; clients only display the
+	 * authoritative lease pushed by the server.
+	 */
+	synchronized List<ServerInvitationRotation> rotateExpiredHostInvitations() {
+		var now = currentTimeMillis.getAsLong();
+		var rotations = new ArrayList<ServerInvitationRotation>();
+		for (var entry : List.copyOf(rooms.entrySet())) {
+			var roomCode = entry.getKey();
+			var room = entry.getValue();
+			if (!room.isWaitingInvitationExpired(now, roomTtlMillis)) {
+				continue;
+			}
+			var host = room.hostSession().orElse(null);
+			if (host == null || !room.invalidateForServerRotation()) {
+				rooms.remove(roomCode, room);
+				continue;
+			}
+			rooms.remove(roomCode, room);
+			var invitation = createHostInvitation(host, room.generation() + 1);
+			rotations.add(new ServerInvitationRotation(
+					roomCode,
+					invitation,
+					host,
+					"expired"));
+		}
+		return List.copyOf(rotations);
 	}
 
 	private HostInvitation invitation(String roomCode, Room room) {
@@ -255,6 +287,13 @@ final class SignalingRoomRegistry {
 			long expiresInMillis) {
 	}
 
+	record ServerInvitationRotation(
+			String previousRoomCode,
+			HostInvitation invitation,
+			WebSocketSession hostSession,
+			String reason) {
+	}
+
 	enum JoinResult {
 		JOINED,
 		INVALID_ROOM,
@@ -318,6 +357,16 @@ final class SignalingRoomRegistry {
 					(!controllerCodeConsumed && nowMillis - createdAtMillis >= ttlMillis);
 		}
 
+		synchronized boolean isWaitingInvitationExpired(long nowMillis, long ttlMillis) {
+			return !invitationInvalidated
+					&& !controllerCodeConsumed
+					&& nowMillis - createdAtMillis >= ttlMillis;
+		}
+
+		synchronized Optional<WebSocketSession> hostSession() {
+			return session(SignalingRole.HOST);
+		}
+
 		synchronized boolean isEmpty() {
 			return participants.isEmpty();
 		}
@@ -342,6 +391,14 @@ final class SignalingRoomRegistry {
 					|| controllerCodeConsumed
 					|| !leaseId.equals(expectedLeaseId)
 					|| (expectedGeneration >= 0 && generation != expectedGeneration)) {
+				return false;
+			}
+			invitationInvalidated = true;
+			return true;
+		}
+
+		synchronized boolean invalidateForServerRotation() {
+			if (invitationInvalidated || controllerCodeConsumed || !hasOpenHost()) {
 				return false;
 			}
 			invitationInvalidated = true;

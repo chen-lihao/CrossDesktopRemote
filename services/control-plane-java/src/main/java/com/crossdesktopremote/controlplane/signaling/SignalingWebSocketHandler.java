@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.socket.CloseStatus;
@@ -91,7 +92,12 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		var ready = new HashMap<String, Object>();
 		ready.put("type", "ready");
 		ready.put("protocolVersion", 2);
-		ready.put("capabilities", Set.of("server-invitations", "invitation-rotation"));
+		ready.put("capabilities", Set.of(
+				"server-invitations",
+				"invitation-rotation",
+				"server-invitation-push"));
+		ready.put("serverTimeUnixMillis", System.currentTimeMillis());
+		ready.put("clientAddress", clientAddress(session));
 		ready.put("room", roomCode);
 		ready.put("role", role.get().wireName());
 		if (invitation != null) {
@@ -153,14 +159,7 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			}
 			var invitation = rotated.get();
 			session.getAttributes().put(ROOM_ATTRIBUTE, invitation.roomCode());
-			var response = new HashMap<String, Object>();
-			response.put("type", "invitation-rotated");
-			response.put("room", invitation.roomCode());
-			response.put("invitationLeaseId", invitation.leaseId());
-			response.put("invitationGeneration", invitation.generation());
-			response.put("invitationState", "active");
-			response.put("invitationExpiresAtUnixMillis", invitation.expiresAtUnixMillis());
-			response.put("invitationExpiresInMillis", invitation.expiresInMillis());
+			var response = invitationPayload("invitation-rotated", invitation);
 			var requestId = payload.path("requestId").asText();
 			if (StringUtils.hasText(requestId)) response.put("requestId", requestId);
 			sendJson(session, response);
@@ -174,6 +173,20 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		}
 
 		sendText(peer.get(), message);
+	}
+
+	@Scheduled(fixedDelayString = "${crossdesktop.signaling.invitation-sweep-ms:1000}")
+	void rotateExpiredInvitations() {
+		for (var rotation : rooms.rotateExpiredHostInvitations()) {
+			var host = rotation.hostSession();
+			var currentRoom = roomCode(host);
+			if (rotation.previousRoomCode().equals(currentRoom)) {
+				host.getAttributes().put(ROOM_ATTRIBUTE, rotation.invitation().roomCode());
+			}
+			var payload = invitationPayload("invitation-updated", rotation.invitation());
+			payload.put("reason", rotation.reason());
+			sendJsonQuietly(host, payload);
+		}
 	}
 
 	@Override
@@ -198,6 +211,21 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 	private void sendJson(WebSocketSession session, Map<String, ?> payload) throws IOException {
 		sendText(session, new TextMessage(objectMapper.writeValueAsString(payload)));
+	}
+
+	private HashMap<String, Object> invitationPayload(
+			String type,
+			SignalingRoomRegistry.HostInvitation invitation) {
+		var payload = new HashMap<String, Object>();
+		payload.put("type", type);
+		payload.put("room", invitation.roomCode());
+		payload.put("invitationLeaseId", invitation.leaseId());
+		payload.put("invitationGeneration", invitation.generation());
+		payload.put("invitationState", "active");
+		payload.put("serverTimeUnixMillis", System.currentTimeMillis());
+		payload.put("invitationExpiresAtUnixMillis", invitation.expiresAtUnixMillis());
+		payload.put("invitationExpiresInMillis", invitation.expiresInMillis());
+		return payload;
 	}
 
 	private void sendJsonQuietly(WebSocketSession session, Map<String, ?> payload) {
@@ -231,7 +259,16 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		payload.put("peerPlatform", peer.getAttributes().getOrDefault(PLATFORM_ATTRIBUTE, "unknown"));
 		payload.put("peerDeviceId", peer.getAttributes().getOrDefault(DEVICE_ID_ATTRIBUTE, "legacy-" + peer.getId()));
 		payload.put("peerCapabilities", peer.getAttributes().getOrDefault(CAPABILITIES_ATTRIBUTE, Set.of()));
+		payload.put("peerAddress", clientAddress(peer));
 		return payload;
+	}
+
+	private String clientAddress(WebSocketSession session) {
+		var address = session.getRemoteAddress();
+		if (address == null) return "unknown";
+		return address.getAddress() == null
+				? address.getHostString()
+				: address.getAddress().getHostAddress();
 	}
 
 	private String normalizedPlatform(String value) {

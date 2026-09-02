@@ -42,6 +42,7 @@ void main() {
       textureCropRenderingV1Capability,
       atomicShortcutV1Capability,
       scopedInputResetV1Capability,
+      videoPolicyV2Capability,
     ]);
   });
 
@@ -58,6 +59,7 @@ void main() {
       displaySwitchTransactionV1Capability,
       atomicShortcutV1Capability,
       scopedInputResetV1Capability,
+      videoPolicyV2Capability,
     ]);
   });
 
@@ -69,7 +71,11 @@ void main() {
         clipboardSupported: false,
         explicitFileTransferSupported: false,
       ),
-      [atomicShortcutV1Capability, scopedInputResetV1Capability],
+      [
+        atomicShortcutV1Capability,
+        scopedInputResetV1Capability,
+        videoPolicyV2Capability,
+      ],
     );
   });
 
@@ -85,6 +91,7 @@ void main() {
         displaySwitchTransactionV1Capability,
         atomicShortcutV1Capability,
         scopedInputResetV1Capability,
+        videoPolicyV2Capability,
       ],
     );
   });

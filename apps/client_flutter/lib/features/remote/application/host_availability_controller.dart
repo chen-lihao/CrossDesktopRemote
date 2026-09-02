@@ -190,7 +190,12 @@ class HostAvailabilityController extends ChangeNotifier {
     if (next == RemoteSessionState.waitingForPeer) {
       _reconnectAttempt = 0;
       final expiresAt = session.hostInvitationExpiresAt;
-      if (expiresAt != null) invitationLease.arm(expiresAt);
+      if (expiresAt != null) {
+        invitationLease.arm(
+          expiresAt,
+          serverAuthoritative: session.supportsServerInvitationPush,
+        );
+      }
     } else if (!invitationLease.rotationPending) {
       invitationLease.cancel();
     }

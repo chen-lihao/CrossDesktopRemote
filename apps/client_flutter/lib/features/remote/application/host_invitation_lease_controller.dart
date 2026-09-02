@@ -21,9 +21,11 @@ class HostInvitationLeaseController extends ChangeNotifier {
   Timer? _countdownTimer;
   DateTime? _expiresAt;
   bool _rotationPending = false;
+  bool _serverAuthoritative = false;
 
   DateTime? get expiresAt => _expiresAt;
   bool get rotationPending => _rotationPending;
+  bool get serverAuthoritative => _serverAuthoritative;
 
   Duration? get remaining {
     final expiresAt = _expiresAt;
@@ -43,16 +45,23 @@ class HostInvitationLeaseController extends ChangeNotifier {
         '${seconds.toString().padLeft(2, '0')} 后自动更新';
   }
 
-  void arm(DateTime expiresAt) {
-    if (_expiresAt == expiresAt && _rotationTimer?.isActive == true) return;
+  void arm(DateTime expiresAt, {bool serverAuthoritative = false}) {
+    if (_expiresAt == expiresAt &&
+        _serverAuthoritative == serverAuthoritative &&
+        (_rotationTimer?.isActive == true || serverAuthoritative)) {
+      return;
+    }
     _cancelTimers();
     _expiresAt = expiresAt;
     _rotationPending = false;
-    final delay = expiresAt.difference(_now()) - safetyMargin;
-    _rotationTimer = Timer(
-      delay.isNegative ? Duration.zero : delay,
-      () => unawaited(_rotateWhenDue()),
-    );
+    _serverAuthoritative = serverAuthoritative;
+    if (!serverAuthoritative) {
+      final delay = expiresAt.difference(_now()) - safetyMargin;
+      _rotationTimer = Timer(
+        delay.isNegative ? Duration.zero : delay,
+        () => unawaited(_rotateWhenDue()),
+      );
+    }
     _countdownTimer = Timer.periodic(
       const Duration(seconds: 1),
       (_) => notifyListeners(),
@@ -91,6 +100,7 @@ class HostInvitationLeaseController extends ChangeNotifier {
     _cancelTimers();
     _expiresAt = null;
     _rotationPending = false;
+    _serverAuthoritative = false;
     if (changed) notifyListeners();
   }
 

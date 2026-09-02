@@ -61,4 +61,33 @@ void main() {
       expect(high60.maxFramerate, 60);
     },
   );
+
+  test('resolution and frame rate are negotiated independently', () {
+    const policy = RemoteVideoPolicy(
+      resolution: RemoteResolutionMode.p1440,
+      frameRate: RemoteFrameRateMode.fps90,
+      preference: RemoteVideoPreference.smoothness,
+    );
+
+    final target = RemoteVideoTarget.forPolicy(policy);
+
+    expect(target.targetLongEdge, 2560);
+    expect(target.maxFramerate, 90);
+    expect(target.prioritizeFrameRate, isTrue);
+    expect(RemoteVideoPolicy.fromMessage(policy.toMessage()), policy);
+  });
+
+  test('custom video policy clamps unsafe values', () {
+    final policy = RemoteVideoPolicy.fromMessage({
+      'resolution': 'custom',
+      'frameRate': 'custom',
+      'customLongEdge': 99999,
+      'customFramesPerSecond': 500,
+      'maxBitrateMbps': 900,
+    });
+
+    expect(policy.targetLongEdge, 7680);
+    expect(policy.requestedFramesPerSecond, 120);
+    expect(policy.maxBitrateMbps, 100);
+  });
 }

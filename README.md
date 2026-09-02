@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 启动并连接信令服务后自动进入可连接状态。每台客户端会生成不可编辑的安装级机器码；文本剪贴板和 Mac/Windows/iPad 显式文件传输已接入。桌面文件复制粘贴已改为统一的 `Offer → PasteIntent → DestinationLease → 显式传输 → Commit` 事务：复制阶段不读取或发送文件，粘贴瞬间锁定 Finder/Explorer 活动目录，文件内容只走现有可恢复传输引擎，不再写入远端系统文件剪贴板。Windows MSVC 与三端物理验收仍未完成。
+> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 启动并连接信令服务后自动进入可连接状态。每台客户端会生成不可编辑的安装级机器码；文本剪贴板和 Mac/Windows/iPad 显式文件传输已接入。桌面文件复制粘贴已改为统一的 `Offer → PasteIntent → DestinationLease → 显式传输 → Commit` 事务。会话具有稳定 `sessionId`，本地历史使用 SQLite 分页并以 AES-GCM 加密敏感元数据；远程画面从设备页拆为独立工作区。Windows MSVC 与三端物理验收仍未完成。
 
 ## 项目定位
 
@@ -214,9 +214,20 @@ flutter run -d macos
 flutter run -d <ipad-device-id>
 ```
 
+桌面独立原生窗口预留 Flutter 同一 isolate windowing 宿主；未启用时不会崩溃，会自动降级为应用内全屏工作区。项目基线 Flutter 3.47 stable 当前将该开关标记为 `Unavailable`，不要切换现有稳定 SDK。若要验证 OS 原生窗口，应另外安装 Flutter main 实验 SDK并在该 SDK 中执行：
+
+```bash
+<flutter-main>/bin/flutter config --enable-windowing
+cd apps/client_flutter
+<flutter-main>/bin/flutter run -d macos
+# Windows 使用 <flutter-main>/bin/flutter run -d windows
+```
+
+设备页和会话页的“打开远程桌面”只创建/激活画面窗口，不会建立第二条 WebRTC 连接。默认使用单窗口切换显示器；“每个显示器独立窗口”只有在双方协商 `multi-display-stream-v1` 后才启用，当前版本不声明该能力，避免以单路视频伪装并列多屏。
+
 Mac/Windows 启动并连接信令服务后会自动上线并生成连接码；“在线等待”阶段只注册信令并发布 DNS-SD，不采集屏幕。设备页同时展示“允许远程访问”和“控制其他设备”，两个会话生命周期彼此独立，不再因为切换页面或操作方向销毁另一侧状态。先在被控端完成系统权限设置，iPad 或桌面控制端的“附近设备”会显示可连接设备，点击后只需输入相同六位连接码。未过期的正确连接码验证成功后才开始采集并建立会话，不再需要被控端二次允许。一段远程会话结束后，控制端清空已用连接码，被控端自动注册新的单次连接码并恢复等待。安全设置仍提供“允许接收远程连接”总开关，但它是紧急离线开关，不再承担日常角色切换。如果网络禁止 mDNS，仍可使用手动信令地址。macOS 的屏幕录制和事件注入权限必须由本机用户在系统设置中授予；未授权时会话降级为仅观看。当前连接码信令只用于开发环境，不可暴露到公网。
 
-等待连接期间，Java 信令服务生成六位连接码、租约 ID、递增 generation 和五分钟过期时间。客户端在过期前自动刷新，也允许手动刷新；服务端通过 lease + generation 原子作废旧码并返回新码。连接码一经消费立即标记失效，活动会话期间禁止刷新，断开后自动注册新码。机器码是本机公开标识，不是密码或媒体密钥；当前版本保存在应用数据中，卸载并清除应用数据后会重新生成。
+等待连接期间，Java 信令服务生成六位连接码、租约 ID、递增 generation 和五分钟过期时间。服务端定时原子轮换过期未消费的连接码并通过 `invitation-updated` 主动推送；客户端倒计时只用于显示，连接旧服务时才保留本地刷新降级。用户仍可手动刷新。连接码一经消费立即标记失效，活动会话期间禁止刷新，断开后自动注册新码。机器码是本机公开标识，不是密码或媒体密钥；当前版本保存在应用数据中，卸载并清除应用数据后会重新生成。
 
 ### iPad 远程输入
 
@@ -338,9 +349,9 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、Windows原生全屏；桌面DNS-SD、统一跨平台切屏事务、非阻塞显示几何和输入路径；可靠输入FIFO与无状态motion；macOS/Windows文本剪贴板；Mac/Windows/iPad显式文件通道和传输中心；桌面文件`Offer/PasteIntent/DestinationLease/Commit`事务由`FileCopyPasteCoordinator`统一持有，并向活动目录原子落盘；持久化信令服务器配置与WebSocket握手检查；macOS录屏/输入独立权限矩阵；暂停/恢复/取消、`.cdrpart`原子落盘与会话内续传；`analyze`零告警、204项测试通过且1项按设计跳过，macOS/iOS Debug构建成功 | Windows MSVC构建、Windows/iPad各30次主副屏往返和Mac/Windows/iPad双机文件/剪贴板物理验收；20 GB、磁盘满、输入P95与应用重启后续传 |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、窗口级全屏；桌面DNS-SD、统一跨平台切屏事务、可靠输入FIFO与无状态motion；macOS/Windows文本剪贴板；Mac/Windows/iPad显式文件通道和传输中心；桌面文件`Offer/PasteIntent/DestinationLease/Commit`事务；稳定`sessionId`与领域事件；SQLite十条分页、AES-GCM敏感元数据和文件传输审计；分辨率/帧率/码率独立策略；应用内独立远程工作区和同一isolate原生窗口宿主；`analyze`零告警、211项测试通过且1项按设计跳过，macOS/iOS Debug构建成功 | 基线Flutter stable尚未开放windowing，OS独立窗口需单独main SDK或自有原生宿主验证；Windows MSVC构建、Windows/iPad各30次主副屏往返和三端文件/剪贴板验收；20 GB、磁盘满、输入P95与应用重启后续传；真正并列多屏仍由`multi-display-stream-v1`门禁关闭 |
 | Rust | `fmt`、Clippy；27个workspace单测；传输状态机、限额、Manifest/路径、恢复位图、SHA-256、WebRTC背压抽象与任务C ABI | 桌面MVP磁盘数据泵仍在Dart应用服务；下沉Rust/原生层和发布打包待接入 |
-| Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、lease/generation 原子轮换、邀请/来源两级限流、`retryAfter`；16 项测试通过 | 可信身份、设备注册、Redis 分布式限流、生产会话票据和 WSS 尚未实现 |
+| Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、服务端定时轮换与主动推送、lease/generation 原子更新、邀请/来源两级限流、`retryAfter`；无数据库的注册表定向测试通过 | 本机未启动PostgreSQL时全量集成测试不可运行；可信身份、设备注册、Redis分布式限流、生产会话票据和WSS尚未实现 |
 | Protobuf | v1基础消息、剪贴板/文件传输协议、显式能力协商和旧客户端降级；Buf lint、Java/Rust/Dart生成和编译 | 平台互操作、模糊测试和breaking基线待增加 |
 | Infrastructure | PostgreSQL、Redis、coturn Compose 均健康 | 当前仅本地开发配置；生产密钥、TLS、高可用尚未配置 |
 

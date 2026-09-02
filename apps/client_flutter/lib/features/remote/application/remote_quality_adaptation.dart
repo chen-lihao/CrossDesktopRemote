@@ -58,6 +58,56 @@ class RemoteVideoTarget {
     );
   }
 
+  factory RemoteVideoTarget.forPolicy(
+    RemoteVideoPolicy policy, {
+    RemoteAdaptiveVideoTier automaticTier = RemoteAdaptiveVideoTier.hd30,
+  }) {
+    final automatic = RemoteVideoTarget.forProfile(
+      RemoteQualityProfile.automatic,
+      automaticTier: automaticTier,
+    );
+    final longEdge = switch (policy.resolution) {
+      RemoteResolutionMode.automatic => automatic.targetLongEdge,
+      _ => policy.targetLongEdge,
+    };
+    final framesPerSecond = switch (policy.frameRate) {
+      RemoteFrameRateMode.automatic => automatic.maxFramerate,
+      _ => policy.requestedFramesPerSecond ?? automatic.maxFramerate,
+    };
+    final bitrate = policy.maxBitrateMbps == null
+        ? _automaticBitrate(longEdge, framesPerSecond)
+        : policy.maxBitrateMbps!.clamp(1, 100) * 1000 * 1000;
+    return RemoteVideoTarget(
+      label: policy.label,
+      targetLongEdge: longEdge,
+      maxBitrate: bitrate,
+      maxFramerate: framesPerSecond.clamp(5, 120),
+      prioritizeFrameRate:
+          policy.preference == RemoteVideoPreference.smoothness,
+    );
+  }
+
+  static int _automaticBitrate(int? longEdge, int framesPerSecond) {
+    final edge = longEdge ?? 3840;
+    final base = switch (edge) {
+      <= 1280 => 4,
+      <= 1920 => 8,
+      <= 2560 => 15,
+      _ => 28,
+    };
+    final multiplier = framesPerSecond <= 30
+        ? 1.0
+        : framesPerSecond <= 60
+        ? 1.6
+        : framesPerSecond <= 90
+        ? 2.0
+        : 2.4;
+    return (base * multiplier * 1000 * 1000).round().clamp(
+      2 * 1000 * 1000,
+      80 * 1000 * 1000,
+    );
+  }
+
   final String label;
   final int? targetLongEdge;
   final int maxBitrate;

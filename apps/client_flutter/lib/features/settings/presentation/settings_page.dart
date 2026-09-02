@@ -100,6 +100,80 @@ class SettingsPage extends StatelessWidget {
     }
   }
 
+  Future<void> _editCustomVideoPolicy(BuildContext context) async {
+    final current = settings.defaultVideoPolicy;
+    final edge = TextEditingController(text: '${current.customLongEdge}');
+    final fps = TextEditingController(text: '${current.customFramesPerSecond}');
+    final bitrate = TextEditingController(
+      text: current.maxBitrateMbps?.toString() ?? '',
+    );
+    final result = await showDialog<RemoteVideoPolicy>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('自定义视频策略'),
+        content: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: edge,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: '分辨率长边像素（320～7680）',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: fps,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: '帧率（5～120 fps）'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: bitrate,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: '码率 Mbps（留空为自动）'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final parsedEdge = int.tryParse(edge.text);
+              final parsedFps = int.tryParse(fps.text);
+              final parsedBitrate = bitrate.text.trim().isEmpty
+                  ? null
+                  : int.tryParse(bitrate.text);
+              if (parsedEdge == null || parsedFps == null) return;
+              Navigator.pop(
+                context,
+                current.copyWith(
+                  resolution: RemoteResolutionMode.custom,
+                  frameRate: RemoteFrameRateMode.custom,
+                  customLongEdge: parsedEdge.clamp(320, 7680),
+                  customFramesPerSecond: parsedFps.clamp(5, 120),
+                  maxBitrateMbps: parsedBitrate?.clamp(1, 100),
+                  automaticBitrate: parsedBitrate == null,
+                ),
+              );
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    edge.dispose();
+    fps.dispose();
+    bitrate.dispose();
+    if (result != null) unawaited(settings.setDefaultVideoPolicy(result));
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -125,27 +199,111 @@ class SettingsPage extends StatelessWidget {
                     icon: Icons.high_quality_outlined,
                     children: [
                       ListTile(
-                        title: const Text('默认传输画质'),
-                        subtitle: const Text('Sidecar 和 Retina 屏幕会优先按实际像素采集'),
-                        trailing: DropdownButton<RemoteQualityProfile>(
-                          value: settings.defaultQuality,
+                        title: const Text('默认分辨率'),
+                        subtitle: const Text('与帧率独立设置；自动会根据网络与设备能力调整'),
+                        trailing: DropdownButton<RemoteResolutionMode>(
+                          value: settings.defaultVideoPolicy.resolution,
+                          onChanged: (value) {
+                            if (value == null) return;
+                            if (value == RemoteResolutionMode.custom) {
+                              unawaited(_editCustomVideoPolicy(context));
+                              return;
+                            }
+                            unawaited(
+                              settings.setDefaultVideoPolicy(
+                                settings.defaultVideoPolicy.copyWith(
+                                  resolution: value,
+                                ),
+                              ),
+                            );
+                          },
+                          items: [
+                            for (final value in RemoteResolutionMode.values)
+                              DropdownMenuItem(
+                                value: value,
+                                child: Text(value.label),
+                              ),
+                          ],
+                        ),
+                      ),
+                      ListTile(
+                        title: const Text('默认帧率'),
+                        subtitle: const Text('高刷新率会增加编码、网络和耗电压力'),
+                        trailing: DropdownButton<RemoteFrameRateMode>(
+                          value: settings.defaultVideoPolicy.frameRate,
+                          onChanged: (value) {
+                            if (value == null) return;
+                            if (value == RemoteFrameRateMode.custom) {
+                              unawaited(_editCustomVideoPolicy(context));
+                              return;
+                            }
+                            unawaited(
+                              settings.setDefaultVideoPolicy(
+                                settings.defaultVideoPolicy.copyWith(
+                                  frameRate: value,
+                                ),
+                              ),
+                            );
+                          },
+                          items: [
+                            for (final value in RemoteFrameRateMode.values)
+                              DropdownMenuItem(
+                                value: value,
+                                child: Text(value.label),
+                              ),
+                          ],
+                        ),
+                      ),
+                      ListTile(
+                        title: const Text('自定义与码率'),
+                        subtitle: Text(settings.defaultVideoPolicy.label),
+                        trailing: IconButton(
+                          tooltip: '编辑自定义视频策略',
+                          onPressed: () =>
+                              unawaited(_editCustomVideoPolicy(context)),
+                          icon: const Icon(Icons.tune),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  _SettingsSection(
+                    title: '远程桌面窗口',
+                    icon: Icons.window_outlined,
+                    children: [
+                      ListTile(
+                        title: const Text('多显示器展示方式'),
+                        subtitle: Text(
+                          settings.displayPresentationMode ==
+                                  RemoteDisplayPresentationMode.singleWindow
+                              ? '默认在一个独立远程窗口内切换显示器'
+                              : session.remoteSupportsMultiDisplayStreamV1
+                              ? '每个显示器使用独立媒体轨道和独立窗口'
+                              : '对端尚未协商 multi-display-stream-v1，当前会话自动使用单窗口',
+                        ),
+                        trailing: DropdownButton<RemoteDisplayPresentationMode>(
+                          value: settings.displayPresentationMode,
                           onChanged: (value) {
                             if (value != null) {
-                              unawaited(settings.setDefaultQuality(value));
+                              unawaited(
+                                settings.setDisplayPresentationMode(value),
+                              );
                             }
                           },
                           items: [
-                            for (final profile in RemoteQualityProfile.values)
-                              if (!profile.desktopControllerOnly ||
-                                  Platform.isMacOS ||
-                                  Platform.isWindows ||
-                                  Platform.isLinux)
-                                DropdownMenuItem(
-                                  value: profile,
-                                  child: Text(profile.label),
-                                ),
+                            for (final mode
+                                in RemoteDisplayPresentationMode.values)
+                              DropdownMenuItem(
+                                value: mode,
+                                child: Text(mode.label),
+                              ),
                           ],
                         ),
+                      ),
+                      const ListTile(
+                        leading: Icon(Icons.info_outline),
+                        title: Text('独立窗口不会建立第二条远程连接'),
+                        subtitle: Text('关闭窗口只关闭画面工作区；会话、剪贴板和文件传输继续由主窗口管理'),
                       ),
                     ],
                   ),
