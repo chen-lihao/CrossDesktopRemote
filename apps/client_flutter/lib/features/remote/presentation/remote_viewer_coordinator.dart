@@ -1,262 +1,91 @@
-// Flutter's same-isolate desktop windowing API is still marked internal.
-// All references are contained here and guarded by the runtime feature flag.
-// ignore_for_file: implementation_imports, invalid_use_of_internal_member
-
-import 'dart:async';
-import 'dart:io';
-
 import 'package:cross_desktop_remote/app/desktop_windowing_root.dart';
-import 'package:cross_desktop_remote/app/theme.dart';
+import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
-import 'package:cross_desktop_remote/features/remote/presentation/remote_desktop_panel.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/in_app_remote_viewer_host.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/native_remote_viewer_host.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_host.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/src/widgets/_window.dart';
+import 'package:flutter/widgets.dart';
 
-/// Owns presentation only. The session, media tracks and input state remain in
-/// [RemoteSessionController], so opening or closing a viewer never reconnects.
+/// Selects a presentation host without changing the session, media track or
+/// input lifecycle. Windows intentionally stays in the primary Flutter view:
+/// the current WebRTC texture registrar is not view-aware.
 class RemoteViewerCoordinator {
-  RegularWindowController? _windowController;
-  WindowEntry? _windowEntry;
-  WindowRegistry? _windowRegistry;
-  bool _routeOpen = false;
+  RemoteViewerCoordinator({
+    RemoteViewerHost? inAppHost,
+    RemoteViewerHost? nativeHost,
+    bool Function()? nativeWindowingAvailable,
+  }) : _inAppHost = inAppHost ?? InAppRemoteViewerHost(),
+       _nativeHost = nativeHost ?? NativeRemoteViewerHost(),
+       _nativeWindowingAvailable =
+           nativeWindowingAvailable ?? (() => desktopWindowingAvailable);
 
-  bool get desktopWindowOpen => _windowController != null;
+  final RemoteViewerHost _inAppHost;
+  final RemoteViewerHost _nativeHost;
+  final bool Function() _nativeWindowingAvailable;
+
+  RemoteViewerHost? _activeHost;
+  bool _opening = false;
+
+  bool get isOpen => _activeHost?.isOpen ?? false;
 
   Future<void> open({
     required BuildContext context,
     required RemoteSessionController session,
     required AppSettingsController settings,
   }) async {
-    if (desktopWindowingAvailable &&
-        (Platform.isMacOS || Platform.isWindows || Platform.isLinux)) {
-      final registry = WindowRegistry.maybeOf(context);
-      if (registry != null) {
-        _openDesktopWindow(
-          registry: registry,
-          session: session,
-          settings: settings,
-        );
-        return;
-      }
-    }
-    if (_routeOpen || !context.mounted) return;
-    _routeOpen = true;
-    try {
-      await Navigator.of(context).push<void>(
-        MaterialPageRoute(
-          settings: const RouteSettings(name: '/remote-workspace'),
-          builder: (_) =>
-              RemoteViewerWorkspace(session: session, settings: settings),
-        ),
-      );
-    } finally {
-      _routeOpen = false;
-    }
-  }
-
-  void _openDesktopWindow({
-    required WindowRegistry registry,
-    required RemoteSessionController session,
-    required AppSettingsController settings,
-  }) {
-    final existing = _windowController;
-    if (existing != null) {
-      existing.activate();
+    final activeHost = _activeHost;
+    if (_opening || activeHost?.isOpen == true) {
+      activeHost?.activate();
       return;
     }
+    if (!context.mounted) return;
 
-    late final WindowEntry entry;
-    late final RegularWindowController controller;
-    var unregistered = false;
-    void unregister() {
-      if (unregistered) return;
-      unregistered = true;
-      if (_windowEntry == entry) {
-        registry.unregister(entry);
-        _windowEntry = null;
-        _windowRegistry = null;
+    _opening = true;
+    final request = RemoteViewerRequest(
+      context: context,
+      session: session,
+      settings: settings,
+    );
+    final preferredHost =
+        _nativeWindowingAvailable() && _nativeHost.canOpen(context)
+        ? _nativeHost
+        : _inAppHost;
+
+    try {
+      _activeHost = preferredHost;
+      await preferredHost.open(request);
+    } catch (error, stackTrace) {
+      debugPrint('Opening remote viewer failed: $error\n$stackTrace');
+      preferredHost.close();
+      if (preferredHost != _inAppHost && context.mounted) {
+        AppMessenger.show('独立窗口打开失败，已改在当前窗口显示', level: AppMessageLevel.warning);
+        try {
+          _activeHost = _inAppHost;
+          await _inAppHost.open(request);
+        } catch (fallbackError, fallbackStackTrace) {
+          debugPrint(
+            'Opening in-app remote viewer failed: '
+            '$fallbackError\n$fallbackStackTrace',
+          );
+          AppMessenger.show(
+            '无法打开远程桌面，连接仍保持有效，请重试',
+            level: AppMessageLevel.error,
+          );
+        }
+      } else {
+        AppMessenger.show('无法打开远程桌面，连接仍保持有效，请重试', level: AppMessageLevel.error);
       }
+    } finally {
+      _opening = false;
+      if (_activeHost?.isOpen != true) _activeHost = null;
     }
-
-    controller = RegularWindowController(
-      size: const Size(1280, 800),
-      constraints: const BoxConstraints(minWidth: 720, minHeight: 480),
-      title: _windowTitle(session),
-      delegate: _RemoteViewerWindowDelegate(
-        onCloseRequested: () {
-          unregister();
-          controller.destroy();
-        },
-        onDestroyed: () {
-          unregister();
-          if (_windowController == controller) {
-            _windowController = null;
-          }
-          controller.dispose();
-        },
-      ),
-    );
-    entry = WindowEntry(
-      controller: controller,
-      builder: (_) => MaterialApp(
-        title: _windowTitle(session),
-        debugShowCheckedModeBanner: false,
-        theme: CrossDesktopTheme.light(),
-        darkTheme: CrossDesktopTheme.dark(),
-        themeMode: ThemeMode.system,
-        home: RemoteViewerWorkspace(
-          session: session,
-          settings: settings,
-          windowController: controller,
-          onClose: close,
-        ),
-      ),
-    );
-    _windowController = controller;
-    _windowEntry = entry;
-    _windowRegistry = registry;
-    registry.register(entry);
-    controller.activate();
-  }
-
-  String _windowTitle(RemoteSessionController session) {
-    final device = session.remoteDeviceId?.trim();
-    return device == null || device.isEmpty
-        ? 'CrossDesktopRemote · 远程桌面'
-        : 'CrossDesktopRemote · $device';
   }
 
   void close() {
-    final controller = _windowController;
-    final entry = _windowEntry;
-    final registry = _windowRegistry;
-    _windowController = null;
-    _windowEntry = null;
-    _windowRegistry = null;
-    if (entry != null && registry != null) registry.unregister(entry);
-    if (controller != null) {
-      controller.destroy();
-    }
-  }
-}
-
-class _RemoteViewerWindowDelegate with RegularWindowControllerDelegate {
-  _RemoteViewerWindowDelegate({
-    required this.onCloseRequested,
-    required this.onDestroyed,
-  });
-
-  final VoidCallback onCloseRequested;
-  final VoidCallback onDestroyed;
-
-  @override
-  void onWindowCloseRequested(RegularWindowController controller) {
-    onCloseRequested();
-  }
-
-  @override
-  void onWindowDestroyed() {
-    onDestroyed();
-  }
-}
-
-class RemoteViewerWorkspace extends StatefulWidget {
-  const RemoteViewerWorkspace({
-    super.key,
-    required this.session,
-    required this.settings,
-    this.windowController,
-    this.onClose,
-  });
-
-  final RemoteSessionController session;
-  final AppSettingsController settings;
-  final RegularWindowController? windowController;
-  final VoidCallback? onClose;
-
-  @override
-  State<RemoteViewerWorkspace> createState() => _RemoteViewerWorkspaceState();
-}
-
-class _RemoteViewerWorkspaceState extends State<RemoteViewerWorkspace> {
-  bool _fullScreen = false;
-
-  Future<bool> _setFullScreen(bool enabled) async {
-    final controller = widget.windowController;
-    if (controller == null) return false;
-    controller.setFullscreen(enabled);
-    if (mounted) setState(() => _fullScreen = enabled);
-    return true;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: widget.session,
-      builder: (context, _) {
-        if (!widget.session.hasRemoteVideo) {
-          return Scaffold(
-            appBar: AppBar(title: const Text('远程桌面')),
-            body: Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 520),
-                child: Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.desktop_access_disabled, size: 44),
-                        const SizedBox(height: 16),
-                        Text(
-                          widget.session.statusMessage,
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 16),
-                        FilledButton.tonalIcon(
-                          onPressed:
-                              widget.onClose ??
-                              () => Navigator.maybePop(context),
-                          icon: const Icon(Icons.close),
-                          label: const Text('关闭窗口'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          );
-        }
-        return Scaffold(
-          backgroundColor: Colors.black,
-          body: SafeArea(
-            top: !_fullScreen,
-            bottom: false,
-            child: RemoteDesktopPanel(
-              session: widget.session,
-              initialInputSettings: widget.settings.inputSettings,
-              windowedWorkspace: true,
-              toolbarLeading: widget.windowController == null
-                  ? IconButton(
-                      tooltip: '返回',
-                      onPressed: () => Navigator.maybePop(context),
-                      icon: const Icon(Icons.arrow_back),
-                    )
-                  : null,
-              desktopFullScreen: _fullScreen,
-              onDesktopFullScreenChanged: widget.windowController == null
-                  ? null
-                  : _setFullScreen,
-              onKeyboardModeChanged: (mode) =>
-                  unawaited(widget.settings.setKeyboardMode(mode)),
-              onTextInputModeChanged: (mode) =>
-                  unawaited(widget.settings.setTextInputMode(mode)),
-            ),
-          ),
-        );
-      },
-    );
+    _inAppHost.close();
+    _nativeHost.close();
+    _activeHost = null;
+    _opening = false;
   }
 }

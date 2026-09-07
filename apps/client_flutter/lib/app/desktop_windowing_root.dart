@@ -9,9 +9,19 @@ import 'package:flutter/src/foundation/_features.dart';
 import 'package:flutter/src/widgets/_window.dart';
 import 'package:flutter/widgets.dart';
 
+/// Native secondary Flutter views are production-enabled only on the platform
+/// that has completed the application's WebRTC/input regression matrix.
+///
+/// Windows keeps the remote viewer in the primary view because the current
+/// flutter_webrtc texture registrar is not view-aware. Linux follows the same
+/// conservative fallback until it has its own physical acceptance coverage.
 bool get desktopWindowingAvailable =>
     isWindowingEnabled &&
-    (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
+    nativeDesktopWindowingSupported(Platform.operatingSystem);
+
+@visibleForTesting
+bool nativeDesktopWindowingSupported(String operatingSystem) =>
+    operatingSystem == 'macos';
 
 /// Wraps the application with the experimental window registry when available.
 ///
