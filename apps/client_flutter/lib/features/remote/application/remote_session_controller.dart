@@ -225,7 +225,6 @@ class RemoteSessionController extends ChangeNotifier {
         : _appleSessionCaptureLongEdge,
     (_selectedVideoPolicy.targetLongEdge ?? 0).clamp(0, 3840),
   );
-  final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
   final StreamController<RemoteNotice> _notices =
       StreamController<RemoteNotice>.broadcast(sync: true);
   final RemoteInputSequenceGuard _inputSequenceGuard =
@@ -248,6 +247,7 @@ class RemoteSessionController extends ChangeNotifier {
   RTCDataChannel? _fileTransferControlChannel;
   RTCDataChannel? _fileTransferDataChannel;
   MediaStream? _localStream;
+  MediaStream? _remoteStream;
   RTCRtpSender? _videoSender;
   RTCRtpReceiver? _videoReceiver;
   List<DesktopCapturerSource> _displaySources = const [];
@@ -268,7 +268,7 @@ class RemoteSessionController extends ChangeNotifier {
   Timer? _windowsCaptureRecoveryTimer;
   final List<RTCIceCandidate> _pendingCandidates = [];
   bool _remoteDescriptionSet = false;
-  bool _rendererReady = false;
+  bool _initialized = false;
   bool _closing = false;
   bool _connectionEstablished = false;
   bool _authorizingPeer = false;
@@ -281,6 +281,9 @@ class RemoteSessionController extends ChangeNotifier {
   bool _adaptiveQualityUpdateInProgress = false;
   bool _windowsCaptureRecoveryInProgress = false;
   int _windowsCaptureRecoveryGeneration = 0;
+  int _remoteTrackGeneration = 0;
+  int _presentationRefreshGeneration = 0;
+  RemoteVideoFrameSize? _presentedVideoFrameSize;
   Completer<void>? _adaptiveQualityUpdateCompleter;
   bool _screenCaptureGranted = false;
   bool? _accessibilityGranted;
@@ -534,7 +537,10 @@ class RemoteSessionController extends ChangeNotifier {
     return _displays.firstOrNull;
   }
 
-  bool get hasRemoteVideo => remoteRenderer.srcObject != null;
+  MediaStream? get remoteStream => _remoteStream;
+  int get remoteTrackGeneration => _remoteTrackGeneration;
+  int get presentationRefreshGeneration => _presentationRefreshGeneration;
+  bool get hasRemoteVideo => _remoteStream != null;
   bool get canSendControl =>
       role == RemoteRole.controller &&
       !_displaySwitchPending &&
@@ -542,14 +548,12 @@ class RemoteSessionController extends ChangeNotifier {
       _accessibilityGranted == true;
 
   Future<void> initialize() async {
-    if (_rendererReady) {
+    if (_initialized) {
       return;
     }
-    _setState(RemoteSessionState.initializing, '正在初始化视频渲染器');
+    _setState(RemoteSessionState.initializing, '正在初始化远程会话');
     try {
-      remoteRenderer.onColorDiagnostics = _handleRendererColorDiagnostics;
-      await remoteRenderer.initialize();
-      _rendererReady = true;
+      _initialized = true;
       if (role == RemoteRole.host &&
           _hostPlatform.capabilities.canHostDesktop) {
         if (_hostPlatform.type == HostPlatformType.windows) {
@@ -566,7 +570,8 @@ class RemoteSessionController extends ChangeNotifier {
       await _initializeClipboardMonitoring();
       _setState(RemoteSessionState.idle, '尚未连接');
     } catch (error) {
-      _fail('视频渲染器初始化失败：$error');
+      _initialized = false;
+      _fail('远程会话初始化失败：$error');
     }
   }
 
@@ -583,7 +588,7 @@ class RemoteSessionController extends ChangeNotifier {
     _localDeviceId = normalized;
   }
 
-  void _handleRendererColorDiagnostics(Map<String, dynamic> diagnostics) {
+  void updateRendererColorDiagnostics(Map<String, dynamic> diagnostics) {
     _decoderOutputColorDiagnostics = _frameColorDiagnostics(
       diagnostics['decoderOutput'],
     );
@@ -591,6 +596,23 @@ class RemoteSessionController extends ChangeNotifier {
       diagnostics['renderOutput'],
     );
     _receiverColorConversion = diagnostics['conversion'] as String?;
+    notifyListeners();
+  }
+
+  void reportPresentedVideoFrame({
+    required int trackGeneration,
+    required int width,
+    required int height,
+  }) {
+    if (trackGeneration != _remoteTrackGeneration ||
+        width <= 0 ||
+        height <= 0) {
+      return;
+    }
+    final next = RemoteVideoFrameSize(width: width, height: height);
+    final current = _presentedVideoFrameSize;
+    if (current?.width == next.width && current?.height == next.height) return;
+    _presentedVideoFrameSize = next;
     notifyListeners();
   }
 
@@ -890,10 +912,10 @@ class RemoteSessionController extends ChangeNotifier {
     required String roomCode,
     bool announceLifecycle = true,
   }) async {
-    if (!_rendererReady) {
+    if (!_initialized) {
       await initialize();
     }
-    if (!_rendererReady) {
+    if (!_initialized) {
       return;
     }
 
@@ -1866,11 +1888,11 @@ class RemoteSessionController extends ChangeNotifier {
       if (response['ok'] != true) {
         throw StateError(response['message'] as String? ?? '被控端无法执行修复');
       }
-      // Reattach the existing stream before waiting for the fresh key frame.
-      // This rebuilds only the desktop texture sink and preserves signaling,
-      // the PeerConnection, sender and DataChannels.
+      // Ask the presentation owner to rebind its renderer. The session owns
+      // media tracks, while the visible surface owns the platform texture.
       if (Platform.isWindows || Platform.isMacOS) {
-        await _rebindRemoteRenderer();
+        _presentationRefreshGeneration += 1;
+        notifyListeners();
       }
       final progress = await _waitForInboundVideoProgress(
         afterFrames: baselineFrames,
@@ -1900,14 +1922,6 @@ class RemoteSessionController extends ChangeNotifier {
       _sessionRepairPending = false;
       notifyListeners();
     }
-  }
-
-  Future<void> _rebindRemoteRenderer() async {
-    final stream = remoteRenderer.srcObject;
-    if (stream == null) return;
-    await remoteRenderer.setSrcObject(stream: null);
-    await Future<void>.delayed(Duration.zero);
-    await remoteRenderer.setSrcObject(stream: stream);
   }
 
   void refreshColorDiagnostics() {
@@ -1956,9 +1970,11 @@ class RemoteSessionController extends ChangeNotifier {
         return;
       }
       _videoReceiver = event.receiver;
-      remoteRenderer.srcObject = event.streams.first;
+      _remoteStream = event.streams.first;
+      _remoteTrackGeneration += 1;
+      _presentedVideoFrameSize = null;
       if (_state != RemoteSessionState.reconnecting) {
-        _setState(RemoteSessionState.streaming, '正在显示远程屏幕');
+        _setState(RemoteSessionState.streaming, '远程视频已连接');
       }
     };
     peerConnection.onDataChannel = (channel) {
@@ -3435,11 +3451,7 @@ class RemoteSessionController extends ChangeNotifier {
   }
 
   RemoteVideoFrameSize? _currentRendererFrameSize() {
-    final value = remoteRenderer.value;
-    final width = value.width.round();
-    final height = value.height.round();
-    if (width <= 0 || height <= 0) return null;
-    return RemoteVideoFrameSize(width: width, height: height);
+    return _presentedVideoFrameSize;
   }
 
   void _sendControl(Map<String, dynamic> message) {
@@ -5155,9 +5167,9 @@ class RemoteSessionController extends ChangeNotifier {
     await _peerConnection?.close();
     await _peerConnection?.dispose();
     _peerConnection = null;
-    if (_rendererReady) {
-      remoteRenderer.srcObject = null;
-    }
+    _remoteStream = null;
+    _remoteTrackGeneration += 1;
+    _presentedVideoFrameSize = null;
     _remoteDescriptionSet = false;
     _pendingCandidates.clear();
     _displaySources = const [];
@@ -5313,10 +5325,7 @@ class RemoteSessionController extends ChangeNotifier {
     _fileTransferNoticeSubscription = null;
     await _closeSession(notifyPeer: true);
     _fileTransfer.dispose();
-    if (_rendererReady) {
-      await remoteRenderer.dispose();
-      _rendererReady = false;
-    }
+    _initialized = false;
   }
 }
 

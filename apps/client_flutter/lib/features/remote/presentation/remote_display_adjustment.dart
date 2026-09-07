@@ -132,14 +132,27 @@ abstract interface class RemoteDisplayAdjustmentStore {
 
 class SharedPreferencesDisplayAdjustmentStore
     implements RemoteDisplayAdjustmentStore {
-  SharedPreferencesDisplayAdjustmentStore({SharedPreferencesAsync? preferences})
-    : _preferences = preferences ?? SharedPreferencesAsync();
+  SharedPreferencesDisplayAdjustmentStore({
+    SharedPreferencesAsync? initialPreferences,
+  }) : _preferences = initialPreferences;
 
-  final SharedPreferencesAsync _preferences;
+  SharedPreferencesAsync? _preferences;
+
+  SharedPreferencesAsync? get _store {
+    if (_preferences != null) return _preferences;
+    try {
+      return _preferences = SharedPreferencesAsync();
+    } on StateError {
+      // Widget tests and previews may intentionally omit platform plugins.
+      return null;
+    }
+  }
 
   @override
   Future<RemoteDisplayAdjustment?> load(String key) async {
-    final encoded = await _preferences.getString(key);
+    final store = _store;
+    if (store == null) return null;
+    final encoded = await store.getString(key);
     if (encoded == null) return null;
     try {
       final value = jsonDecode(encoded);
@@ -152,12 +165,18 @@ class SharedPreferencesDisplayAdjustmentStore
   }
 
   @override
-  Future<void> save(String key, RemoteDisplayAdjustment value) {
-    return _preferences.setString(key, jsonEncode(value.toJson()));
+  Future<void> save(String key, RemoteDisplayAdjustment value) async {
+    final store = _store;
+    if (store == null) return;
+    await store.setString(key, jsonEncode(value.toJson()));
   }
 
   @override
-  Future<void> remove(String key) => _preferences.remove(key);
+  Future<void> remove(String key) async {
+    final store = _store;
+    if (store == null) return;
+    await store.remove(key);
+  }
 }
 
 class RemoteDisplayAdjustmentController

@@ -1,4 +1,5 @@
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/remote_presentation_controller.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter/widgets.dart';
 
@@ -6,11 +7,13 @@ class RemoteViewerRequest {
   const RemoteViewerRequest({
     required this.context,
     required this.session,
+    required this.presentation,
     required this.settings,
   });
 
   final BuildContext context;
   final RemoteSessionController session;
+  final RemotePresentationController presentation;
   final AppSettingsController settings;
 }
 

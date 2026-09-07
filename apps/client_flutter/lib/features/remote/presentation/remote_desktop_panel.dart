@@ -503,6 +503,8 @@ class RemoteDesktopPanel extends StatefulWidget {
   const RemoteDesktopPanel({
     super.key,
     required this.session,
+    required this.renderer,
+    this.active = true,
     this.initialInputSettings = const RemoteInputSettings(),
     this.onKeyboardModeChanged,
     this.onTextInputModeChanged,
@@ -513,6 +515,8 @@ class RemoteDesktopPanel extends StatefulWidget {
   });
 
   final RemoteSessionController session;
+  final RTCVideoRenderer renderer;
+  final bool active;
   final RemoteInputSettings initialInputSettings;
   final ValueChanged<RemoteKeyboardMode>? onKeyboardModeChanged;
   final ValueChanged<RemoteTextInputMode>? onTextInputModeChanged;
@@ -541,9 +545,23 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _syncDisplayAdjustmentTarget();
-        _showGestureGuideOnce(context, _inputSettings.value.pointerMode);
+        if (widget.active) {
+          _showGestureGuideOnce(context, _inputSettings.value.pointerMode);
+        }
       }
     });
+  }
+
+  @override
+  void didUpdateWidget(covariant RemoteDesktopPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.active && widget.active) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !widget.active) return;
+        _surfaceKey.currentState?.requestHardwareKeyboardFocus();
+        _showGestureGuideOnce(context, _inputSettings.value.pointerMode);
+      });
+    }
   }
 
   Future<void> _openFullScreen() async {
@@ -565,6 +583,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
       MaterialPageRoute(
         builder: (_) => _FullScreenRemoteDesktopPage(
           session: widget.session,
+          renderer: widget.renderer,
           inputSettings: _inputSettings,
           displayAdjustment: _displayAdjustment,
           initialViewFit: _viewFit,
@@ -715,6 +734,8 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
     return _RemoteDesktopSurface(
       key: _surfaceKey,
       session: widget.session,
+      renderer: widget.renderer,
+      active: widget.active,
       inputSettings: inputSettings,
       displayAdjustment: _displayAdjustment,
       viewFit: _viewFit,
@@ -757,7 +778,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: widget.session.remoteRenderer,
+      animation: widget.renderer,
       builder: (context, _) {
         final viewportHeight = (MediaQuery.sizeOf(context).height * 0.52)
             .clamp(300.0, 640.0)
@@ -819,6 +840,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
 class _FullScreenRemoteDesktopPage extends StatefulWidget {
   const _FullScreenRemoteDesktopPage({
     required this.session,
+    required this.renderer,
     required this.inputSettings,
     required this.displayAdjustment,
     required this.initialViewFit,
@@ -827,6 +849,7 @@ class _FullScreenRemoteDesktopPage extends StatefulWidget {
   });
 
   final RemoteSessionController session;
+  final RTCVideoRenderer renderer;
   final ValueNotifier<RemoteInputSettings> inputSettings;
   final RemoteDisplayAdjustmentController displayAdjustment;
   final RemoteViewFit initialViewFit;
@@ -967,6 +990,8 @@ class _FullScreenRemoteDesktopPageState
                 child: _RemoteDesktopSurface(
                   key: _surfaceKey,
                   session: widget.session,
+                  renderer: widget.renderer,
+                  active: true,
                   inputSettings: inputSettings,
                   displayAdjustment: widget.displayAdjustment,
                   viewFit: _viewFit,
@@ -1428,6 +1453,8 @@ class _RemoteDesktopSurface extends StatefulWidget {
   const _RemoteDesktopSurface({
     super.key,
     required this.session,
+    required this.renderer,
+    required this.active,
     required this.inputSettings,
     required this.displayAdjustment,
     required this.viewFit,
@@ -1439,6 +1466,8 @@ class _RemoteDesktopSurface extends StatefulWidget {
   });
 
   final RemoteSessionController session;
+  final RTCVideoRenderer renderer;
+  final bool active;
   final RemoteInputSettings inputSettings;
   final RemoteDisplayAdjustmentController displayAdjustment;
   final RemoteViewFit viewFit;
@@ -1508,19 +1537,21 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   bool get _usesDesktopIme => Platform.isWindows || Platform.isMacOS;
 
   bool get _remoteHostImeActive =>
+      widget.active &&
       _usesDesktopKeyboard &&
       widget.inputSettings.textInputMode == RemoteTextInputMode.remoteIme &&
       session.remoteHostPlatform == HostPlatformType.windows.name &&
       session.remoteSupportsPhysicalKeyboard;
 
   bool get _desktopDirectImeAvailable =>
+      widget.active &&
       _usesDesktopIme &&
       !_remoteHostImeActive &&
       !_keyboardVisible &&
       session.canSendControl;
 
   void requestHardwareKeyboardFocus() {
-    if (!mounted) return;
+    if (!mounted || !widget.active) return;
     if (_remoteHostImeActive) {
       _textFocus.unfocus();
       _hardwareFocus.requestFocus();
@@ -1556,7 +1587,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _updateGestureConfiguration();
-      if (_desktopDirectImeAvailable) {
+      if (widget.active && _desktopDirectImeAvailable) {
         unawaited(_activateDesktopDirectIme());
       }
     });
@@ -1582,6 +1613,21 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   @override
   void didUpdateWidget(covariant _RemoteDesktopSurface oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.active != widget.active) {
+      if (widget.active) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && widget.active) requestHardwareKeyboardFocus();
+        });
+      } else {
+        _releaseRemotePointerState(reason: 'presentation-hidden');
+        _releaseDesktopKeys(reason: 'presentation-hidden');
+        _hardwareFocus.unfocus();
+        _textFocus.unfocus();
+        if (_usesDesktopIme) {
+          SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+        }
+      }
+    }
     if (oldWidget.inputSettings != widget.inputSettings) {
       _updateGestureConfiguration();
       if (!_keyboardVisible) {
@@ -1771,7 +1817,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   }
 
   Size? _currentRendererSourceSize() {
-    final renderer = session.remoteRenderer.value;
+    final renderer = widget.renderer.value;
     if (renderer.width <= 0 || renderer.height <= 0) return null;
     return Size(renderer.width, renderer.height);
   }
@@ -2002,6 +2048,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       _hideKeyboard();
     }
     if (_usesDesktopKeyboard &&
+        widget.active &&
         state == AppLifecycleState.resumed &&
         (_usesDesktopIme || widget.desktopFullScreen)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2078,10 +2125,10 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: session.remoteRenderer,
+      animation: widget.renderer,
       builder: (context, _) => LayoutBuilder(
         builder: (context, constraints) {
-          final renderer = session.remoteRenderer.value;
+          final renderer = widget.renderer.value;
           final rendererSize = Size(renderer.width, renderer.height);
           final fallbackSize = _selectedDisplaySourceSize();
           final frameGeometry = _committedFrameGeometry();
@@ -2131,11 +2178,12 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
           );
           return Focus(
             focusNode: _hardwareFocus,
-            autofocus: true,
+            autofocus: widget.active,
             onFocusChange: _handleHardwareFocusChanged,
             onKeyEvent: _handleKeyEvent,
             child: MouseRegion(
               onEnter: (_) {
+                if (!widget.active) return;
                 if (_desktopDirectImeAvailable) {
                   unawaited(_activateDesktopDirectIme());
                 } else if (_usesDesktopKeyboard && !_textFocus.hasFocus) {
@@ -2163,12 +2211,12 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                       child:
                           usesCropAwareRemoteTexture(Platform.operatingSystem)
                           ? _RemoteVideoTexture(
-                              renderer: session.remoteRenderer,
+                              renderer: widget.renderer,
                               encodedSize: transform.sourceSize,
                               visibleSourceRect: transform.sourceRect,
                             )
                           : RTCVideoView(
-                              session.remoteRenderer,
+                              widget.renderer,
                               key: const ValueKey('remoteVideoView'),
                               // Other controllers retain the legacy view until
                               // their native texture path is physically tested.
@@ -3137,9 +3185,10 @@ class _RemoteVideoTexture extends StatelessWidget {
           viewportSize: viewportSize,
         );
         final textureId = renderer.textureId;
-        if (!renderer.renderVideo ||
-            textureId == null ||
-            layout.fullTextureRect.isEmpty) {
+        // Keep the texture element mounted as soon as the native texture is
+        // registered. RemotePresentationController binds the media stream only
+        // after this element has completed a Flutter frame.
+        if (textureId == null || layout.fullTextureRect.isEmpty) {
           return const ColoredBox(color: Colors.black);
         }
         return ClipRect(

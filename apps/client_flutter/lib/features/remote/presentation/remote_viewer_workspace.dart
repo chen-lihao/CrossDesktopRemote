@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_desktop_panel.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/remote_presentation_controller.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter/material.dart';
 
@@ -9,13 +10,17 @@ class RemoteViewerWorkspace extends StatefulWidget {
   const RemoteViewerWorkspace({
     super.key,
     required this.session,
+    required this.presentation,
     required this.settings,
+    this.active = true,
     this.onDesktopFullScreenChanged,
     this.onClose,
   });
 
   final RemoteSessionController session;
+  final RemotePresentationController presentation;
   final AppSettingsController settings;
+  final bool active;
   final Future<bool> Function(bool enabled)? onDesktopFullScreenChanged;
   final VoidCallback? onClose;
 
@@ -25,6 +30,18 @@ class RemoteViewerWorkspace extends StatefulWidget {
 
 class _RemoteViewerWorkspaceState extends State<RemoteViewerWorkspace> {
   bool _fullScreen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(widget.presentation.attachSurface());
+  }
+
+  @override
+  void dispose() {
+    unawaited(widget.presentation.detachSurface());
+    super.dispose();
+  }
 
   Future<bool> _setFullScreen(bool enabled) async {
     final changeFullScreen = widget.onDesktopFullScreenChanged;
@@ -37,71 +54,96 @@ class _RemoteViewerWorkspaceState extends State<RemoteViewerWorkspace> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: widget.session,
+      animation: Listenable.merge([widget.session, widget.presentation]),
       builder: (context, _) {
-        if (!widget.session.hasRemoteVideo) {
-          return Scaffold(
-            appBar: AppBar(title: const Text('远程桌面')),
-            body: Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 520),
-                child: Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.desktop_access_disabled, size: 44),
-                        const SizedBox(height: 16),
-                        Text(
-                          widget.session.statusMessage,
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 16),
-                        FilledButton.tonalIcon(
-                          onPressed:
-                              widget.onClose ??
-                              () => Navigator.maybePop(context),
-                          icon: const Icon(Icons.close),
-                          label: const Text('关闭窗口'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          );
-        }
         return Scaffold(
           backgroundColor: Colors.black,
           body: SafeArea(
             top: !_fullScreen,
             bottom: false,
-            child: RemoteDesktopPanel(
-              session: widget.session,
-              initialInputSettings: widget.settings.inputSettings,
-              windowedWorkspace: true,
-              toolbarLeading: widget.onClose == null
-                  ? IconButton(
-                      tooltip: '返回',
-                      onPressed: () => Navigator.maybePop(context),
-                      icon: const Icon(Icons.arrow_back),
-                    )
-                  : null,
-              desktopFullScreen: _fullScreen,
-              onDesktopFullScreenChanged:
-                  widget.onDesktopFullScreenChanged == null
-                  ? null
-                  : _setFullScreen,
-              onKeyboardModeChanged: (mode) =>
-                  unawaited(widget.settings.setKeyboardMode(mode)),
-              onTextInputModeChanged: (mode) =>
-                  unawaited(widget.settings.setTextInputMode(mode)),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                RemoteDesktopPanel(
+                  session: widget.session,
+                  renderer: widget.presentation.renderer,
+                  active: widget.active,
+                  initialInputSettings: widget.settings.inputSettings,
+                  windowedWorkspace: true,
+                  toolbarLeading: IconButton(
+                    tooltip: '返回',
+                    onPressed:
+                        widget.onClose ?? () => Navigator.maybePop(context),
+                    icon: const Icon(Icons.arrow_back),
+                  ),
+                  desktopFullScreen: _fullScreen,
+                  onDesktopFullScreenChanged:
+                      widget.onDesktopFullScreenChanged == null
+                      ? null
+                      : _setFullScreen,
+                  onKeyboardModeChanged: (mode) =>
+                      unawaited(widget.settings.setKeyboardMode(mode)),
+                  onTextInputModeChanged: (mode) =>
+                      unawaited(widget.settings.setTextInputMode(mode)),
+                ),
+                if (!widget.presentation.isReady)
+                  _PresentationLoadingOverlay(
+                    message:
+                        widget.presentation.state ==
+                            RemotePresentationState.failed
+                        ? '视频显示初始化失败：${widget.presentation.error}'
+                        : widget.session.hasRemoteVideo
+                        ? '正在准备远程画面…'
+                        : widget.session.statusMessage,
+                    onClose:
+                        widget.onClose ?? () => Navigator.maybePop(context),
+                  ),
+              ],
             ),
           ),
         );
       },
+    );
+  }
+}
+
+class _PresentationLoadingOverlay extends StatelessWidget {
+  const _PresentationLoadingOverlay({
+    required this.message,
+    required this.onClose,
+  });
+
+  final String message;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 20),
+                  Text(message, textAlign: TextAlign.center),
+                  const SizedBox(height: 16),
+                  FilledButton.tonalIcon(
+                    onPressed: onClose,
+                    icon: const Icon(Icons.close),
+                    label: const Text('关闭远程桌面'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

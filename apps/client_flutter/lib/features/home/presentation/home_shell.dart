@@ -7,6 +7,7 @@ import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/devices/presentation/devices_page.dart';
 import 'package:cross_desktop_remote/features/remote/application/host_availability_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/in_app_remote_viewer_host.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_coordinator.dart';
 import 'package:cross_desktop_remote/features/sessions/presentation/sessions_page.dart';
 import 'package:cross_desktop_remote/features/sessions/application/session_history_controller.dart';
@@ -92,7 +93,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       initialVideoPolicy: _settings.defaultVideoPolicy,
       initialClipboardMode: _settings.clipboardSyncMode,
     );
-    _remoteViewer = RemoteViewerCoordinator();
+    _remoteViewer = RemoteViewerCoordinator(session: _controllerSession);
     if (_capabilities.canHost) {
       _hostSession = RemoteSessionController(
         role: RemoteRole.host,
@@ -177,6 +178,19 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     setState(() => _selectedIndex = index);
   }
 
+  Widget _withRemoteViewerPortal(Widget child) {
+    final host = _remoteViewer.primaryHost;
+    if (host == null) return child;
+    return InAppRemoteViewerPortal(
+      host: host,
+      session: _controllerSession,
+      presentation: _remoteViewer.presentation,
+      settings: _settings,
+      prewarm: _remoteViewer.shouldPrewarmPrimaryView,
+      child: child,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -184,60 +198,64 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         final useNavigationRail = constraints.maxWidth >= _desktopBreakpoint;
 
         if (useNavigationRail) {
-          return Scaffold(
-            body: SafeArea(
-              child: Row(
-                children: [
-                  NavigationRail(
-                    extended: constraints.maxWidth >= 1180,
-                    selectedIndex: _selectedIndex,
-                    onDestinationSelected: _select,
-                    leading: const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 20),
-                      child: Tooltip(
-                        message: 'CrossDesktopRemote',
-                        child: Icon(Icons.desktop_windows_outlined),
+          return _withRemoteViewerPortal(
+            Scaffold(
+              body: SafeArea(
+                child: Row(
+                  children: [
+                    NavigationRail(
+                      extended: constraints.maxWidth >= 1180,
+                      selectedIndex: _selectedIndex,
+                      onDestinationSelected: _select,
+                      leading: const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 20),
+                        child: Tooltip(
+                          message: 'CrossDesktopRemote',
+                          child: Icon(Icons.desktop_windows_outlined),
+                        ),
+                      ),
+                      destinations: _destinations
+                          .map(
+                            (destination) => NavigationRailDestination(
+                              icon: destination.icon,
+                              selectedIcon: destination.selectedIcon,
+                              label: Text(destination.label),
+                            ),
+                          )
+                          .toList(growable: false),
+                    ),
+                    const VerticalDivider(width: 1),
+                    Expanded(
+                      key: const ValueKey('workspace'),
+                      child: IndexedStack(
+                        index: _selectedIndex,
+                        children: _pages,
                       ),
                     ),
-                    destinations: _destinations
-                        .map(
-                          (destination) => NavigationRailDestination(
-                            icon: destination.icon,
-                            selectedIcon: destination.selectedIcon,
-                            label: Text(destination.label),
-                          ),
-                        )
-                        .toList(growable: false),
-                  ),
-                  const VerticalDivider(width: 1),
-                  Expanded(
-                    key: const ValueKey('workspace'),
-                    child: IndexedStack(
-                      index: _selectedIndex,
-                      children: _pages,
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           );
         }
 
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text(
-              'CrossDesktopRemote',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+        return _withRemoteViewerPortal(
+          Scaffold(
+            appBar: AppBar(
+              title: const Text(
+                'CrossDesktopRemote',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
-          ),
-          body: SafeArea(
-            child: IndexedStack(index: _selectedIndex, children: _pages),
-          ),
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: _selectedIndex,
-            onDestinationSelected: _select,
-            destinations: _destinations,
+            body: SafeArea(
+              child: IndexedStack(index: _selectedIndex, children: _pages),
+            ),
+            bottomNavigationBar: NavigationBar(
+              selectedIndex: _selectedIndex,
+              onDestinationSelected: _select,
+              destinations: _destinations,
+            ),
           ),
         );
       },
@@ -249,7 +267,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_discovery.dispose());
     _history.dispose();
-    _remoteViewer.close();
+    unawaited(_remoteViewer.dispose());
     _hostAvailability?.dispose();
     _hostSession?.dispose();
     _controllerSession.dispose();

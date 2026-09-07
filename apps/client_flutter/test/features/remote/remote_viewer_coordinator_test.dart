@@ -1,12 +1,120 @@
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/in_app_remote_viewer_host.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/remote_presentation_controller.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_coordinator.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_host.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 void main() {
+  testWidgets('primary viewer close preserves its presentation owner', (
+    tester,
+  ) async {
+    late BuildContext context;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (value) {
+            context = value;
+            return const SizedBox();
+          },
+        ),
+      ),
+    );
+
+    final session = RemoteSessionController(role: RemoteRole.controller);
+    final settings = AppSettingsController();
+    final presentation = RemotePresentationController(session: session);
+    final host = InAppRemoteViewerHost();
+    final request = RemoteViewerRequest(
+      context: context,
+      session: session,
+      presentation: presentation,
+      settings: settings,
+    );
+    addTearDown(() async {
+      host.clear();
+      await presentation.shutdown();
+      session.dispose();
+      settings.dispose();
+    });
+
+    await host.open(request);
+    expect(host.visible, isTrue);
+    expect(host.request, same(request));
+
+    host.close();
+    expect(host.visible, isFalse);
+    expect(host.request, same(request));
+
+    await host.open(request);
+    expect(host.visible, isTrue);
+    expect(host.request, same(request));
+  });
+
+  testWidgets('prewarmed primary viewer stays mounted while hidden', (
+    tester,
+  ) async {
+    late BuildContext requestContext;
+    final session = RemoteSessionController(role: RemoteRole.controller);
+    final settings = AppSettingsController();
+    final renderer = _FakeVideoRenderer();
+    final presentation = RemotePresentationController(
+      session: session,
+      rendererFactory: () => renderer,
+    );
+    final host = InAppRemoteViewerHost();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: InAppRemoteViewerPortal(
+          host: host,
+          session: session,
+          presentation: presentation,
+          settings: settings,
+          prewarm: true,
+          child: Builder(
+            builder: (context) {
+              requestContext = context;
+              return const Text('home');
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('persistent-primary-remote-viewer')),
+      findsOneWidget,
+    );
+    expect(renderer.initializeCount, 1);
+
+    final request = RemoteViewerRequest(
+      context: requestContext,
+      session: session,
+      presentation: presentation,
+      settings: settings,
+    );
+    await host.open(request);
+    await tester.pump();
+    host.close();
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('persistent-primary-remote-viewer')),
+      findsOneWidget,
+    );
+    expect(renderer.initializeCount, 1);
+
+    await tester.pumpWidget(const SizedBox());
+    await presentation.shutdown();
+    session.dispose();
+    settings.dispose();
+  });
+
   testWidgets('primary-view host opens once and preserves the session owner', (
     tester,
   ) async {
@@ -27,12 +135,13 @@ void main() {
     final inAppHost = _RecordingRemoteViewerHost();
     final nativeHost = _RecordingRemoteViewerHost();
     final coordinator = RemoteViewerCoordinator(
+      session: session,
       inAppHost: inAppHost,
       nativeHost: nativeHost,
       nativeWindowingAvailable: () => false,
     );
-    addTearDown(() {
-      coordinator.close();
+    addTearDown(() async {
+      await coordinator.dispose();
       session.dispose();
       settings.dispose();
     });
@@ -81,12 +190,13 @@ void main() {
       openError: StateError('window creation failed'),
     );
     final coordinator = RemoteViewerCoordinator(
+      session: session,
       inAppHost: inAppHost,
       nativeHost: nativeHost,
       nativeWindowingAvailable: () => true,
     );
-    addTearDown(() {
-      coordinator.close();
+    addTearDown(() async {
+      await coordinator.dispose();
       session.dispose();
       settings.dispose();
     });
@@ -103,6 +213,18 @@ void main() {
     expect(inAppHost.lastRequest?.session, same(session));
     expect(coordinator.isOpen, isTrue);
   });
+}
+
+class _FakeVideoRenderer extends RTCVideoRenderer {
+  int initializeCount = 0;
+
+  @override
+  int? get textureId => initializeCount == 0 ? null : 1;
+
+  @override
+  Future<void> initialize() async {
+    initializeCount += 1;
+  }
 }
 
 class _RecordingRemoteViewerHost implements RemoteViewerHost {

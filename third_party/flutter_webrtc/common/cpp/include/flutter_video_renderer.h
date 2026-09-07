@@ -8,6 +8,7 @@
 #include "rtc_video_renderer.h"
 
 #include <mutex>
+#include <vector>
 
 namespace flutter_webrtc_plugin {
 
@@ -42,6 +43,12 @@ class FlutterVideoRenderer
   std::string media_stream_id;
 
  private:
+  struct PixelBufferStorage {
+    FlutterDesktopPixelBuffer descriptor{};
+    std::shared_ptr<uint8_t[]> bytes;
+    size_t capacity = 0;
+  };
+
   struct FrameSize {
     size_t width;
     size_t height;
@@ -54,8 +61,11 @@ class FlutterVideoRenderer
   scoped_refptr<RTCVideoTrack> track_ = nullptr;
   scoped_refptr<RTCVideoFrame> frame_;
   std::unique_ptr<flutter::TextureVariant> texture_;
-  std::shared_ptr<FlutterDesktopPixelBuffer> pixel_buffer_;
-  mutable std::shared_ptr<uint8_t[]> rgb_buffer_;
+  mutable std::shared_ptr<PixelBufferStorage> active_pixel_buffer_;
+  // Flutter's PixelBufferTexture contract requires every returned buffer to
+  // remain alive until the texture is unregistered. Keep resized buffers here
+  // instead of releasing them while the engine may still reference them.
+  mutable std::vector<std::shared_ptr<PixelBufferStorage>> retired_pixel_buffers_;
   mutable std::mutex mutex_;
   RTCVideoFrame::VideoRotation rotation_ = RTCVideoFrame::kVideoRotation_0;
 };

@@ -12,25 +12,34 @@ import 'utils.dart';
 class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
     implements VideoRenderer, AudioControl {
   RTCVideoRenderer() : super(RTCVideoValue.empty);
-  Completer? _initializing;
+  Future<void>? _initializing;
+  Future<void>? _disposing;
   int? _textureId;
   bool _disposed = false;
   MediaStream? _srcObject;
   StreamSubscription<dynamic>? _eventSubscription;
 
   @override
-  Future<void> initialize() async {
-    if (_initializing != null) {
-      await _initializing!.future;
-      return;
+  Future<void> initialize() {
+    if (_disposed) {
+      return Future<void>.error(
+        StateError('Cannot initialize a disposed RTCVideoRenderer'),
+      );
     }
-    _initializing = Completer();
-    final response = await WebRTC.invokeMethod('createVideoRenderer', {});
-    _textureId = response['textureId'];
-    _eventSubscription = EventChannel('FlutterWebRTC/Texture$textureId')
-        .receiveBroadcastStream()
-        .listen(eventListener, onError: errorListener);
-    _initializing!.complete(null);
+    return _initializing ??= _initialize();
+  }
+
+  Future<void> _initialize() async {
+    try {
+      final response = await WebRTC.invokeMethod('createVideoRenderer', {});
+      _textureId = response['textureId'];
+      _eventSubscription = EventChannel('FlutterWebRTC/Texture$textureId')
+          .receiveBroadcastStream()
+          .listen(eventListener, onError: errorListener);
+    } catch (_) {
+      _initializing = null;
+      rethrow;
+    }
   }
 
   @override
@@ -102,23 +111,39 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
   }
 
   @override
-  Future<void> dispose() async {
+  Future<void> dispose() => _disposing ??= _dispose();
+
+  Future<void> _dispose() async {
     if (_disposed) return;
-    await _eventSubscription?.cancel();
-    _eventSubscription = null;
-    if (_textureId != null) {
+    final initializing = _initializing;
+    if (initializing != null) {
+      try {
+        await initializing;
+      } catch (_) {
+        // Initialization did not create a usable texture.
+      }
+    }
+    if (_disposed) return;
+    _disposed = true;
+    if (_textureId == null) {
+      super.dispose();
+      return;
+    }
+    final textureId = _textureId;
+    try {
+      await _eventSubscription?.cancel();
+      _eventSubscription = null;
       try {
         await WebRTC.invokeMethod('videoRendererDispose', <String, dynamic>{
-          'textureId': _textureId,
+          'textureId': textureId,
         });
-        _textureId = null;
-        _disposed = true;
       } on PlatformException catch (e) {
         throw 'Failed to RTCVideoRenderer::dispose: ${e.message}';
       }
+    } finally {
+      _textureId = null;
+      super.dispose();
     }
-
-    return super.dispose();
   }
 
   void eventListener(dynamic event) {

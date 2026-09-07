@@ -2,6 +2,7 @@
 #include "task_runner.h"
 
 #include <memory>
+#include <mutex>
 
 class MethodCallProxyImpl : public MethodCallProxy {
  public:
@@ -127,18 +128,25 @@ class EventChannelProxyImpl : public EventChannelProxy {
          [&](const EncodableValue* arguments,
              std::unique_ptr<flutter::EventSink<EncodableValue>>&& events)
              -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
-           sink_ = std::move(events);
-           std::weak_ptr<EventSink> weak_sink = sink_;
-           for (auto& event : event_queue_) {
-            PostEvent(event);
+           std::list<EncodableValue> pending_events;
+           std::weak_ptr<EventSink> weak_sink;
+           {
+             std::lock_guard<std::mutex> lock(mutex_);
+             sink_ = std::move(events);
+             weak_sink = sink_;
+             pending_events.swap(event_queue_);
+             on_listen_called_ = true;
            }
-           event_queue_.clear();
-           on_listen_called_ = true;
+           for (const auto& event : pending_events) {
+             DispatchEvent(weak_sink, event);
+           }
            return nullptr;
          },
          [&](const EncodableValue* arguments)
              -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
+           std::lock_guard<std::mutex> lock(mutex_);
            on_listen_called_ = false;
+           sink_.reset();
            return nullptr;
          });
  
@@ -148,26 +156,35 @@ class EventChannelProxyImpl : public EventChannelProxy {
    virtual ~EventChannelProxyImpl() { channel_->SetStreamHandler(nullptr); }
 
    void Success(const EncodableValue& event, bool cache_event = true) override {
-     if (on_listen_called_) {
-       PostEvent(event);
-     } else {
-       if (cache_event) {
+     std::weak_ptr<EventSink> weak_sink;
+     {
+       std::lock_guard<std::mutex> lock(mutex_);
+       if (on_listen_called_ && sink_) {
+         weak_sink = sink_;
+       } else if (cache_event) {
          event_queue_.push_back(event);
+         return;
        }
+     }
+     if (!weak_sink.expired()) {
+       DispatchEvent(weak_sink, event);
      }
    }
 
-   void PostEvent(const EncodableValue& event) {
-     if(task_runner_) {
-      std::weak_ptr<EventSink> weak_sink = sink_;
+   void DispatchEvent(std::weak_ptr<EventSink> weak_sink,
+                      const EncodableValue& event) {
+     if (task_runner_) {
        task_runner_->EnqueueTask([weak_sink, event]() {
-        auto sink = weak_sink.lock();
-        if (sink) {
-          sink->Success(event);
-        }
-      });
+         auto sink = weak_sink.lock();
+         if (sink) {
+           sink->Success(event);
+         }
+       });
      } else {
-      sink_->Success(event);
+       auto sink = weak_sink.lock();
+       if (sink) {
+         sink->Success(event);
+       }
      }
    }
  
@@ -177,6 +194,7 @@ class EventChannelProxyImpl : public EventChannelProxy {
    std::list<EncodableValue> event_queue_;
    bool on_listen_called_ = false;
    TaskRunner* task_runner_;
+   std::mutex mutex_;
  };
 
 std::unique_ptr<EventChannelProxy> EventChannelProxy::Create(

@@ -1,8 +1,11 @@
+import 'dart:io';
+
 import 'package:cross_desktop_remote/app/desktop_windowing_root.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/in_app_remote_viewer_host.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/native_remote_viewer_host.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/remote_presentation_controller.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_host.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter/widgets.dart';
@@ -12,14 +15,21 @@ import 'package:flutter/widgets.dart';
 /// the current WebRTC texture registrar is not view-aware.
 class RemoteViewerCoordinator {
   RemoteViewerCoordinator({
+    required RemoteSessionController session,
+    RemotePresentationController? presentation,
     RemoteViewerHost? inAppHost,
     RemoteViewerHost? nativeHost,
     bool Function()? nativeWindowingAvailable,
-  }) : _inAppHost = inAppHost ?? InAppRemoteViewerHost(),
+  }) : _session = session,
+       presentation =
+           presentation ?? RemotePresentationController(session: session),
+       _inAppHost = inAppHost ?? InAppRemoteViewerHost(),
        _nativeHost = nativeHost ?? NativeRemoteViewerHost(),
        _nativeWindowingAvailable =
            nativeWindowingAvailable ?? (() => desktopWindowingAvailable);
 
+  final RemoteSessionController _session;
+  final RemotePresentationController presentation;
   final RemoteViewerHost _inAppHost;
   final RemoteViewerHost _nativeHost;
   final bool Function() _nativeWindowingAvailable;
@@ -29,11 +39,22 @@ class RemoteViewerCoordinator {
 
   bool get isOpen => _activeHost?.isOpen ?? false;
 
+  /// Windows prewarms its single supported Flutter texture surface at startup.
+  /// Other platforms keep their established attach timing: macOS uses a native
+  /// secondary view and iPad attaches when its viewer is opened.
+  bool get shouldPrewarmPrimaryView => Platform.isWindows;
+
+  InAppRemoteViewerHost? get primaryHost =>
+      _inAppHost is InAppRemoteViewerHost ? _inAppHost : null;
+
   Future<void> open({
     required BuildContext context,
     required RemoteSessionController session,
     required AppSettingsController settings,
   }) async {
+    if (!identical(session, _session)) {
+      throw StateError('RemoteViewerCoordinator received a foreign session');
+    }
     final activeHost = _activeHost;
     if (_opening || activeHost?.isOpen == true) {
       activeHost?.activate();
@@ -45,6 +66,7 @@ class RemoteViewerCoordinator {
     final request = RemoteViewerRequest(
       context: context,
       session: session,
+      presentation: presentation,
       settings: settings,
     );
     final preferredHost =
@@ -87,5 +109,11 @@ class RemoteViewerCoordinator {
     _nativeHost.close();
     _activeHost = null;
     _opening = false;
+  }
+
+  Future<void> dispose() async {
+    close();
+    primaryHost?.clear();
+    await presentation.shutdown();
   }
 }

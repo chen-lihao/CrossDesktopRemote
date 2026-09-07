@@ -5,6 +5,7 @@
 
 import 'package:cross_desktop_remote/app/theme.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_host.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/remote_presentation_controller.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_workspace.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/src/widgets/_window.dart';
@@ -13,6 +14,7 @@ class NativeRemoteViewerHost implements RemoteViewerHost {
   RegularWindowController? _windowController;
   WindowEntry? _windowEntry;
   WindowRegistry? _windowRegistry;
+  RemotePresentationController? _presentation;
 
   @override
   bool get isOpen => _windowController != null;
@@ -24,6 +26,7 @@ class NativeRemoteViewerHost implements RemoteViewerHost {
   Future<void> open(RemoteViewerRequest request) async {
     final existing = _windowController;
     if (existing != null) {
+      _presentation?.setVisible(true);
       existing.activate();
       return;
     }
@@ -31,6 +34,8 @@ class NativeRemoteViewerHost implements RemoteViewerHost {
     if (registry == null) {
       throw UnsupportedError('A native window registry is not available');
     }
+    request.presentation.setVisible(true);
+    _presentation = request.presentation;
 
     late final WindowEntry entry;
     late final RegularWindowController controller;
@@ -55,9 +60,13 @@ class NativeRemoteViewerHost implements RemoteViewerHost {
           controller.destroy();
         },
         onDestroyed: () {
+          request.presentation.setVisible(false);
           unregister();
           if (_windowController == controller) {
             _windowController = null;
+          }
+          if (identical(_presentation, request.presentation)) {
+            _presentation = null;
           }
           controller.dispose();
         },
@@ -73,6 +82,7 @@ class NativeRemoteViewerHost implements RemoteViewerHost {
         themeMode: ThemeMode.system,
         home: RemoteViewerWorkspace(
           session: request.session,
+          presentation: request.presentation,
           settings: request.settings,
           onDesktopFullScreenChanged: (enabled) async {
             controller.setFullscreen(enabled);
@@ -101,6 +111,8 @@ class NativeRemoteViewerHost implements RemoteViewerHost {
 
   @override
   void close() {
+    _presentation?.setVisible(false);
+    _presentation = null;
     final controller = _windowController;
     final entry = _windowEntry;
     final registry = _windowRegistry;
