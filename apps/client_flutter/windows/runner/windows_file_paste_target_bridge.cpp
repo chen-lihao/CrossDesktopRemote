@@ -1,12 +1,19 @@
-#include "windows_file_paste_target_bridge.h"
-
+// Windows SDK automation headers must be parsed before Flutter's C++ wrapper
+// headers. Some SDK/toolchain combinations no longer leave the MIDL
+// `interface` macro available after third-party headers have been included,
+// which makes exdisp.h's COM forward declarations invalid.
+#include <windows.h>
+#include <ole2.h>
 #include <exdisp.h>
-#include <flutter/event_stream_handler_functions.h>
-#include <flutter/standard_method_codec.h>
 #include <servprov.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
+
+#include "windows_file_paste_target_bridge.h"
+
+#include <flutter/event_stream_handler_functions.h>
+#include <flutter/standard_method_codec.h>
 
 #include <cwchar>
 #include <sstream>

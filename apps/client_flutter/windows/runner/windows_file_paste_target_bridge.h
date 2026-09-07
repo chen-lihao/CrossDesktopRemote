@@ -1,14 +1,15 @@
 #ifndef RUNNER_WINDOWS_FILE_PASTE_TARGET_BRIDGE_H_
 #define RUNNER_WINDOWS_FILE_PASTE_TARGET_BRIDGE_H_
 
+#include <windows.h>
+
+#include <memory>
+
 #include <flutter/binary_messenger.h>
 #include <flutter/encodable_value.h>
 #include <flutter/event_channel.h>
 #include <flutter/event_sink.h>
 #include <flutter/method_channel.h>
-
-#include <memory>
-#include <windows.h>
 
 class WindowsFilePasteTargetBridge {
  public:
