@@ -13,6 +13,10 @@ bool get desktopWindowingAvailable =>
     isWindowingEnabled &&
     (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
 
+/// Wraps the application with the experimental window registry when available.
+///
+/// The returned widget must still be started with [runApp] so the primary
+/// application is attached to the platform's implicit view.
 Widget buildDesktopWindowingRoot(Widget child) {
   if (!desktopWindowingAvailable) return child;
   return WindowManager(child: child);

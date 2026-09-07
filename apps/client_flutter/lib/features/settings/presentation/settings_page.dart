@@ -7,6 +7,7 @@ import 'package:cross_desktop_remote/core/signaling/signaling_server_profile.dar
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/video_policy_dialog.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter/material.dart';
 
@@ -32,145 +33,24 @@ class SettingsPage extends StatelessWidget {
     BuildContext context,
     AppSettingsController settings,
   ) async {
-    final controller = TextEditingController(text: settings.signalingServerUrl);
-    String? error;
     final selected = await showDialog<String>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setState) => AlertDialog(
-          title: const Text('信令服务器'),
-          content: SizedBox(
-            width: 520,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                TextField(
-                  key: const ValueKey('settingsSignalingServerField'),
-                  controller: controller,
-                  autofocus: true,
-                  autocorrect: false,
-                  keyboardType: TextInputType.url,
-                  decoration: InputDecoration(
-                    labelText: 'WebSocket 地址',
-                    hintText: 'wss://example.com/ws/signaling',
-                    errorText: error,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  onPressed: () {
-                    controller.text =
-                        SignalingServerProfile.localDevelopment.url;
-                    setState(() => error = null);
-                  },
-                  icon: const Icon(Icons.computer_outlined),
-                  label: const Text('使用本机开发服务'),
-                ),
-                const SizedBox(height: 8),
-                const Text('公网部署应使用 wss://；正在进行的远程会话不会被切换。'),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () {
-                try {
-                  Navigator.pop(
-                    context,
-                    normalizeSignalingServerUrl(controller.text),
-                  );
-                } on FormatException catch (exception) {
-                  setState(() => error = exception.message);
-                }
-              },
-              child: const Text('保存'),
-            ),
-          ],
-        ),
-      ),
+      builder: (_) =>
+          _SignalingServerDialog(initialUrl: settings.signalingServerUrl),
     );
-    controller.dispose();
     if (selected != null) {
       await settings.setSignalingServerUrl(selected);
     }
   }
 
   Future<void> _editCustomVideoPolicy(BuildContext context) async {
-    final current = settings.defaultVideoPolicy;
-    final edge = TextEditingController(text: '${current.customLongEdge}');
-    final fps = TextEditingController(text: '${current.customFramesPerSecond}');
-    final bitrate = TextEditingController(
-      text: current.maxBitrateMbps?.toString() ?? '',
-    );
-    final result = await showDialog<RemoteVideoPolicy>(
+    final result = await showVideoPolicyEditor(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('自定义视频策略'),
-        content: SizedBox(
-          width: 420,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: edge,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: '分辨率长边像素（320～7680）',
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: fps,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: '帧率（5～120 fps）'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: bitrate,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: '码率 Mbps（留空为自动）'),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final parsedEdge = int.tryParse(edge.text);
-              final parsedFps = int.tryParse(fps.text);
-              final parsedBitrate = bitrate.text.trim().isEmpty
-                  ? null
-                  : int.tryParse(bitrate.text);
-              if (parsedEdge == null || parsedFps == null) return;
-              Navigator.pop(
-                context,
-                current.copyWith(
-                  resolution: RemoteResolutionMode.custom,
-                  frameRate: RemoteFrameRateMode.custom,
-                  customLongEdge: parsedEdge.clamp(320, 7680),
-                  customFramesPerSecond: parsedFps.clamp(5, 120),
-                  maxBitrateMbps: parsedBitrate?.clamp(1, 100),
-                  automaticBitrate: parsedBitrate == null,
-                ),
-              );
-            },
-            child: const Text('保存'),
-          ),
-        ],
-      ),
+      initialPolicy: settings.defaultVideoPolicy,
+      title: '自定义视频策略',
+      confirmLabel: '保存',
+      customValuesOnly: true,
     );
-    edge.dispose();
-    fps.dispose();
-    bitrate.dispose();
     if (result != null) unawaited(settings.setDefaultVideoPolicy(result));
   }
 
@@ -606,6 +486,92 @@ class SettingsPage extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _SignalingServerDialog extends StatefulWidget {
+  const _SignalingServerDialog({required this.initialUrl});
+
+  final String initialUrl;
+
+  @override
+  State<_SignalingServerDialog> createState() => _SignalingServerDialogState();
+}
+
+class _SignalingServerDialogState extends State<_SignalingServerDialog> {
+  late final TextEditingController _controller;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialUrl);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _close([String? result]) {
+    FocusScope.of(context).unfocus();
+    Navigator.of(context).pop(result);
+  }
+
+  void _save() {
+    try {
+      _close(normalizeSignalingServerUrl(_controller.text));
+    } on FormatException catch (exception) {
+      setState(() => _error = exception.message);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('信令服务器'),
+      content: SizedBox(
+        width: 520,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              key: const ValueKey('settingsSignalingServerField'),
+              controller: _controller,
+              autofocus: true,
+              autocorrect: false,
+              keyboardType: TextInputType.url,
+              decoration: InputDecoration(
+                labelText: 'WebSocket 地址',
+                hintText: 'wss://example.com/ws/signaling',
+                errorText: _error,
+              ),
+              onChanged: (_) {
+                if (_error != null) setState(() => _error = null);
+              },
+              onSubmitted: (_) => _save(),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () {
+                _controller.text = SignalingServerProfile.localDevelopment.url;
+                if (_error != null) setState(() => _error = null);
+              },
+              icon: const Icon(Icons.computer_outlined),
+              label: const Text('使用本机开发服务'),
+            ),
+            const SizedBox(height: 8),
+            const Text('公网部署应使用 wss://；正在进行的远程会话不会被切换。'),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: _close, child: const Text('取消')),
+        FilledButton(onPressed: _save, child: const Text('保存')),
+      ],
     );
   }
 }

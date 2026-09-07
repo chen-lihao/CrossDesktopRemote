@@ -6,5 +6,5 @@ export 'package:cross_desktop_remote/app/cross_desktop_remote_app.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runWidget(buildDesktopWindowingRoot(const CrossDesktopRemoteApp()));
+  runApp(buildDesktopWindowingRoot(const CrossDesktopRemoteApp()));
 }

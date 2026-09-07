@@ -20,6 +20,7 @@ import 'package:cross_desktop_remote/features/remote/presentation/remote_keyboar
 import 'package:cross_desktop_remote/features/remote/presentation/remote_pointer_event_coalescer.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_text_input_synchronizer.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_touch_gesture_controller.dart';
+import 'package:cross_desktop_remote/features/remote/presentation/video_policy_dialog.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/windows_remote_ime_coordinator.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -3483,140 +3484,9 @@ Future<void> _showVideoPolicyDialog(
   BuildContext context,
   RemoteSessionController session,
 ) async {
-  var policy = session.selectedVideoPolicy;
-  final edgeController = TextEditingController(
-    text: '${policy.customLongEdge}',
-  );
-  final fpsController = TextEditingController(
-    text: '${policy.customFramesPerSecond}',
-  );
-  final bitrateController = TextEditingController(
-    text: policy.maxBitrateMbps?.toString() ?? '',
-  );
-  final selected = await showDialog<RemoteVideoPolicy>(
+  final selected = await showVideoPolicyEditor(
     context: context,
-    builder: (context) => StatefulBuilder(
-      builder: (context, setState) => AlertDialog(
-        title: const Text('分辨率与帧率'),
-        content: SizedBox(
-          width: 430,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                DropdownButtonFormField<RemoteResolutionMode>(
-                  initialValue: policy.resolution,
-                  decoration: const InputDecoration(labelText: '分辨率'),
-                  items: [
-                    for (final value in RemoteResolutionMode.values)
-                      DropdownMenuItem(value: value, child: Text(value.label)),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) {
-                      setState(
-                        () => policy = policy.copyWith(resolution: value),
-                      );
-                    }
-                  },
-                ),
-                if (policy.resolution == RemoteResolutionMode.custom) ...[
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: edgeController,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: '长边像素（320～7680）',
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 12),
-                DropdownButtonFormField<RemoteFrameRateMode>(
-                  initialValue: policy.frameRate,
-                  decoration: const InputDecoration(labelText: '帧率'),
-                  items: [
-                    for (final value in RemoteFrameRateMode.values)
-                      DropdownMenuItem(value: value, child: Text(value.label)),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) {
-                      setState(
-                        () => policy = policy.copyWith(frameRate: value),
-                      );
-                    }
-                  },
-                ),
-                if (policy.frameRate == RemoteFrameRateMode.custom) ...[
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: fpsController,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: '帧率（5～120 fps）',
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 12),
-                TextField(
-                  controller: bitrateController,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: '最大码率 Mbps（留空为自动）',
-                  ),
-                ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<RemoteVideoPreference>(
-                  initialValue: policy.preference,
-                  decoration: const InputDecoration(labelText: '降级策略'),
-                  items: [
-                    for (final value in RemoteVideoPreference.values)
-                      DropdownMenuItem(value: value, child: Text(value.label)),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) {
-                      setState(
-                        () => policy = policy.copyWith(preference: value),
-                      );
-                    }
-                  },
-                ),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final edge = int.tryParse(edgeController.text);
-              final fps = int.tryParse(fpsController.text);
-              final bitrate = bitrateController.text.trim().isEmpty
-                  ? null
-                  : int.tryParse(bitrateController.text);
-              Navigator.pop(
-                context,
-                policy.copyWith(
-                  customLongEdge: (edge ?? policy.customLongEdge).clamp(
-                    320,
-                    7680,
-                  ),
-                  customFramesPerSecond: (fps ?? policy.customFramesPerSecond)
-                      .clamp(5, 120),
-                  maxBitrateMbps: bitrate?.clamp(1, 100),
-                  automaticBitrate: bitrate == null,
-                ),
-              );
-            },
-            child: const Text('应用'),
-          ),
-        ],
-      ),
-    ),
+    initialPolicy: session.selectedVideoPolicy,
   );
-  edgeController.dispose();
-  fpsController.dispose();
-  bitrateController.dispose();
   if (selected != null) session.selectVideoPolicy(selected);
 }
