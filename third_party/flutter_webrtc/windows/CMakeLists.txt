@@ -45,7 +45,14 @@ include_directories(
 apply_standard_settings(${PLUGIN_NAME})
 set_target_properties(${PLUGIN_NAME} PROPERTIES
   CXX_VISIBILITY_PRESET hidden)
-target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
+# Keep Win32's legacy min/max macros out of the plugin's C++ standard-library
+# boundary. The runner has the same contract, but it is a separate CMake target
+# and its definitions do not propagate to this local flutter_webrtc fork.
+target_compile_definitions(${PLUGIN_NAME} PRIVATE
+  FLUTTER_PLUGIN_IMPL
+  NOMINMAX
+  WIN32_LEAN_AND_MEAN
+)
 target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"

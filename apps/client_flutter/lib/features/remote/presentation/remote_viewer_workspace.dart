@@ -86,7 +86,7 @@ class _RemoteViewerWorkspaceState extends State<RemoteViewerWorkspace> {
                   onTextInputModeChanged: (mode) =>
                       unawaited(widget.settings.setTextInputMode(mode)),
                 ),
-                if (!widget.presentation.isReady)
+                if (widget.active && !widget.presentation.isReady)
                   _PresentationLoadingOverlay(
                     message:
                         widget.presentation.state ==

@@ -7,7 +7,8 @@
 - Windows 物理键盘和系统输入法；
 - Windows 原生无边框全屏；
 - 全屏前后 WebRTC 会话、Renderer 和 Texture 保持；
-- 打开、关闭远程桌面只改变主 View 持久展示面的可见性；
+- 打开、关闭远程桌面只改变主 View 持久视频/输入 Viewport 的可见性；
+- 隐藏状态不挂载远程工具栏、加载遮罩和操作面板；
 - iPad 控制链路不受影响。
 
 Windows 被控端采集和 `SendInput` 不在本轮范围内。
@@ -28,6 +29,9 @@ flutter run -d windows -v
 
 若 C++ 编译失败，保留 Visual Studio/MSBuild 的第一条错误，不要只截取最后的
 `Build process failed`。
+
+`flutter_webrtc_plugin` 是独立 CMake target，必须自行声明 `NOMINMAX` 与
+`WIN32_LEAN_AND_MEAN`；Runner 上的编译定义不会自动传递到插件。
 
 ## 3. 键盘验收
 
@@ -61,6 +65,7 @@ flutter run -d windows -v
 5. 连续进入/退出 30 次；不得出现应用退出、黑屏、重连或画面尺寸永久异常。
 6. 全屏期间切换清晰度和主副屏；结束后直接触控坐标仍与画面一致。
 7. 断开远程连接时如果仍在全屏，应自动恢复普通窗口。
+8. 将窗口宽度调整为 320、430、600、800 和 1280 逻辑像素，工具栏不得溢出；窄屏功能通过“更多操作”进入。
 
 通过标准：
 

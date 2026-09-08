@@ -58,6 +58,11 @@ void main() {
   testWidgets('prewarmed primary viewer stays mounted while hidden', (
     tester,
   ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(430, 844);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
     late BuildContext requestContext;
     final session = RemoteSessionController(role: RemoteRole.controller);
     final settings = AppSettingsController();
@@ -86,10 +91,12 @@ void main() {
       ),
     );
     await tester.pump();
+    expect(tester.takeException(), isNull);
     expect(
       find.byKey(const ValueKey('persistent-primary-remote-viewer')),
       findsOneWidget,
     );
+    expect(find.byTooltip('更多操作'), findsNothing);
     expect(renderer.initializeCount, 1);
 
     final request = RemoteViewerRequest(
@@ -100,8 +107,21 @@ void main() {
     );
     await host.open(request);
     await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(find.byTooltip('更多操作'), findsOneWidget);
+    for (final width in <double>[320, 430, 600, 800, 1280]) {
+      tester.view.physicalSize = Size(width, 844);
+      await tester.pump();
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: 'remote viewer must fit a $width px wide viewport',
+      );
+    }
     host.close();
     await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(find.byTooltip('更多操作'), findsNothing);
 
     expect(
       find.byKey(const ValueKey('persistent-primary-remote-viewer')),

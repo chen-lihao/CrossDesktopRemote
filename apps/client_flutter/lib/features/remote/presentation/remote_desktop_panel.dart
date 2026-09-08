@@ -28,7 +28,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-enum _RemoteToolbarAction { help, settings }
+enum _RemoteToolbarAction {
+  help,
+  settings,
+  viewFit,
+  fileTransfer,
+  videoPolicy,
+  displayAdjustment,
+  repair,
+}
 
 final Set<RemotePointerMode> _shownGestureGuides = {};
 
@@ -792,11 +800,16 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _buildToolbar(
-                      context,
-                      inputSettings,
-                      desktopFullScreen: widget.desktopFullScreen,
-                    ),
+                    // Windows keeps only the video/input viewport mounted
+                    // while the primary-view presentation is hidden. Viewer
+                    // chrome is attached on demand and therefore cannot take
+                    // part in the home page's layout or focus lifecycle.
+                    if (widget.active)
+                      _buildToolbar(
+                        context,
+                        inputSettings,
+                        desktopFullScreen: widget.desktopFullScreen,
+                      ),
                     Expanded(
                       child: _buildRemoteSurface(
                         inputSettings,
@@ -1115,7 +1128,11 @@ class _RemoteToolbar extends StatelessWidget {
             foregroundColor ?? Theme.of(context).colorScheme.onSurface;
         return LayoutBuilder(
           builder: (context, constraints) {
-            final compact = constraints.maxWidth < 720;
+            // The expanded toolbar can expose display, file, quality, color,
+            // IME and repair actions at the same time. Reserve the expanded
+            // layout for widths that can contain that complete action set;
+            // narrower views use the stable primary-actions + overflow model.
+            final compact = constraints.maxWidth < 960;
             return IconTheme(
               data: IconThemeData(color: color),
               child: DefaultTextStyle.merge(
@@ -1262,17 +1279,37 @@ class _RemoteToolbar extends StatelessWidget {
                         ),
                       ),
                       PopupMenuButton<_RemoteToolbarAction>(
-                        tooltip: '远程输入帮助与设置',
+                        tooltip: compact ? '更多操作' : '远程输入帮助与设置',
                         onSelected: (action) {
                           switch (action) {
                             case _RemoteToolbarAction.help:
                               onHelp();
                             case _RemoteToolbarAction.settings:
                               onInputSettings();
+                            case _RemoteToolbarAction.viewFit:
+                              onViewFitChanged(
+                                viewFit == RemoteViewFit.contain
+                                    ? RemoteViewFit.cover
+                                    : RemoteViewFit.contain,
+                              );
+                            case _RemoteToolbarAction.fileTransfer:
+                              onFileTransfer();
+                            case _RemoteToolbarAction.videoPolicy:
+                              if (!session.qualityPending) {
+                                unawaited(
+                                  _showVideoPolicyDialog(context, session),
+                                );
+                              }
+                            case _RemoteToolbarAction.displayAdjustment:
+                              onDisplayAdjustment();
+                            case _RemoteToolbarAction.repair:
+                              if (!session.sessionRepairPending) {
+                                unawaited(session.repairRemoteSession());
+                              }
                           }
                         },
-                        itemBuilder: (context) => const [
-                          PopupMenuItem(
+                        itemBuilder: (context) => [
+                          const PopupMenuItem(
                             value: _RemoteToolbarAction.help,
                             child: ListTile(
                               dense: true,
@@ -1281,7 +1318,7 @@ class _RemoteToolbar extends StatelessWidget {
                               title: Text('操作说明'),
                             ),
                           ),
-                          PopupMenuItem(
+                          const PopupMenuItem(
                             value: _RemoteToolbarAction.settings,
                             child: ListTile(
                               dense: true,
@@ -1290,25 +1327,85 @@ class _RemoteToolbar extends StatelessWidget {
                               title: Text('输入设置与诊断'),
                             ),
                           ),
+                          if (compact) ...[
+                            PopupMenuItem(
+                              value: _RemoteToolbarAction.viewFit,
+                              child: ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(
+                                  viewFit == RemoteViewFit.contain
+                                      ? Icons.crop_free
+                                      : Icons.fit_screen_outlined,
+                                ),
+                                title: Text(
+                                  viewFit == RemoteViewFit.contain
+                                      ? '填满并裁剪'
+                                      : '完整适应',
+                                ),
+                              ),
+                            ),
+                            if (session.localExplicitFileTransferSupported)
+                              const PopupMenuItem(
+                                value: _RemoteToolbarAction.fileTransfer,
+                                child: ListTile(
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: Icon(Icons.swap_horiz),
+                                  title: Text('文件传输'),
+                                ),
+                              ),
+                            PopupMenuItem(
+                              value: _RemoteToolbarAction.videoPolicy,
+                              enabled: !session.qualityPending,
+                              child: const ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.high_quality_outlined),
+                                title: Text('分辨率与帧率'),
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: _RemoteToolbarAction.displayAdjustment,
+                              child: ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.tonality_outlined),
+                                title: Text('显示调整与色彩诊断'),
+                              ),
+                            ),
+                            PopupMenuItem(
+                              value: _RemoteToolbarAction.repair,
+                              enabled: !session.sessionRepairPending,
+                              child: const ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.refresh),
+                                title: Text('修复当前画面与控制'),
+                              ),
+                            ),
+                          ],
                         ],
                         icon: const Icon(Icons.more_horiz),
                       ),
-                      IconButton(
-                        tooltip: viewFit == RemoteViewFit.contain
-                            ? '填满并裁剪'
-                            : '完整适应',
-                        onPressed: () => onViewFitChanged(
-                          viewFit == RemoteViewFit.contain
-                              ? RemoteViewFit.cover
-                              : RemoteViewFit.contain,
+                      if (!compact)
+                        IconButton(
+                          tooltip: viewFit == RemoteViewFit.contain
+                              ? '填满并裁剪'
+                              : '完整适应',
+                          onPressed: () => onViewFitChanged(
+                            viewFit == RemoteViewFit.contain
+                                ? RemoteViewFit.cover
+                                : RemoteViewFit.contain,
+                          ),
+                          icon: Icon(
+                            viewFit == RemoteViewFit.contain
+                                ? Icons.fit_screen_outlined
+                                : Icons.crop_free,
+                          ),
                         ),
-                        icon: Icon(
-                          viewFit == RemoteViewFit.contain
-                              ? Icons.fit_screen_outlined
-                              : Icons.crop_free,
-                        ),
-                      ),
-                      if (session.localExplicitFileTransferSupported)
+                      if (!compact &&
+                          session.localExplicitFileTransferSupported)
                         Badge.count(
                           isLabelVisible:
                               session.pendingIncomingFileTransferCount > 0,
@@ -1321,28 +1418,31 @@ class _RemoteToolbar extends StatelessWidget {
                             icon: const Icon(Icons.swap_horiz),
                           ),
                         ),
-                      IconButton(
-                        tooltip: '分辨率与帧率：${session.qualityStatusLabel}',
-                        onPressed: session.qualityPending
-                            ? null
-                            : () => unawaited(
-                                _showVideoPolicyDialog(context, session),
-                              ),
-                        icon: session.qualityPending
-                            ? const SizedBox.square(
-                                dimension: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
+                      if (!compact)
+                        IconButton(
+                          tooltip: '分辨率与帧率：${session.qualityStatusLabel}',
+                          onPressed: session.qualityPending
+                              ? null
+                              : () => unawaited(
+                                  _showVideoPolicyDialog(context, session),
                                 ),
-                              )
-                            : const Icon(Icons.high_quality_outlined),
-                      ),
-                      IconButton(
-                        tooltip: '显示调整与色彩诊断',
-                        onPressed: onDisplayAdjustment,
-                        icon: const Icon(Icons.tonality_outlined),
-                      ),
-                      if ((Platform.isMacOS || Platform.isWindows) &&
+                          icon: session.qualityPending
+                              ? const SizedBox.square(
+                                  dimension: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.high_quality_outlined),
+                        ),
+                      if (!compact)
+                        IconButton(
+                          tooltip: '显示调整与色彩诊断',
+                          onPressed: onDisplayAdjustment,
+                          icon: const Icon(Icons.tonality_outlined),
+                        ),
+                      if (!compact &&
+                          (Platform.isMacOS || Platform.isWindows) &&
                           session.remoteHostPlatform ==
                               HostPlatformType.windows.name &&
                           session.remoteSupportsPhysicalKeyboard)
@@ -1414,20 +1514,21 @@ class _RemoteToolbar extends StatelessWidget {
                               : Icons.keyboard_outlined,
                         ),
                       ),
-                      IconButton(
-                        tooltip: '修复当前画面与控制',
-                        onPressed: session.sessionRepairPending
-                            ? null
-                            : () => unawaited(session.repairRemoteSession()),
-                        icon: session.sessionRepairPending
-                            ? const SizedBox.square(
-                                dimension: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.refresh),
-                      ),
+                      if (!compact)
+                        IconButton(
+                          tooltip: '修复当前画面与控制',
+                          onPressed: session.sessionRepairPending
+                              ? null
+                              : () => unawaited(session.repairRemoteSession()),
+                          icon: session.sessionRepairPending
+                              ? const SizedBox.square(
+                                  dimension: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.refresh),
+                        ),
                       IconButton(
                         tooltip: isFullScreen ? '退出全屏' : '进入全屏',
                         onPressed: onFullScreen,

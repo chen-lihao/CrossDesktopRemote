@@ -214,7 +214,7 @@ flutter run -d macos
 flutter run -d <ipad-device-id>
 ```
 
-桌面独立原生窗口预留 Flutter 同一 isolate windowing 宿主；未启用时自动降级为应用内全屏工作区。macOS 保留已经过真机验证的独立窗口。Windows 固定使用主 Flutter View 内的持久远程工作区：应用启动后预先注册并挂载同一个 WebRTC Texture，打开、关闭和全屏只切换可见性，不再创建路由、Renderer 或重新绑定媒体 Track，避免把主窗口注册的 Texture 挂载到不兼容的第二 View。媒体会话只持有远端 Stream，展示控制器独立持有 Renderer，并以 `surfaceReady → binding → waitingFirstFrame → visible` 状态机提交首帧。项目基线 Flutter 3.47 stable 当前将 windowing 开关标记为 `Unavailable`，不要切换现有稳定 SDK。若要继续验证 macOS 原生窗口，应另外安装 Flutter main 实验 SDK 并在该 SDK 中执行：
+桌面独立原生窗口预留 Flutter 同一 isolate windowing 宿主；未启用时自动降级为应用内全屏工作区。macOS 保留已经过真机验证的独立窗口。Windows 固定使用主 Flutter View 内的持久视频/输入 Viewport：应用启动后预先注册并挂载同一个 WebRTC Texture，Viewer Chrome、工具栏和加载遮罩只在打开远程桌面时挂载；打开、关闭和全屏不再创建 Renderer 或重新绑定媒体 Track，避免把主窗口注册的 Texture 挂载到不兼容的第二 View。媒体会话只持有远端 Stream，展示控制器独立持有 Renderer，并以 `surfaceReady → binding → waitingFirstFrame → visible` 状态机提交首帧。项目基线 Flutter 3.47 stable 当前将 windowing 开关标记为 `Unavailable`，不要切换现有稳定 SDK。若要继续验证 macOS 原生窗口，应另外安装 Flutter main 实验 SDK 并在该 SDK 中执行：
 
 ```bash
 <flutter-main>/bin/flutter config --enable-windowing
