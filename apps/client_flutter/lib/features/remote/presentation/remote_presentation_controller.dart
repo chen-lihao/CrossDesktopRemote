@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
+import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -18,6 +18,11 @@ enum RemotePresentationState {
 }
 
 typedef RemoteVideoRendererFactory = RTCVideoRenderer Function();
+typedef RemotePresentationFrameBarrier = Future<void> Function();
+
+Future<void> _waitForPresentationFrame() {
+  return WidgetsBinding.instance.endOfFrame;
+}
 
 /// Owns the platform video texture for one presentation surface.
 ///
@@ -29,7 +34,10 @@ class RemotePresentationController extends ChangeNotifier {
   RemotePresentationController({
     required this.session,
     RemoteVideoRendererFactory? rendererFactory,
-  }) : renderer = (rendererFactory ?? RTCVideoRenderer.new)() {
+    RemotePresentationFrameBarrier? frameBarrier,
+    this.firstFrameTimeout = const Duration(seconds: 3),
+  }) : renderer = (rendererFactory ?? RTCVideoRenderer.new)(),
+       _frameBarrier = frameBarrier ?? _waitForPresentationFrame {
     _observedRefreshGeneration = session.presentationRefreshGeneration;
     session.addListener(_handleSessionChanged);
     renderer.onFirstFrameRendered = _handleFirstFrame;
@@ -37,8 +45,10 @@ class RemotePresentationController extends ChangeNotifier {
     renderer.onColorDiagnostics = session.updateRendererColorDiagnostics;
   }
 
-  final RemoteSessionController session;
+  final RemoteVideoPresentationSource session;
   final RTCVideoRenderer renderer;
+  final Duration firstFrameTimeout;
+  final RemotePresentationFrameBarrier _frameBarrier;
 
   RemotePresentationState _state = RemotePresentationState.detached;
   Object? _error;
@@ -48,12 +58,15 @@ class RemotePresentationController extends ChangeNotifier {
   bool _disposed = false;
   int _lifecycleGeneration = 0;
   int _boundTrackGeneration = -1;
+  String? _boundTrackId;
   int _observedRefreshGeneration = -1;
   Future<void>? _attachFuture;
   Future<void>? _serialOperation;
+  Timer? _firstFrameTimer;
 
   RemotePresentationState get state => _state;
   Object? get error => _error;
+  String? get boundTrackId => _boundTrackId;
   bool get isReady => {
     RemotePresentationState.ready,
     RemotePresentationState.visible,
@@ -82,7 +95,7 @@ class RemotePresentationController extends ChangeNotifier {
       // The Texture widget is rebuilt with a valid texture id by the state
       // notification above. Bind media only after that element has completed a
       // Flutter frame, so the first native pixel-buffer pull has a live owner.
-      await WidgetsBinding.instance.endOfFrame;
+      await _frameBarrier();
       if (!_isCurrent(lifecycle)) return;
       await _scheduleBinding(force: false);
     } catch (error) {
@@ -106,6 +119,19 @@ class RemotePresentationController extends ChangeNotifier {
     );
   }
 
+  /// Revalidates the current stream-to-texture binding without tearing down a
+  /// healthy renderer. This is safe to expose as a user retry action because
+  /// it never owns or recreates the PeerConnection or remote track.
+  Future<void> retryBinding() async {
+    if (_disposed) return;
+    if (!_surfaceAttached) {
+      await attachSurface();
+      return;
+    }
+    _error = null;
+    await _scheduleBinding(force: true);
+  }
+
   Future<void> detachSurface() async {
     if (_disposed || !_surfaceAttached) return;
     _surfaceAttached = false;
@@ -116,10 +142,12 @@ class RemotePresentationController extends ChangeNotifier {
     await _enqueue(() async {
       if (_surfaceAttached || lifecycle != _lifecycleGeneration) return;
       if (renderer.srcObject != null) {
-        await renderer.setSrcObject(stream: null);
+        await renderer.setSrcObject(stream: null, trackId: null);
       }
       _boundTrackGeneration = -1;
+      _boundTrackId = null;
       _firstFrameReceived = false;
+      _firstFrameTimer?.cancel();
     });
     if (!_disposed && !_surfaceAttached && lifecycle == _lifecycleGeneration) {
       _setState(RemotePresentationState.detached);
@@ -128,14 +156,15 @@ class RemotePresentationController extends ChangeNotifier {
 
   void _handleSessionChanged() {
     if (_disposed || !_surfaceAttached) return;
-    final stream = session.remoteStream;
-    if (stream == null) {
+    final binding = session.remoteVideoBinding;
+    if (binding == null) {
       unawaited(_scheduleUnbind());
       return;
     }
     final refreshChanged =
         _observedRefreshGeneration != session.presentationRefreshGeneration;
-    if (_boundTrackGeneration != session.remoteTrackGeneration ||
+    if (_boundTrackGeneration != binding.generation ||
+        _boundTrackId != binding.trackId ||
         refreshChanged) {
       unawaited(
         _scheduleBinding(force: refreshChanged && _boundTrackGeneration >= 0),
@@ -149,40 +178,81 @@ class RemotePresentationController extends ChangeNotifier {
 
   Future<void> _bindCurrentStream({required bool force}) async {
     if (_disposed || !_surfaceAttached || renderer.textureId == null) return;
-    final stream = session.remoteStream;
-    final trackGeneration = session.remoteTrackGeneration;
+    final binding = session.remoteVideoBinding;
     final refreshGeneration = session.presentationRefreshGeneration;
-    if (stream == null) {
+    if (binding == null || !binding.isValid) {
       await _unbindRenderer();
       return;
     }
+    final stream = binding.stream;
+    final trackGeneration = binding.generation;
+    final trackId = binding.trackId;
     if (!force &&
         renderer.srcObject == stream &&
-        _boundTrackGeneration == trackGeneration) {
+        _boundTrackGeneration == trackGeneration &&
+        _boundTrackId == trackId) {
       return;
     }
 
     final lifecycle = _lifecycleGeneration;
-    _firstFrameReceived = false;
-    _error = null;
-    _setState(RemotePresentationState.binding);
-    await WidgetsBinding.instance.endOfFrame;
-    if (!_isCurrent(lifecycle) || session.remoteStream != stream) return;
-
-    if (force && renderer.srcObject != null) {
-      await renderer.setSrcObject(stream: null);
-      await Future<void>.delayed(Duration.zero);
-      if (!_isCurrent(lifecycle) || session.remoteStream != stream) return;
+    final alreadyPresenting =
+        isReady &&
+        renderer.srcObject == stream &&
+        _boundTrackGeneration == trackGeneration &&
+        _boundTrackId == trackId &&
+        renderer.value.width > 0 &&
+        renderer.value.height > 0;
+    if (!alreadyPresenting) {
+      _firstFrameReceived = false;
+      _firstFrameTimer?.cancel();
+      _setState(RemotePresentationState.binding);
     }
-    await renderer.setSrcObject(stream: stream);
-    if (!_isCurrent(lifecycle) || session.remoteStream != stream) {
-      await renderer.setSrcObject(stream: null);
+    _error = null;
+    await _frameBarrier();
+    if (!_isCurrent(lifecycle) || session.remoteVideoBinding != binding) {
       return;
     }
+    // Bind the exact receiver track. A stream-only/default-track contract is
+    // ambiguous across native WebRTC implementations and previously allowed
+    // Windows to acknowledge a request without attaching any video sink.
+    await renderer.setSrcObject(stream: stream, trackId: trackId);
+    if (!_isCurrent(lifecycle) || session.remoteVideoBinding != binding) return;
     _boundTrackGeneration = trackGeneration;
+    _boundTrackId = trackId;
     _observedRefreshGeneration = refreshGeneration;
+    if (alreadyPresenting) {
+      _setState(
+        _visibleRequested
+            ? RemotePresentationState.visible
+            : RemotePresentationState.ready,
+      );
+      return;
+    }
     _setState(RemotePresentationState.waitingFirstFrame);
+    _armFirstFrameTimeout(
+      lifecycle: lifecycle,
+      trackGeneration: trackGeneration,
+      trackId: trackId,
+    );
     _evaluateReady();
+  }
+
+  void _armFirstFrameTimeout({
+    required int lifecycle,
+    required int trackGeneration,
+    required String trackId,
+  }) {
+    _firstFrameTimer?.cancel();
+    _firstFrameTimer = Timer(firstFrameTimeout, () {
+      if (!_isCurrent(lifecycle) ||
+          _firstFrameReceived ||
+          _boundTrackGeneration != trackGeneration ||
+          _boundTrackId != trackId) {
+        return;
+      }
+      _error = StateError('视频轨道已绑定，但在规定时间内未收到可显示首帧');
+      _setState(RemotePresentationState.failed);
+    });
   }
 
   Future<void> _scheduleUnbind() {
@@ -191,10 +261,12 @@ class RemotePresentationController extends ChangeNotifier {
 
   Future<void> _unbindRenderer() async {
     if (renderer.srcObject != null) {
-      await renderer.setSrcObject(stream: null);
+      await renderer.setSrcObject(stream: null, trackId: null);
     }
     _boundTrackGeneration = -1;
+    _boundTrackId = null;
     _firstFrameReceived = false;
+    _firstFrameTimer?.cancel();
     if (_surfaceAttached && !_disposed) {
       _setState(RemotePresentationState.surfaceReady);
     }
@@ -203,6 +275,7 @@ class RemotePresentationController extends ChangeNotifier {
   void _handleFirstFrame() {
     if (_disposed || !_surfaceAttached) return;
     _firstFrameReceived = true;
+    _firstFrameTimer?.cancel();
     _evaluateReady();
   }
 
@@ -223,7 +296,8 @@ class RemotePresentationController extends ChangeNotifier {
 
   void _evaluateReady() {
     if (!_firstFrameReceived ||
-        _boundTrackGeneration != session.remoteTrackGeneration) {
+        _boundTrackGeneration != session.remoteVideoBinding?.generation ||
+        _boundTrackId != session.remoteVideoBinding?.trackId) {
       return;
     }
     final value = renderer.value;
@@ -238,6 +312,7 @@ class RemotePresentationController extends ChangeNotifier {
           ? RemotePresentationState.visible
           : RemotePresentationState.ready,
     );
+    _firstFrameTimer?.cancel();
   }
 
   Future<void> _enqueue(Future<void> Function() operation) {
@@ -270,11 +345,12 @@ class RemotePresentationController extends ChangeNotifier {
     if (_disposed) return;
     _surfaceAttached = false;
     ++_lifecycleGeneration;
+    _firstFrameTimer?.cancel();
     session.removeListener(_handleSessionChanged);
     try {
       await _enqueue(() async {
         if (renderer.srcObject != null) {
-          await renderer.setSrcObject(stream: null);
+          await renderer.setSrcObject(stream: null, trackId: null);
         }
         renderer.onFirstFrameRendered = null;
         renderer.onResize = null;

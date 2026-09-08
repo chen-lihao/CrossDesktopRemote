@@ -1,5 +1,43 @@
 import 'package:cross_desktop_remote/core/protocol/wire_value_parsers.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+
+/// Immutable identity of the video track currently owned by a remote session.
+///
+/// A [MediaStream] alone is not a sufficient renderer contract: it can contain
+/// multiple tracks and native renderers differ in how they choose a default.
+/// Every presentation surface therefore binds the exact track announced by
+/// RTCPeerConnection.onTrack and guards it with [generation].
+class RemoteVideoBinding {
+  const RemoteVideoBinding({
+    required this.stream,
+    required this.trackId,
+    required this.generation,
+  });
+
+  final MediaStream stream;
+  final String trackId;
+  final int generation;
+
+  bool get isValid => trackId.trim().isNotEmpty && generation > 0;
+}
+
+/// Narrow session interface consumed by a presentation surface.
+///
+/// Keeping this boundary independent from RemoteSessionController makes the
+/// renderer lifecycle testable without constructing a PeerConnection.
+abstract interface class RemoteVideoPresentationSource implements Listenable {
+  RemoteVideoBinding? get remoteVideoBinding;
+  int get presentationRefreshGeneration;
+
+  void updateRendererColorDiagnostics(Map<String, dynamic> diagnostics);
+
+  void reportPresentedVideoFrame({
+    required int trackGeneration,
+    required int width,
+    required int height,
+  });
+}
 
 class RemoteDisplay {
   const RemoteDisplay({

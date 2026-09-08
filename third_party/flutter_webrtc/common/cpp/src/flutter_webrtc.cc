@@ -509,8 +509,16 @@ void FlutterWebRTC::HandleMethodCall(
     const std::string owner_tag = findString(params, "ownerTag");
     const std::string track_id = findString(params, "trackId");
 
-    VideoRendererSetSrcObject(texture_id, stream_id, owner_tag, track_id);
-    result->Success();
+    const auto binding =
+        VideoRendererSetSrcObject(texture_id, stream_id, owner_tag, track_id);
+    if (!binding.success) {
+      result->Error(binding.error_code, binding.error_message);
+      return;
+    }
+    EncodableMap response;
+    response[EncodableValue("bound")] = EncodableValue(true);
+    response[EncodableValue("trackId")] = EncodableValue(binding.track_id);
+    result->Success(EncodableValue(response));
   } else if (method_call.method_name().compare(
                  "mediaStreamTrackSwitchCamera") == 0) {
     if (!method_call.arguments()) {

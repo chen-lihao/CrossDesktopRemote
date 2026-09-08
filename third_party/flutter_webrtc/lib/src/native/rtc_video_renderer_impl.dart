@@ -66,26 +66,11 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
 
   @override
   set srcObject(MediaStream? stream) {
-    if (_disposed) {
-      throw 'Can\'t set srcObject: The RTCVideoRenderer is disposed';
-    }
-    if (textureId == null) throw 'Call initialize before setting the stream';
-    _srcObject = stream;
-    WebRTC.invokeMethod('videoRendererSetSrcObject', <String, dynamic>{
-          'textureId': textureId,
-          'streamId': stream?.id ?? '',
-          'ownerTag': stream?.ownerTag ?? '',
-        })
-        .then((_) {
-          value = (stream == null)
-              ? RTCVideoValue.empty
-              : value.copyWith(renderVideo: renderVideo);
-        })
-        .catchError((e) {
-          print(
-            'Got exception for RTCVideoRenderer::setSrcObject: ${e.message}',
-          );
-        }, test: (e) => e is PlatformException);
+    unawaited(
+      setSrcObject(stream: stream).onError((error, stackTrace) {
+        debugPrint('RTCVideoRenderer binding failed: $error');
+      }),
+    );
   }
 
   Future<void> setSrcObject({MediaStream? stream, String? trackId}) async {
@@ -93,21 +78,53 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
       throw 'Can\'t set srcObject: The RTCVideoRenderer is disposed';
     }
     if (_textureId == null) throw 'Call initialize before setting the stream';
-    _srcObject = stream;
-    var oldTextureId = _textureId;
+    final requestedTrackId = _resolveVideoTrackId(stream, trackId);
+    final oldTextureId = _textureId;
     try {
-      await WebRTC.invokeMethod('videoRendererSetSrcObject', <String, dynamic>{
+      final arguments = <String, dynamic>{
         'textureId': _textureId,
         'streamId': stream?.id ?? '',
         'ownerTag': stream?.ownerTag ?? '',
-        'trackId': trackId ?? '0',
-      });
+        if (requestedTrackId != null) 'trackId': requestedTrackId,
+      };
+      final response = await WebRTC.invokeMethod(
+        'videoRendererSetSrcObject',
+        arguments,
+      );
+      if (stream != null && response is Map) {
+        final acknowledgedTrackId = response['trackId']?.toString();
+        if (acknowledgedTrackId != null &&
+            acknowledgedTrackId.isNotEmpty &&
+            acknowledgedTrackId != requestedTrackId) {
+          throw StateError(
+            'Native renderer bound track $acknowledgedTrackId instead of '
+            '$requestedTrackId',
+          );
+        }
+      }
+      _srcObject = stream;
       value = (stream == null)
           ? RTCVideoValue.empty
           : value.copyWith(renderVideo: renderVideo);
     } on PlatformException catch (e) {
       throw 'Got exception for RTCVideoRenderer::setSrcObject: textureId $oldTextureId [disposed: $_disposed] with stream ${stream?.id}, error: ${e.message}';
     }
+  }
+
+  String? _resolveVideoTrackId(MediaStream? stream, String? trackId) {
+    if (stream == null) return null;
+    final tracks = stream.getVideoTracks();
+    if (tracks.isEmpty) {
+      throw StateError('MediaStream ${stream.id} does not contain video');
+    }
+    final requested = trackId?.trim();
+    if (requested == null || requested.isEmpty) return tracks.first.id;
+    if (!tracks.any((track) => track.id == requested)) {
+      throw StateError(
+        'Video track $requested does not belong to MediaStream ${stream.id}',
+      );
+    }
+    return requested;
   }
 
   @override

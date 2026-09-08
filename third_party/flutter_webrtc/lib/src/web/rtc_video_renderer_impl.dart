@@ -164,6 +164,9 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
       findHtmlView()?.srcObject = null;
       _audioElement?.srcObject = null;
       _srcObject = null;
+      _videoStream = null;
+      _audioStream = null;
+      value = RTCVideoValue.empty;
       return;
     }
 
@@ -171,9 +174,21 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
 
     if (null != _srcObject) {
       if (stream.getVideoTracks().isNotEmpty) {
+        final requested = trackId?.trim();
+        final selectedTrackId = requested == null || requested.isEmpty
+            ? stream.getVideoTracks().first.id
+            : requested;
+        if (!stream
+            .getVideoTracks()
+            .any((track) => track.id == selectedTrackId)) {
+          throw StateError(
+            'Video track $selectedTrackId does not belong to '
+            'MediaStream ${stream.id}',
+          );
+        }
         _videoStream = web.MediaStream();
         for (final track in _srcObject!.jsStream.getVideoTracks().toDart) {
-          if (track.id == trackId) {
+          if (track.id == selectedTrackId) {
             _videoStream!.addTrack(track);
           }
         }

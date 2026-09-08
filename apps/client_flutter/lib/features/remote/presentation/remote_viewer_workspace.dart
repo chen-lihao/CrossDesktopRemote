@@ -88,6 +88,9 @@ class _RemoteViewerWorkspaceState extends State<RemoteViewerWorkspace> {
                 ),
                 if (widget.active && !widget.presentation.isReady)
                   _PresentationLoadingOverlay(
+                    failed:
+                        widget.presentation.state ==
+                        RemotePresentationState.failed,
                     message:
                         widget.presentation.state ==
                             RemotePresentationState.failed
@@ -95,6 +98,8 @@ class _RemoteViewerWorkspaceState extends State<RemoteViewerWorkspace> {
                         : widget.session.hasRemoteVideo
                         ? '正在准备远程画面…'
                         : widget.session.statusMessage,
+                    onRetry: () =>
+                        unawaited(widget.presentation.retryBinding()),
                     onClose:
                         widget.onClose ?? () => Navigator.maybePop(context),
                   ),
@@ -109,11 +114,15 @@ class _RemoteViewerWorkspaceState extends State<RemoteViewerWorkspace> {
 
 class _PresentationLoadingOverlay extends StatelessWidget {
   const _PresentationLoadingOverlay({
+    required this.failed,
     required this.message,
+    required this.onRetry,
     required this.onClose,
   });
 
+  final bool failed;
   final String message;
+  final VoidCallback onRetry;
   final VoidCallback onClose;
 
   @override
@@ -129,14 +138,30 @@ class _PresentationLoadingOverlay extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const CircularProgressIndicator(),
+                  if (failed)
+                    const Icon(Icons.error_outline, size: 36)
+                  else
+                    const CircularProgressIndicator(),
                   const SizedBox(height: 20),
                   Text(message, textAlign: TextAlign.center),
                   const SizedBox(height: 16),
-                  FilledButton.tonalIcon(
-                    onPressed: onClose,
-                    icon: const Icon(Icons.close),
-                    label: const Text('关闭远程桌面'),
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 12,
+                    runSpacing: 8,
+                    children: [
+                      if (failed)
+                        FilledButton.icon(
+                          onPressed: onRetry,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('重试画面绑定'),
+                        ),
+                      FilledButton.tonalIcon(
+                        onPressed: onClose,
+                        icon: const Icon(Icons.close),
+                        label: const Text('关闭远程桌面'),
+                      ),
+                    ],
                   ),
                 ],
               ),

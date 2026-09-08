@@ -947,28 +947,44 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
                                  details:nil]);
       return;
     }
+    if (streamId.length == 0) {
+      [self rendererSetSrcObject:render stream:nil];
+      result(@{@"bound" : @YES, @"trackId" : @""});
+      return;
+    }
     RTCMediaStream* stream = nil;
-    RTCVideoTrack* videoTrack = nil;
     if ([ownerTag isEqualToString:@"local"]) {
       stream = _localStreams[streamId];
     }
     if (!stream) {
       stream = [self streamForId:streamId peerConnectionId:ownerTag];
     }
-    if (stream) {
-      NSArray* videoTracks = stream ? stream.videoTracks : nil;
-      videoTrack = videoTracks && videoTracks.count ? videoTracks[0] : nil;
+    if (!stream) {
+      result([FlutterError errorWithCode:@"video_renderer_stream_not_found"
+                                 message:@"Media stream is not registered"
+                                 details:nil]);
+      return;
+    }
+    NSArray* videoTracks = stream.videoTracks;
+    RTCVideoTrack* videoTrack = nil;
+    if (trackId.length == 0) {
+      videoTrack = videoTracks.count > 0 ? videoTracks[0] : nil;
+    } else {
       for (RTCVideoTrack* track in videoTracks) {
         if ([track.trackId isEqualToString:trackId]) {
           videoTrack = track;
+          break;
         }
       }
-      if (!videoTrack) {
-        NSLog(@"Not found video track for RTCMediaStream: %@", streamId);
-      }
+    }
+    if (!videoTrack) {
+      result([FlutterError errorWithCode:@"video_renderer_track_not_found"
+                                 message:@"Requested video track does not belong to stream"
+                                 details:nil]);
+      return;
     }
     [self rendererSetSrcObject:render stream:videoTrack];
-    result(nil);
+    result(@{@"bound" : @YES, @"trackId" : videoTrack.trackId});
   }
 #if TARGET_OS_IPHONE || TARGET_OS_OSX
   else if ([@"videoPlatformViewRendererSetSrcObject" isEqualToString:call.method]) {

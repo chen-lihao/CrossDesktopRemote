@@ -735,23 +735,52 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
           resultError("videoRendererSetSrcObject", "render [" + textureId + "] not found !", result);
           return;
         }
+        if (streamId == null || streamId.isEmpty()) {
+          render.setStream(null, ownerTag);
+          Map<String, Object> response = new HashMap<>();
+          response.put("bound", true);
+          response.put("trackId", "");
+          result.success(response);
+          break;
+        }
         MediaStream stream = null;
         if (ownerTag.equals("local")) {
           stream = localStreams.get(streamId);
         } else {
           stream = getStreamForId(streamId, ownerTag);
         }
-        if (trackId != null && !trackId.equals("0")){
-          MediaStreamTrack track = getTrackForId(trackId, ownerTag);
-          if (track instanceof VideoTrack) {
-            render.setTrack((VideoTrack) track, streamId, ownerTag);
-          } else {
-            render.setStream(stream, trackId, ownerTag);
+        if (stream == null) {
+          resultError(
+              "video_renderer_stream_not_found",
+              "Media stream is not registered",
+              result);
+          return;
+        }
+        VideoTrack selectedTrack = null;
+        if (trackId == null || trackId.isEmpty()) {
+          if (!stream.videoTracks.isEmpty()) {
+            selectedTrack = stream.videoTracks.get(0);
           }
         } else {
-          render.setStream(stream, ownerTag);
+          for (VideoTrack candidate : stream.videoTracks) {
+            if (candidate.id().equals(trackId)) {
+              selectedTrack = candidate;
+              break;
+            }
+          }
         }
-        result.success(null);
+        if (selectedTrack == null) {
+          resultError(
+              "video_renderer_track_not_found",
+              "Requested video track does not belong to stream",
+              result);
+          return;
+        }
+        render.setTrack(selectedTrack, streamId, ownerTag);
+        Map<String, Object> response = new HashMap<>();
+        response.put("bound", true);
+        response.put("trackId", selectedTrack.id());
+        result.success(response);
         break;
       }
       case "mediaStreamTrackHasTorch": {

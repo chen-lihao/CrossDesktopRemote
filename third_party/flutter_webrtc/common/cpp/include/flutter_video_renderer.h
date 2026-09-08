@@ -14,6 +14,13 @@ namespace flutter_webrtc_plugin {
 
 using namespace libwebrtc;
 
+struct VideoRendererBindingResult {
+  bool success = false;
+  std::string track_id;
+  std::string error_code;
+  std::string error_message;
+};
+
 class FlutterVideoRenderer
     : public RTCVideoRenderer<scoped_refptr<RTCVideoFrame>>,
       public RefCountInterface {
@@ -76,10 +83,11 @@ class FlutterVideoRendererManager {
 
   void CreateVideoRendererTexture(std::unique_ptr<MethodResultProxy> result);
 
-  void VideoRendererSetSrcObject(int64_t texture_id,
-                                 const std::string& stream_id,
-                                 const std::string& owner_tag,
-                                 const std::string& track_id);
+  VideoRendererBindingResult VideoRendererSetSrcObject(
+      int64_t texture_id,
+      const std::string& stream_id,
+      const std::string& owner_tag,
+      const std::string& track_id);
 
   void VideoRendererDispose(int64_t texture_id,
                             std::unique_ptr<MethodResultProxy> result);

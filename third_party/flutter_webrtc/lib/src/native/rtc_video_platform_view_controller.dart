@@ -86,7 +86,8 @@ class RTCVideoPlatformViewController extends ValueNotifier<RTCVideoValue>
         'viewId': _viewId,
         'streamId': stream?.id ?? '',
         'ownerTag': stream?.ownerTag ?? '',
-        'trackId': trackId ?? '0'
+        if (trackId != null && trackId.trim().isNotEmpty)
+          'trackId': trackId.trim(),
       });
       value = (stream == null)
           ? RTCVideoValue.empty

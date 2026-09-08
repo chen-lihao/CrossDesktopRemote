@@ -194,36 +194,65 @@ void FlutterVideoRendererManager::CreateVideoRendererTexture(
   result->Success(EncodableValue(params));
 }
 
-void FlutterVideoRendererManager::VideoRendererSetSrcObject(
+VideoRendererBindingResult
+FlutterVideoRendererManager::VideoRendererSetSrcObject(
     int64_t texture_id,
     const std::string& stream_id,
     const std::string& owner_tag,
     const std::string& track_id) {
+  VideoRendererBindingResult result;
+  auto it = renderers_.find(texture_id);
+  if (it == renderers_.end()) {
+    result.error_code = "renderer_not_found";
+    result.error_message = "Video renderer texture is not registered";
+    return result;
+  }
+
+  FlutterVideoRenderer* renderer = it->second.get();
+  if (stream_id.empty()) {
+    renderer->SetVideoTrack(nullptr);
+    renderer->media_stream_id.clear();
+    result.success = true;
+    return result;
+  }
+
   scoped_refptr<RTCMediaStream> stream =
       base_->MediaStreamForId(stream_id, owner_tag);
+  if (!stream) {
+    result.error_code = "stream_not_found";
+    result.error_message = "Media stream is not registered";
+    return result;
+  }
 
-  auto it = renderers_.find(texture_id);
-  if (it != renderers_.end()) {
-    FlutterVideoRenderer* renderer = it->second.get();
-    if (stream.get()) {
-      auto video_tracks = stream->video_tracks();
-      if (video_tracks.size() > 0) {
-        if (track_id == std::string()) {
-          renderer->SetVideoTrack(video_tracks[0]);
-        } else {
-          for (auto track : video_tracks.std_vector()) {
-            if (track->id().std_string() == track_id) {
-              renderer->SetVideoTrack(track);
-              break;
-            }
-          }
-        }
-        renderer->media_stream_id = stream_id;
+  const auto video_tracks = stream->video_tracks();
+  if (video_tracks.size() == 0) {
+    result.error_code = "video_track_not_found";
+    result.error_message = "Media stream does not contain a video track";
+    return result;
+  }
+
+  scoped_refptr<RTCVideoTrack> selected_track = nullptr;
+  if (track_id.empty()) {
+    selected_track = video_tracks[0];
+  } else {
+    for (const auto& track : video_tracks.std_vector()) {
+      if (track->id().std_string() == track_id) {
+        selected_track = track;
+        break;
       }
-    } else {
-      renderer->SetVideoTrack(nullptr);
     }
   }
+  if (!selected_track) {
+    result.error_code = "video_track_not_found";
+    result.error_message = "Requested video track does not belong to stream";
+    return result;
+  }
+
+  renderer->SetVideoTrack(selected_track);
+  renderer->media_stream_id = stream_id;
+  result.success = true;
+  result.track_id = selected_track->id().std_string();
+  return result;
 }
 
 void FlutterVideoRendererManager::VideoRendererDispose(

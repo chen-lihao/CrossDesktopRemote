@@ -1,5 +1,6 @@
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
+import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/in_app_remote_viewer_host.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_presentation_controller.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_coordinator.dart';
@@ -135,6 +136,126 @@ void main() {
     settings.dispose();
   });
 
+  test('presentation binds the exact receiver track before ready', () async {
+    final source = _FakeVideoPresentationSource();
+    final renderer = _FakeVideoRenderer(emitFirstFrame: true);
+    final presentation = RemotePresentationController(
+      session: source,
+      rendererFactory: () => renderer,
+      frameBarrier: () async {},
+    );
+    addTearDown(() async {
+      await presentation.shutdown();
+      source.dispose();
+    });
+
+    await presentation.attachSurface();
+    source.publish(
+      RemoteVideoBinding(
+        stream: _FakeMediaStream('remote-stream'),
+        trackId: 'receiver-video-track',
+        generation: 1,
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(renderer.boundTrackIds, ['receiver-video-track']);
+    expect(presentation.boundTrackId, 'receiver-video-track');
+    expect(presentation.isReady, isTrue);
+    expect(source.presentedFrames, [(1920, 1080, 1)]);
+  });
+
+  test('native bind failure is visible instead of waiting forever', () async {
+    final source = _FakeVideoPresentationSource();
+    final renderer = _FakeVideoRenderer(bindError: StateError('track missing'));
+    final presentation = RemotePresentationController(
+      session: source,
+      rendererFactory: () => renderer,
+      frameBarrier: () async {},
+    );
+    addTearDown(() async {
+      await presentation.shutdown();
+      source.dispose();
+    });
+
+    await presentation.attachSurface();
+    source.publish(
+      RemoteVideoBinding(
+        stream: _FakeMediaStream('remote-stream'),
+        trackId: 'missing-track',
+        generation: 1,
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(presentation.state, RemotePresentationState.failed);
+    expect(presentation.error, isA<StateError>());
+  });
+
+  test(
+    'presentation repair validates without unbinding healthy video',
+    () async {
+      final source = _FakeVideoPresentationSource();
+      final renderer = _FakeVideoRenderer(emitFirstFrame: true);
+      final presentation = RemotePresentationController(
+        session: source,
+        rendererFactory: () => renderer,
+        frameBarrier: () async {},
+      );
+      addTearDown(() async {
+        await presentation.shutdown();
+        source.dispose();
+      });
+
+      await presentation.attachSurface();
+      source.publish(
+        RemoteVideoBinding(
+          stream: _FakeMediaStream('remote-stream'),
+          trackId: 'receiver-video-track',
+          generation: 1,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      source.requestPresentationRefresh();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(renderer.boundTrackIds, [
+        'receiver-video-track',
+        'receiver-video-track',
+      ]);
+      expect(renderer.unbindCount, 0);
+      expect(presentation.isReady, isTrue);
+    },
+  );
+
+  test('missing first frame fails with a bounded diagnostic', () async {
+    final source = _FakeVideoPresentationSource();
+    final renderer = _FakeVideoRenderer();
+    final presentation = RemotePresentationController(
+      session: source,
+      rendererFactory: () => renderer,
+      frameBarrier: () async {},
+      firstFrameTimeout: const Duration(milliseconds: 10),
+    );
+    addTearDown(() async {
+      await presentation.shutdown();
+      source.dispose();
+    });
+
+    await presentation.attachSurface();
+    source.publish(
+      RemoteVideoBinding(
+        stream: _FakeMediaStream('remote-stream'),
+        trackId: 'receiver-video-track',
+        generation: 1,
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(presentation.state, RemotePresentationState.failed);
+    expect(presentation.error.toString(), contains('未收到可显示首帧'));
+  });
+
   testWidgets('primary-view host opens once and preserves the session owner', (
     tester,
   ) async {
@@ -236,15 +357,90 @@ void main() {
 }
 
 class _FakeVideoRenderer extends RTCVideoRenderer {
+  _FakeVideoRenderer({this.emitFirstFrame = false, this.bindError});
+
+  final bool emitFirstFrame;
+  final Object? bindError;
   int initializeCount = 0;
+  int unbindCount = 0;
+  final List<String> boundTrackIds = [];
+  MediaStream? _source;
 
   @override
   int? get textureId => initializeCount == 0 ? null : 1;
 
   @override
+  MediaStream? get srcObject => _source;
+
+  @override
   Future<void> initialize() async {
     initializeCount += 1;
   }
+
+  @override
+  Future<void> setSrcObject({MediaStream? stream, String? trackId}) async {
+    final error = bindError;
+    if (stream != null && error != null) throw error;
+    _source = stream;
+    if (stream == null) {
+      unbindCount += 1;
+      value = RTCVideoValue.empty;
+      return;
+    }
+    boundTrackIds.add(trackId ?? '');
+    if (emitFirstFrame) {
+      value = value.copyWith(width: 1920, height: 1080, renderVideo: true);
+      onResize?.call();
+      onFirstFrameRendered?.call();
+    }
+  }
+}
+
+class _FakeMediaStream extends Fake implements MediaStream {
+  _FakeMediaStream(this._id);
+
+  final String _id;
+
+  @override
+  String get id => _id;
+
+  @override
+  String get ownerTag => 'remote-peer';
+}
+
+class _FakeVideoPresentationSource extends ChangeNotifier
+    implements RemoteVideoPresentationSource {
+  RemoteVideoBinding? _binding;
+  int _refreshGeneration = 0;
+  final List<(int, int, int)> presentedFrames = [];
+
+  @override
+  RemoteVideoBinding? get remoteVideoBinding => _binding;
+
+  @override
+  int get presentationRefreshGeneration => _refreshGeneration;
+
+  void publish(RemoteVideoBinding binding) {
+    _binding = binding;
+    notifyListeners();
+  }
+
+  void requestPresentationRefresh() {
+    _refreshGeneration += 1;
+    notifyListeners();
+  }
+
+  @override
+  void reportPresentedVideoFrame({
+    required int trackGeneration,
+    required int width,
+    required int height,
+  }) {
+    presentedFrames.add((width, height, trackGeneration));
+  }
+
+  @override
+  void updateRendererColorDiagnostics(Map<String, dynamic> diagnostics) {}
 }
 
 class _RecordingRemoteViewerHost implements RemoteViewerHost {

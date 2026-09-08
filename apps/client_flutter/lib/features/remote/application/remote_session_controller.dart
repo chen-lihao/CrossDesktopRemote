@@ -133,7 +133,8 @@ class _CaptureFrameWaitResult {
   }
 }
 
-class RemoteSessionController extends ChangeNotifier {
+class RemoteSessionController extends ChangeNotifier
+    implements RemoteVideoPresentationSource {
   static const int _appleSessionCaptureLongEdge = 1920;
   static const int _windowsSessionCaptureLongEdge = 2560;
   static const int _sessionCaptureFrameRate = 60;
@@ -247,7 +248,7 @@ class RemoteSessionController extends ChangeNotifier {
   RTCDataChannel? _fileTransferControlChannel;
   RTCDataChannel? _fileTransferDataChannel;
   MediaStream? _localStream;
-  MediaStream? _remoteStream;
+  RemoteVideoBinding? _remoteVideoBinding;
   RTCRtpSender? _videoSender;
   RTCRtpReceiver? _videoReceiver;
   List<DesktopCapturerSource> _displaySources = const [];
@@ -537,10 +538,14 @@ class RemoteSessionController extends ChangeNotifier {
     return _displays.firstOrNull;
   }
 
-  MediaStream? get remoteStream => _remoteStream;
+  @override
+  RemoteVideoBinding? get remoteVideoBinding => _remoteVideoBinding;
+
+  MediaStream? get remoteStream => _remoteVideoBinding?.stream;
   int get remoteTrackGeneration => _remoteTrackGeneration;
+  @override
   int get presentationRefreshGeneration => _presentationRefreshGeneration;
-  bool get hasRemoteVideo => _remoteStream != null;
+  bool get hasRemoteVideo => _remoteVideoBinding?.isValid == true;
   bool get canSendControl =>
       role == RemoteRole.controller &&
       !_displaySwitchPending &&
@@ -588,6 +593,7 @@ class RemoteSessionController extends ChangeNotifier {
     _localDeviceId = normalized;
   }
 
+  @override
   void updateRendererColorDiagnostics(Map<String, dynamic> diagnostics) {
     _decoderOutputColorDiagnostics = _frameColorDiagnostics(
       diagnostics['decoderOutput'],
@@ -599,6 +605,7 @@ class RemoteSessionController extends ChangeNotifier {
     notifyListeners();
   }
 
+  @override
   void reportPresentedVideoFrame({
     required int trackGeneration,
     required int width,
@@ -1866,16 +1873,25 @@ class RemoteSessionController extends ChangeNotifier {
     final completion = Completer<Map<String, dynamic>>();
     _sessionRepairCompleter = completion;
     int? baselineFrames;
+    var inboundVideoAdvancing = false;
     try {
       baselineFrames = (await _readRtcVideoProgress('inbound-rtp'))?.frames;
+      if (baselineFrames != null) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        final currentFrames = (await _readRtcVideoProgress('inbound-rtp'))
+            ?.frames;
+        inboundVideoAdvancing =
+            currentFrames != null && currentFrames > baselineFrames;
+      }
     } catch (_) {
-      // Stats are best-effort; the host acknowledgement remains authoritative.
+      // Missing stats conservatively requests a key frame from the host.
     }
     notifyListeners();
     _sendControl({
       'type': 'repair-session',
       'version': 2,
       'requestId': requestId,
+      'requestKeyFrame': !inboundVideoAdvancing,
     });
     _emitNotice('正在修复当前画面和控制状态');
 
@@ -1888,8 +1904,9 @@ class RemoteSessionController extends ChangeNotifier {
       if (response['ok'] != true) {
         throw StateError(response['message'] as String? ?? '被控端无法执行修复');
       }
-      // Ask the presentation owner to rebind its renderer. The session owns
-      // media tracks, while the visible surface owns the platform texture.
+      // Ask the presentation owner to validate the exact receiver-track
+      // binding. This is deliberately non-destructive: a healthy Texture must
+      // not be detached merely because the user requested a state repair.
       if (Platform.isWindows || Platform.isMacOS) {
         _presentationRefreshGeneration += 1;
         notifyListeners();
@@ -1969,9 +1986,18 @@ class RemoteSessionController extends ChangeNotifier {
           event.streams.isEmpty) {
         return;
       }
+      final trackId = event.track.id?.trim();
+      if (trackId == null || trackId.isEmpty) {
+        _fail('远端视频轨道缺少有效标识，无法建立显示绑定');
+        return;
+      }
       _videoReceiver = event.receiver;
-      _remoteStream = event.streams.first;
       _remoteTrackGeneration += 1;
+      _remoteVideoBinding = RemoteVideoBinding(
+        stream: event.streams.first,
+        trackId: trackId,
+        generation: _remoteTrackGeneration,
+      );
       _presentedVideoFrameSize = null;
       if (_state != RemoteSessionState.reconnecting) {
         _setState(RemoteSessionState.streaming, '远程视频已连接');
@@ -3227,6 +3253,7 @@ class RemoteSessionController extends ChangeNotifier {
 
   Future<void> _repairHostSession(Map<String, dynamic> message) async {
     final requestId = message['requestId'] as String? ?? '';
+    final shouldRequestKeyFrame = message['requestKeyFrame'] != false;
     if (_hostDisplaySwitchInProgress) {
       _sendControl({
         'type': 'repair-session-ack',
@@ -3244,13 +3271,16 @@ class RemoteSessionController extends ChangeNotifier {
       await _refreshHostDisplays();
       var keyFrameRequested = false;
       var captureRestarted = false;
-      try {
-        keyFrameRequested = await desktopCapturer.requestKeyFrame();
-      } catch (_) {
-        // Some platform capturers cannot explicitly request a key frame. The
-        // state refresh and controller texture rebind still remain useful.
+      if (shouldRequestKeyFrame) {
+        try {
+          keyFrameRequested = await desktopCapturer.requestKeyFrame();
+        } catch (_) {
+          // Some platform capturers cannot explicitly request a key frame. The
+          // state refresh and controller binding validation remain useful.
+        }
       }
       if (_hostPlatform.type == HostPlatformType.windows &&
+          shouldRequestKeyFrame &&
           !keyFrameRequested) {
         captureRestarted = await _warmRestartWindowsHostCapture();
         if (!captureRestarted) {
@@ -5167,7 +5197,7 @@ class RemoteSessionController extends ChangeNotifier {
     await _peerConnection?.close();
     await _peerConnection?.dispose();
     _peerConnection = null;
-    _remoteStream = null;
+    _remoteVideoBinding = null;
     _remoteTrackGeneration += 1;
     _presentedVideoFrameSize = null;
     _remoteDescriptionSet = false;
