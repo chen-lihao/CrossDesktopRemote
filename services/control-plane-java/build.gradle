@@ -60,6 +60,7 @@ def protocolSources = [
 	'crossdesktop/v1/input.proto',
 	'crossdesktop/v1/session.proto',
 	'crossdesktop/v1/signaling.proto',
+	'crossdesktop/v1/trust.proto',
 ].collect { new File(protocolRoot, it) }
 
 tasks.register('generateProtocolJava', Exec) {

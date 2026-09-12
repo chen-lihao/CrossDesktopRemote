@@ -41,6 +41,8 @@ bool FlutterWindow::OnCreate() {
       flutter_controller_->engine()->messenger());
   clipboard_bridge_ = std::make_unique<WindowsClipboardBridge>(
       flutter_controller_->engine()->messenger(), GetHandle());
+  device_identity_bridge_ = std::make_unique<WindowsDeviceIdentityBridge>(
+      flutter_controller_->engine()->messenger());
   file_paste_target_bridge_ =
       std::make_unique<WindowsFilePasteTargetBridge>(
           flutter_controller_->engine()->messenger(), GetHandle());
@@ -122,6 +124,7 @@ void FlutterWindow::OnDestroy() {
   KillTimer(GetHandle(), kDeferredFlutterRedrawTimer);
   lan_discovery_bridge_.reset();
   clipboard_bridge_.reset();
+  device_identity_bridge_.reset();
   file_paste_target_bridge_.reset();
   host_bridge_.reset();
   window_channel_.reset();

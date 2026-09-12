@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cross_desktop_remote/core/discovery/lan_discovery_service.dart';
 import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/platform/device_capabilities.dart';
+import 'package:cross_desktop_remote/core/security/trusted_device_coordinator.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/devices/presentation/devices_page.dart';
 import 'package:cross_desktop_remote/features/remote/application/host_availability_controller.dart';
@@ -49,6 +50,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   late final DeviceCapabilities _capabilities;
   late final AppSettingsController _settings;
   late final DeviceIdentityController _identity;
+  late final TrustedDeviceCoordinator _trustedDevices;
   late final SessionHistoryController _history;
   late final RemoteSessionController _controllerSession;
   late final RemoteViewerCoordinator _remoteViewer;
@@ -64,6 +66,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _capabilities = DeviceCapabilities.current();
     _settings = AppSettingsController();
     _identity = DeviceIdentityController();
+    _trustedDevices = TrustedDeviceCoordinator(identity: _identity);
     _history = SessionHistoryController(settings: _settings);
     _createWorkspace();
     _settings.addListener(_handleSettingsChanged);
@@ -74,6 +77,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final identity = await _identity.loadOrCreate();
     _controllerSession.setLocalDeviceId(identity.deviceId);
     _hostSession?.setLocalDeviceId(identity.deviceId);
+    if (identity.trustedAuthenticationAvailable) {
+      try {
+        await _trustedDevices.initialize();
+      } catch (_) {
+        // The dynamic connection-code path remains available when the local
+        // encrypted trust store cannot be opened.
+      }
+    }
     await _settings.load();
     await _history.load();
     final availability = _hostAvailability;
@@ -92,6 +103,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       initialQuality: _settings.defaultQuality,
       initialVideoPolicy: _settings.defaultVideoPolicy,
       initialClipboardMode: _settings.clipboardSyncMode,
+      initialTrustedDevices: _trustedDevices,
     );
     _remoteViewer = RemoteViewerCoordinator(session: _controllerSession);
     if (_capabilities.canHost) {
@@ -101,6 +113,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         initialQuality: _settings.defaultQuality,
         initialVideoPolicy: _settings.defaultVideoPolicy,
         initialClipboardMode: _settings.clipboardSyncMode,
+        initialTrustedDevices: _trustedDevices,
       );
       _hostAvailability = HostAvailabilityController(
         session: _hostSession!,
@@ -115,6 +128,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         hostAvailability: _hostAvailability,
         discoveryService: _discovery,
         identity: _identity,
+        trustedDevices: _trustedDevices,
         settings: _settings,
         onOpenRemoteDesktop: _openRemoteDesktop,
       ),
@@ -272,6 +286,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _hostSession?.dispose();
     _controllerSession.dispose();
     _settings.removeListener(_handleSettingsChanged);
+    _trustedDevices.dispose();
     _identity.dispose();
     _settings.dispose();
     super.dispose();

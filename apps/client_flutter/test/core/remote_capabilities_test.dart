@@ -117,6 +117,36 @@ void main() {
     expect(activeContentGeometryVersion(const []), 0);
   });
 
+  test(
+    'trusted authentication is advertised only as a complete capability set',
+    () {
+      final capabilities = buildRemoteClientCapabilities(
+        role: RemoteRole.host,
+        platform: 'windows',
+        clipboardSupported: false,
+        explicitFileTransferSupported: false,
+        trustedDeviceAuthenticationSupported: true,
+      );
+
+      expect(
+        capabilities,
+        containsAll(const [
+          deviceIdentityV1Capability,
+          trustedDeviceAuthV1Capability,
+          signedWebRtcBindingV1Capability,
+          trustLeaseRenewalV1Capability,
+        ]),
+      );
+      expect(supportsTrustedDeviceAuthentication(capabilities), isTrue);
+      expect(
+        supportsTrustedDeviceAuthentication(const [
+          trustedDeviceAuthV1Capability,
+        ]),
+        isFalse,
+      );
+    },
+  );
+
   test('file clipboard requires clipboard and explicit transfer support', () {
     final capabilities = buildRemoteClientCapabilities(
       role: RemoteRole.host,

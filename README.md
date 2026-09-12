@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 启动并连接信令服务后自动进入可连接状态。每台客户端会生成不可编辑的安装级机器码；文本剪贴板和 Mac/Windows/iPad 显式文件传输已接入。桌面文件复制粘贴已改为统一的 `Offer → PasteIntent → DestinationLease → 显式传输 → Commit` 事务。会话具有稳定 `sessionId`，本地历史使用 SQLite 分页并以 AES-GCM 加密敏感元数据；远程画面从设备页拆为独立工作区。Windows MSVC 与三端物理验收仍未完成。
+> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 启动并连接信令服务后自动进入可连接状态。每台客户端会生成不可编辑的安装级机器码；文本剪贴板和 Mac/Windows/iPad 显式文件传输已接入。桌面文件复制粘贴已改为统一的 `Offer → PasteIntent → DestinationLease → 显式传输 → Commit` 事务。会话具有稳定 `sessionId`，本地历史使用 SQLite 分页并以 AES-GCM 加密敏感元数据；远程画面从设备页拆为独立工作区。控制端现以 `stream + trackId + generation` 原子绑定远端视频并使用有界首帧门禁，Windows MSVC 与三端物理验收仍未完成。
 
 ## 项目定位
 
@@ -214,7 +214,7 @@ flutter run -d macos
 flutter run -d <ipad-device-id>
 ```
 
-桌面独立原生窗口预留 Flutter 同一 isolate windowing 宿主；未启用时自动降级为应用内全屏工作区。macOS 保留已经过真机验证的独立窗口。Windows 固定使用主 Flutter View 内的持久视频/输入 Viewport：应用启动后预先注册并挂载同一个 WebRTC Texture，Viewer Chrome、工具栏和加载遮罩只在打开远程桌面时挂载；打开、关闭和全屏不再创建 Renderer 或重新绑定媒体 Track，避免把主窗口注册的 Texture 挂载到不兼容的第二 View。媒体会话只持有远端 Stream，展示控制器独立持有 Renderer，并以 `surfaceReady → binding → waitingFirstFrame → visible` 状态机提交首帧。项目基线 Flutter 3.47 stable 当前将 windowing 开关标记为 `Unavailable`，不要切换现有稳定 SDK。若要继续验证 macOS 原生窗口，应另外安装 Flutter main 实验 SDK 并在该 SDK 中执行：
+桌面独立原生窗口预留 Flutter 同一 isolate windowing 宿主；未启用时自动降级为应用内全屏工作区。macOS 保留已经过真机验证的独立窗口。Windows 固定使用主 Flutter View 内的持久视频/输入 Viewport：应用启动后预先注册并挂载同一个 WebRTC Texture，Viewer Chrome、工具栏和加载遮罩只在打开远程桌面时挂载；打开、关闭和全屏不再创建 Renderer 或重建媒体 Track，避免把主窗口注册的 Texture 挂载到不兼容的第二 View。媒体会话发布不可变的 `RemoteVideoBinding(stream, trackId, generation)`，展示控制器独立持有 Renderer，并以 `surfaceReady → binding → waitingFirstFrame → ready/visible` 状态机提交首帧。Dart 和原生插件必须绑定 `RTCPeerConnection.onTrack` 提供的真实视频轨道 ID；Renderer、Stream 或 Track 不存在时原生层返回失败，三秒内无可显示首帧则进入可重试失败态，禁止无限显示加载遮罩。“修复当前画面与控制”只验证当前绑定并在媒体停滞时请求关键帧，健康 Texture 不得先解绑。项目基线 Flutter 3.47 stable 当前将 windowing 开关标记为 `Unavailable`，不要切换现有稳定 SDK。若要继续验证 macOS 原生窗口，应另外安装 Flutter main 实验 SDK 并在该 SDK 中执行：
 
 ```bash
 <flutter-main>/bin/flutter config --enable-windowing
@@ -226,7 +226,7 @@ cd apps/client_flutter
 
 Mac/Windows 启动并连接信令服务后会自动上线并生成连接码；“在线等待”阶段只注册信令并发布 DNS-SD，不采集屏幕。设备页同时展示“允许远程访问”和“控制其他设备”，两个会话生命周期彼此独立，不再因为切换页面或操作方向销毁另一侧状态。先在被控端完成系统权限设置，iPad 或桌面控制端的“附近设备”会显示可连接设备，点击后只需输入相同六位连接码。未过期的正确连接码验证成功后才开始采集并建立会话，不再需要被控端二次允许。一段远程会话结束后，控制端清空已用连接码，被控端自动注册新的单次连接码并恢复等待。安全设置仍提供“允许接收远程连接”总开关，但它是紧急离线开关，不再承担日常角色切换。如果网络禁止 mDNS，仍可使用手动信令地址。macOS 的屏幕录制和事件注入权限必须由本机用户在系统设置中授予；未授权时会话降级为仅观看。当前连接码信令只用于开发环境，不可暴露到公网。
 
-等待连接期间，Java 信令服务生成六位连接码、租约 ID、递增 generation 和五分钟过期时间。服务端定时原子轮换过期未消费的连接码并通过 `invitation-updated` 主动推送；客户端倒计时只用于显示，连接旧服务时才保留本地刷新降级。用户仍可手动刷新。连接码一经消费立即标记失效，活动会话期间禁止刷新，断开后自动注册新码。机器码是本机公开标识，不是密码或媒体密钥；当前版本保存在应用数据中，卸载并清除应用数据后会重新生成。
+等待连接期间，Java 信令服务生成六位连接码、租约 ID、递增 generation 和五分钟过期时间。服务端定时原子轮换过期未消费的连接码并通过 `invitation-updated` 主动推送；客户端倒计时只用于显示，连接旧服务时才保留本地刷新降级。用户仍可手动刷新。连接码一经消费立即标记失效，活动会话期间禁止刷新，断开后自动注册新码。可信设备另使用从平台受保护根公钥派生的机器码 v2；机器码只是公开路由标识，完整根公钥指纹才是认证依据。动态连接码完整保留为首次配对、信任过期和恢复入口，可信失败不会自动降级。
 
 ### iPad 远程输入
 
@@ -348,9 +348,9 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、窗口级全屏；桌面DNS-SD、统一跨平台切屏事务、可靠输入FIFO与无状态motion；macOS/Windows文本剪贴板；Mac/Windows/iPad显式文件通道和传输中心；桌面文件`Offer/PasteIntent/DestinationLease/Commit`事务；稳定`sessionId`与领域事件；SQLite十条分页、AES-GCM敏感元数据和文件传输审计；分辨率/帧率/码率独立策略；macOS同一isolate原生窗口宿主、Windows主View持久Texture展示面和媒体/展示生命周期分离；`analyze`零告警、221项测试通过且1项按设计跳过，macOS/iOS Debug构建成功 | 基线Flutter stable尚未开放windowing，OS独立窗口需单独main SDK或自有原生宿主验证；Windows MSVC构建、Windows打开/关闭远程桌面30次、Windows/iPad各30次主副屏往返和三端文件/剪贴板验收；20 GB、磁盘满、输入P95与应用重启后续传；真正并列多屏仍由`multi-display-stream-v1`门禁关闭 |
-| Rust | `fmt`、Clippy；27个workspace单测；传输状态机、限额、Manifest/路径、恢复位图、SHA-256、WebRTC背压抽象与任务C ABI | 桌面MVP磁盘数据泵仍在Dart应用服务；下沉Rust/原生层和发布打包待接入 |
-| Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、服务端定时轮换与主动推送、lease/generation 原子更新、邀请/来源两级限流、`retryAfter`；无数据库的注册表定向测试通过 | 本机未启动PostgreSQL时全量集成测试不可运行；可信身份、设备注册、Redis分布式限流、生产会话票据和WSS尚未实现 |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、窗口级全屏；桌面DNS-SD、统一跨平台切屏事务、可靠输入FIFO与无状态motion；macOS/Windows文本剪贴板；Mac/Windows/iPad显式文件通道和传输中心；桌面文件`Offer/PasteIntent/DestinationLease/Commit`事务；稳定`sessionId`与领域事件；SQLite十条分页、AES-GCM敏感元数据和文件传输审计；分辨率/帧率/码率独立策略；macOS同一isolate原生窗口宿主、Windows主View持久Texture展示面和媒体/展示生命周期分离；真实Track ID绑定、原生绑定确认、有界首帧门禁和非破坏修复；平台受保护设备身份、SAS配对、可信直连/续期/撤销；`analyze`零告警、232项测试通过且1项按设计跳过，macOS/iOS Debug构建成功 | 基线Flutter stable尚未开放windowing，OS独立窗口需单独main SDK或自有原生宿主验证；Windows MSVC构建、Windows打开/关闭远程桌面30次、Windows/iPad各30次主副屏往返和三端文件/剪贴板验收；可信认证三端真机验收；20 GB、磁盘满、输入P95与应用重启后续传；真正并列多屏仍由`multi-display-stream-v1`门禁关闭 |
+| Rust | `fmt`、Clippy；31个workspace单测；传输状态机、限额、Manifest/路径、恢复位图、SHA-256、WebRTC背压抽象与任务C ABI；P-256可信授权、签名信封、防重放、机器码v2与安全C ABI | 桌面MVP磁盘数据泵仍在Dart应用服务；下沉Rust/原生层和发布打包待接入 |
+| Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、服务端定时轮换与主动推送、lease/generation 原子更新、邀请/来源两级限流、`retryAfter`；可信机器码临时路由与跨认证方式单控制端仲裁；无数据库的注册表定向测试通过 | 本机未启动PostgreSQL时全量集成测试不可运行；可信路由仍为单JVM内存实现，Redis分布式路由/限流、生产会话票据和WSS尚未实现 |
 | Protobuf | v1基础消息、剪贴板/文件传输协议、显式能力协商和旧客户端降级；Buf lint、Java/Rust/Dart生成和编译 | 平台互操作、模糊测试和breaking基线待增加 |
 | Infrastructure | PostgreSQL、Redis、coturn Compose 均健康 | 当前仅本地开发配置；生产密钥、TLS、高可用尚未配置 |
 
@@ -364,6 +364,7 @@ flutter build ios --simulator --debug
 - [局域网发现与跨平台适配](./docs/局域网发现与跨平台适配.md)
 - [Windows 被控端首轮验收](./docs/Windows被控端验收.md)
 - [文件与剪贴板传输协议](./docs/文件与剪贴板传输协议.md)
+- [可信设备认证](./docs/可信设备认证.md)
 
 ## 工程复现方式
 
@@ -416,4 +417,4 @@ flutter build ios --simulator --debug
 
 ## 当前里程碑
 
-当前并行推进 **M1 Apple 稳定性验收** 与 **M1B Windows 双向原型**。Windows控制端链路已进入真机回归；被控端首轮单主屏、桌面端直接IME、桌面双工DNS-SD、Windows单一Texture几何和原地会话修复代码已完成。下一门禁是在Windows上完成MSVC Debug构建，并验证Windows→Mac副屏画面/九宫格、Mac→Windows单屏/拼音、局域网互相发现、会话修复、断线释放和30分钟稳定性。单屏闭环通过后，再实现Windows多显示器`replaceTrack()`事务。
+当前并行推进 **M1 Apple 稳定性验收** 与 **M1B Windows 双向原型**。Windows控制端链路已进入真机回归；被控端首轮单主屏、桌面端直接IME、桌面双工DNS-SD、Windows单一Texture几何、精确视频轨道绑定和非破坏式会话修复代码已完成。下一门禁是在Windows上完成MSVC Debug构建，并验证打开远程桌面三秒内首帧可见、失败可重试且不无限黑屏，再验证Windows→Mac副屏画面/九宫格、Mac→Windows单屏/拼音、局域网互相发现、断线释放和30分钟稳定性。单屏闭环通过后，再实现Windows多显示器`replaceTrack()`事务。

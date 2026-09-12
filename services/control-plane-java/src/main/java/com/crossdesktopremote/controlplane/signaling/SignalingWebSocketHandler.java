@@ -31,18 +31,31 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			"hangup",
 			"offer",
 			"rotate-invitation",
-			"reject");
+			"reject",
+			"trusted-auth-start",
+			"trusted-auth-challenge",
+			"trusted-auth-response",
+			"trusted-offer",
+			"trusted-answer",
+			"trusted-renewal");
 	private static final String ROOM_ATTRIBUTE = "crossdesktop.room";
 	private static final String ROLE_ATTRIBUTE = "crossdesktop.role";
 	private static final String PLATFORM_ATTRIBUTE = "crossdesktop.platform";
 	private static final String DEVICE_ID_ATTRIBUTE = "crossdesktop.device-id";
 	private static final String CAPABILITIES_ATTRIBUTE = "crossdesktop.capabilities";
+	private static final String TRUSTED_ROUTE_ATTRIBUTE = "crossdesktop.trusted-route";
+	private static final String TRUSTED_MACHINE_CODE_ATTRIBUTE = "crossdesktop.trusted-machine-code";
 
 	private final SignalingRoomRegistry rooms;
+	private final TrustedRouteRegistry trustedRoutes;
 	private final ObjectMapper objectMapper;
 
-	SignalingWebSocketHandler(SignalingRoomRegistry rooms, ObjectMapper objectMapper) {
+	SignalingWebSocketHandler(
+			SignalingRoomRegistry rooms,
+			TrustedRouteRegistry trustedRoutes,
+			ObjectMapper objectMapper) {
 		this.rooms = rooms;
+		this.trustedRoutes = trustedRoutes;
 		this.objectMapper = objectMapper;
 	}
 
@@ -56,6 +69,10 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 		var query = UriComponentsBuilder.fromUri(requestUri).build().getQueryParams();
 		var roomCode = query.getFirst("room");
+		var rawTrustedMachineCode = query.getFirst("trustedMachineCode");
+		var rawTrustedTarget = query.getFirst("trustedTarget");
+		var trustedMachineCode = normalizedMachineCode(rawTrustedMachineCode);
+		var trustedTarget = normalizedMachineCode(rawTrustedTarget);
 		var role = SignalingRole.parse(query.getFirst("role"));
 		var platform = normalizedPlatform(query.getFirst("platform"));
 		var deviceId = normalizedDeviceId(query.getFirst("deviceId"), session.getId());
@@ -65,14 +82,39 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		var legacyCapabilities = query.getFirst("capabilities");
 		if (StringUtils.hasText(legacyCapabilities)) capabilityValues.add(legacyCapabilities);
 		var clientCapabilities = normalizedCapabilities(capabilityValues);
-		if (role.isEmpty() ||
-				(role.get() == SignalingRole.CONTROLLER && !StringUtils.hasText(roomCode))) {
+		var trustedController = role.isPresent()
+				&& role.get() == SignalingRole.CONTROLLER
+				&& StringUtils.hasText(trustedTarget);
+		if ((StringUtils.hasText(rawTrustedMachineCode) && !StringUtils.hasText(trustedMachineCode))
+				|| (StringUtils.hasText(rawTrustedTarget) && !StringUtils.hasText(trustedTarget))) {
+			session.close(CloseStatus.BAD_DATA.withReason("TRUSTED_MACHINE_CODE_INVALID"));
+			return;
+		}
+		if (role.isEmpty() || (role.get() == SignalingRole.CONTROLLER
+				&& !StringUtils.hasText(roomCode) && !trustedController)) {
 			session.close(CloseStatus.BAD_DATA.withReason("Invalid room or role"));
+			return;
+		}
+		if (trustedController && StringUtils.hasText(roomCode)) {
+			session.close(CloseStatus.BAD_DATA.withReason("Choose one authentication mode"));
 			return;
 		}
 
 		SignalingRoomRegistry.HostInvitation invitation = null;
-		if (role.get() == SignalingRole.HOST && !StringUtils.hasText(roomCode)) {
+		TrustedRouteRegistry.TrustedRoute trustedRoute = null;
+		if (trustedController) {
+			if (!supportsTrustedAuthentication(clientCapabilities)) {
+				session.close(CloseStatus.POLICY_VIOLATION.withReason("TRUSTED_PROTOCOL_REQUIRED"));
+				return;
+			}
+			trustedRoute = trustedRoutes.joinController(trustedTarget, session).orElse(null);
+			if (trustedRoute == null) {
+				session.close(CloseStatus.POLICY_VIOLATION.withReason("TRUSTED_TARGET_UNAVAILABLE"));
+				return;
+			}
+			trustedRoute.host().getAttributes().put(TRUSTED_ROUTE_ATTRIBUTE, trustedRoute.sessionId());
+			session.getAttributes().put(TRUSTED_ROUTE_ATTRIBUTE, trustedRoute.sessionId());
+		} else if (role.get() == SignalingRole.HOST && !StringUtils.hasText(roomCode)) {
 			invitation = rooms.createHostInvitation(session);
 			roomCode = invitation.roomCode();
 		} else {
@@ -84,21 +126,35 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			}
 		}
 
-		session.getAttributes().put(ROOM_ATTRIBUTE, roomCode);
+		if (roomCode != null) session.getAttributes().put(ROOM_ATTRIBUTE, roomCode);
 		session.getAttributes().put(ROLE_ATTRIBUTE, role.get());
 		session.getAttributes().put(PLATFORM_ATTRIBUTE, platform);
 		session.getAttributes().put(DEVICE_ID_ATTRIBUTE, deviceId);
 		session.getAttributes().put(CAPABILITIES_ATTRIBUTE, clientCapabilities);
+		if (StringUtils.hasText(trustedMachineCode)) {
+			session.getAttributes().put(TRUSTED_MACHINE_CODE_ATTRIBUTE, trustedMachineCode);
+		}
+		if (role.get() == SignalingRole.HOST && StringUtils.hasText(trustedMachineCode)
+				&& supportsTrustedAuthentication(clientCapabilities)) {
+			if (!trustedRoutes.registerHost(trustedMachineCode, session)) {
+				rooms.leave(roomCode, role.get(), session);
+				session.close(CloseStatus.POLICY_VIOLATION.withReason("TRUSTED_MACHINE_CODE_OCCUPIED"));
+				return;
+			}
+		}
 		var ready = new HashMap<String, Object>();
 		ready.put("type", "ready");
 		ready.put("protocolVersion", 2);
 		ready.put("capabilities", Set.of(
 				"server-invitations",
 				"invitation-rotation",
-				"server-invitation-push"));
+				"server-invitation-push",
+				"trusted-routing-v1"));
 		ready.put("serverTimeUnixMillis", System.currentTimeMillis());
 		ready.put("clientAddress", clientAddress(session));
-		ready.put("room", roomCode);
+		if (roomCode != null) ready.put("room", roomCode);
+		ready.put("authenticationMode", trustedController ? "trusted" : "connection-code");
+		if (trustedRoute != null) ready.put("routeSessionId", trustedRoute.sessionId());
 		ready.put("role", role.get().wireName());
 		if (invitation != null) {
 			ready.put("invitationLeaseId", invitation.leaseId());
@@ -111,11 +167,17 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 					.ifPresent(value -> ready.put("invitationExpiresInMillis", value));
 		}
 		sendJson(session, ready);
-		var joinedRoomCode = roomCode;
-		rooms.peer(joinedRoomCode, role.get()).ifPresent(peer -> {
-			sendJsonQuietly(peer, peerJoinedPayload(role.get(), session));
-			sendJsonQuietly(session, peerJoinedPayload(role.get().peerRole(), peer));
-		});
+		if (trustedRoute != null) {
+			var peer = trustedRoute.host();
+			sendJsonQuietly(peer, peerJoinedPayload(role.get(), session, trustedRoute.sessionId(), true));
+			sendJsonQuietly(session, peerJoinedPayload(role.get().peerRole(), peer, trustedRoute.sessionId(), true));
+		} else {
+			var joinedRoomCode = roomCode;
+			rooms.peer(joinedRoomCode, role.get()).ifPresent(peer -> {
+				sendJsonQuietly(peer, peerJoinedPayload(role.get(), session, null, false));
+				sendJsonQuietly(session, peerJoinedPayload(role.get().peerRole(), peer, null, false));
+			});
+		}
 	}
 
 	@Override
@@ -134,7 +196,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 		var roomCode = roomCode(session);
 		var role = role(session);
-		if (roomCode == null || role == null) {
+		var trustedRoute = trustedRoutes.route(session);
+		if ((roomCode == null && trustedRoute.isEmpty()) || role == null) {
 			session.close(CloseStatus.POLICY_VIOLATION);
 			return;
 		}
@@ -166,7 +229,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			return;
 		}
 
-		var peer = rooms.peer(roomCode, role);
+		var peer = trustedRoutes.peer(session);
+		if (peer.isEmpty() && roomCode != null) peer = rooms.peer(roomCode, role);
 		if (peer.isEmpty()) {
 			sendJson(session, Map.of("type", "peer-unavailable"));
 			return;
@@ -191,6 +255,11 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 	@Override
 	public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
+		var trustedPeer = trustedRoutes.leave(session);
+		trustedPeer.ifPresent(value -> {
+			value.getAttributes().remove(TRUSTED_ROUTE_ATTRIBUTE);
+			sendJsonQuietly(value, Map.of("type", "peer-left"));
+		});
 		var roomCode = roomCode(session);
 		var role = role(session);
 		if (roomCode == null || role == null) {
@@ -252,7 +321,11 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		return (SignalingRole) session.getAttributes().get(ROLE_ATTRIBUTE);
 	}
 
-	private Map<String, Object> peerJoinedPayload(SignalingRole role, WebSocketSession peer) {
+	private Map<String, Object> peerJoinedPayload(
+			SignalingRole role,
+			WebSocketSession peer,
+			String routeSessionId,
+			boolean trusted) {
 		var payload = new HashMap<String, Object>();
 		payload.put("type", "peer-joined");
 		payload.put("role", role.wireName());
@@ -260,7 +333,23 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		payload.put("peerDeviceId", peer.getAttributes().getOrDefault(DEVICE_ID_ATTRIBUTE, "legacy-" + peer.getId()));
 		payload.put("peerCapabilities", peer.getAttributes().getOrDefault(CAPABILITIES_ATTRIBUTE, Set.of()));
 		payload.put("peerAddress", clientAddress(peer));
+		payload.put("authenticationMode", trusted ? "trusted" : "connection-code");
+		if (routeSessionId != null) payload.put("routeSessionId", routeSessionId);
 		return payload;
+	}
+
+	private boolean supportsTrustedAuthentication(Set<String> capabilities) {
+		return capabilities.contains("device-identity-v1")
+				&& capabilities.contains("trusted-device-auth-v1")
+				&& capabilities.contains("signed-webrtc-binding-v1");
+	}
+
+	private String normalizedMachineCode(String value) {
+		if (!StringUtils.hasText(value)) return "";
+		var normalized = value.trim().toUpperCase();
+		return normalized.matches("CDR2(?:-[0-9A-HJKMNP-TV-Z]{1,4}){4,8}")
+				? normalized
+				: "";
 	}
 
 	private String clientAddress(WebSocketSession session) {

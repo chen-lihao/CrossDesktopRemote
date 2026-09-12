@@ -13,6 +13,7 @@ fn main() {
         "input.proto",
         "session.proto",
         "signaling.proto",
+        "trust.proto",
     ]
     .map(|name| proto_root.join("crossdesktop/v1").join(name));
 

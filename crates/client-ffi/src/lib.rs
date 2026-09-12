@@ -1,3 +1,4 @@
+mod security;
 mod transfer;
 
 use session_core::core_build_info;
@@ -21,7 +22,8 @@ pub extern "C" fn cdr_core_feature_flags() -> u64 {
 mod tests {
     use session_core::{
         FEATURE_CLIPBOARD_PROTOCOL_V1, FEATURE_FILE_TRANSFER_PROTOCOL_V1, FEATURE_NARROW_C_ABI,
-        FEATURE_PROTOBUF_V1, FEATURE_WEBRTC_TRANSFER_TRANSPORT,
+        FEATURE_PROTOBUF_V1, FEATURE_SIGNED_WEBRTC_BINDING_V1, FEATURE_TRUST_LEASE_RENEWAL_V1,
+        FEATURE_TRUSTED_DEVICE_AUTH_V1, FEATURE_WEBRTC_TRANSFER_TRANSPORT,
     };
 
     use super::*;
@@ -37,6 +39,9 @@ mod tests {
                 | FEATURE_CLIPBOARD_PROTOCOL_V1
                 | FEATURE_FILE_TRANSFER_PROTOCOL_V1
                 | FEATURE_WEBRTC_TRANSFER_TRANSPORT
+                | FEATURE_TRUSTED_DEVICE_AUTH_V1
+                | FEATURE_SIGNED_WEBRTC_BINDING_V1
+                | FEATURE_TRUST_LEASE_RENEWAL_V1
         );
     }
 }

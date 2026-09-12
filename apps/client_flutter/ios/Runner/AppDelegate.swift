@@ -7,6 +7,7 @@ import dnssd
   private var lanDiscoveryBridge: AppleLanDiscoveryBridge?
   private var remoteImeBridge: AppleRemoteImeBridge?
   private var fileTransferBridge: AppleFileTransferBridge?
+  private var deviceIdentityBridge: AppleDeviceIdentityBridge?
 
   override func application(
     _ application: UIApplication,
@@ -35,6 +36,13 @@ import dnssd
       forPlugin: "CrossDesktopRemoteFileTransfer"
     ) {
       fileTransferBridge = AppleFileTransferBridge(
+        binaryMessenger: registrar.messenger()
+      )
+    }
+    if let registrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "CrossDesktopRemoteDeviceIdentity"
+    ) {
+      deviceIdentityBridge = AppleDeviceIdentityBridge(
         binaryMessenger: registrar.messenger()
       )
     }

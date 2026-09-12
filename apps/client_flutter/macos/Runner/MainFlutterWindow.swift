@@ -246,6 +246,7 @@ class MainFlutterWindow: NSWindow {
   private var clipboardBridge: AppleClipboardBridge?
   private var filePasteTargetBridge: AppleFilePasteTargetBridge?
   private var lanDiscoveryBridge: AppleLanDiscoveryBridge?
+  private var deviceIdentityBridge: AppleDeviceIdentityBridge?
   private var pressedMouseButtons: Set<String> = []
   private let syntheticKeyboard = CrossDesktopRemoteSyntheticKeyboard()
   private var captureColorDiagnostics: [String: Any] = [:]
@@ -298,6 +299,9 @@ class MainFlutterWindow: NSWindow {
       binaryMessenger: flutterViewController.engine.binaryMessenger
     )
     lanDiscoveryBridge = AppleLanDiscoveryBridge(
+      binaryMessenger: flutterViewController.engine.binaryMessenger
+    )
+    deviceIdentityBridge = AppleDeviceIdentityBridge(
       binaryMessenger: flutterViewController.engine.binaryMessenger
     )
 

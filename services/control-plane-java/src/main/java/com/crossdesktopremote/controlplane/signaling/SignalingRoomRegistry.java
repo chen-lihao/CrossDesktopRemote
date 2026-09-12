@@ -14,8 +14,10 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.WebSocketSession;
 
@@ -37,9 +39,12 @@ final class SignalingRoomRegistry {
 	private final long attemptWindowMillis;
 	private final int maxInvitationFailedAttempts;
 	private final int maxSourceFailedAttempts;
+	private final HostSessionArbiter arbiter;
 
-	SignalingRoomRegistry() {
+	@Autowired
+	SignalingRoomRegistry(HostSessionArbiter arbiter) {
 		this(
+				arbiter,
 				System::currentTimeMillis,
 				DEFAULT_ROOM_TTL,
 				DEFAULT_ATTEMPT_WINDOW,
@@ -48,11 +53,13 @@ final class SignalingRoomRegistry {
 	}
 
 	SignalingRoomRegistry(
+			HostSessionArbiter arbiter,
 			LongSupplier currentTimeMillis,
 			Duration roomTtl,
 			Duration attemptWindow,
 			int maxInvitationFailedAttempts,
 			int maxSourceFailedAttempts) {
+		this.arbiter = arbiter;
 		this.currentTimeMillis = currentTimeMillis;
 		this.roomTtlMillis = roomTtl.toMillis();
 		this.attemptWindowMillis = attemptWindow.toMillis();
@@ -187,6 +194,7 @@ final class SignalingRoomRegistry {
 	}
 
 	void leave(String roomCode, SignalingRole role, WebSocketSession session) {
+		arbiter.release(session);
 		rooms.computeIfPresent(roomCode, (ignored, room) -> {
 			if (role == SignalingRole.HOST && room.contains(role, session)) {
 				return null;
@@ -231,7 +239,13 @@ final class SignalingRoomRegistry {
 			return JoinResult.INVALID_ROOM;
 		}
 
-		var result = room.joinController(session);
+		var result = room.joinController(
+				session,
+				host -> arbiter.tryAcquire(
+						host,
+						session,
+						HostSessionArbiter.AuthenticationMode.CONNECTION_CODE));
+		if (result != JoinResult.JOINED) arbiter.release(session);
 		if (result == JoinResult.JOINED) {
 			invitationFailedAttempts.remove(invitationKey);
 		}
@@ -300,7 +314,8 @@ final class SignalingRoomRegistry {
 		ROLE_OCCUPIED,
 		CODE_CONSUMED,
 		RATE_LIMITED_INVITATION,
-		RATE_LIMITED_SOURCE
+		RATE_LIMITED_SOURCE,
+		HOST_BUSY
 	}
 
 	private static final class Room {
@@ -321,7 +336,9 @@ final class SignalingRoomRegistry {
 			return new Room(host, createdAtMillis, generation);
 		}
 
-		synchronized JoinResult joinController(WebSocketSession session) {
+		synchronized JoinResult joinController(
+				WebSocketSession session,
+				Predicate<WebSocketSession> admission) {
 			if (invitationInvalidated) {
 				return JoinResult.INVALID_ROOM;
 			}
@@ -330,6 +347,10 @@ final class SignalingRoomRegistry {
 			}
 			if (!hasOpenHost()) {
 				return JoinResult.INVALID_ROOM;
+			}
+			var host = participants.get(SignalingRole.HOST);
+			if (host == null || !admission.test(host)) {
+				return JoinResult.HOST_BUSY;
 			}
 			controllerCodeConsumed = true;
 			participants.put(SignalingRole.CONTROLLER, session);

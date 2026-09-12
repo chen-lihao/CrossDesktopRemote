@@ -16,7 +16,7 @@ class SignalingRoomRegistryTests {
 	@Test
 	void createsAndAtomicallyRotatesAServerOwnedInvitation() {
 		var now = new AtomicLong(1_000);
-		var registry = new SignalingRoomRegistry(now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
+		var registry = new SignalingRoomRegistry(new HostSessionArbiter(), now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
 		var host = openSession("host", "192.168.1.10");
 		var controller = openSession("controller", "192.168.1.20");
 
@@ -36,7 +36,7 @@ class SignalingRoomRegistryTests {
 
 	@Test
 	void refusesToRotateAnInvitationAfterAControllerConsumesIt() {
-		var registry = new SignalingRoomRegistry();
+		var registry = new SignalingRoomRegistry(new HostSessionArbiter());
 		var host = openSession("host", "192.168.1.10");
 		var controller = openSession("controller", "192.168.1.20");
 		var invitation = registry.createHostInvitation(host);
@@ -50,7 +50,7 @@ class SignalingRoomRegistryTests {
 
 	@Test
 	void rejectsAStaleInvitationLeaseRotation() {
-		var registry = new SignalingRoomRegistry();
+		var registry = new SignalingRoomRegistry(new HostSessionArbiter());
 		var host = openSession("host", "192.168.1.10");
 		var invitation = registry.createHostInvitation(host);
 
@@ -64,7 +64,7 @@ class SignalingRoomRegistryTests {
 
 	@Test
 	void acceptsLeaseBoundRotationFromClientsWithoutAGenerationField() {
-		var registry = new SignalingRoomRegistry();
+		var registry = new SignalingRoomRegistry(new HostSessionArbiter());
 		var host = openSession("host", "192.168.1.10");
 		var invitation = registry.createHostInvitation(host);
 
@@ -78,7 +78,7 @@ class SignalingRoomRegistryTests {
 	@Test
 	void serverRotatesAnExpiredWaitingInvitationAndKeepsTheHostSession() {
 		var now = new AtomicLong(1_000);
-		var registry = new SignalingRoomRegistry(now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
+		var registry = new SignalingRoomRegistry(new HostSessionArbiter(), now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
 		var host = openSession("host", "192.168.1.10");
 		var controller = openSession("controller", "192.168.1.20");
 		var initial = registry.createHostInvitation(host);
@@ -99,7 +99,7 @@ class SignalingRoomRegistryTests {
 	@Test
 	void serverDoesNotRotateAConsumedInvitation() {
 		var now = new AtomicLong(1_000);
-		var registry = new SignalingRoomRegistry(now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
+		var registry = new SignalingRoomRegistry(new HostSessionArbiter(), now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
 		var host = openSession("host", "192.168.1.10");
 		var controller = openSession("controller", "192.168.1.20");
 		var invitation = registry.createHostInvitation(host);
@@ -115,7 +115,7 @@ class SignalingRoomRegistryTests {
 	@Test
 	void expiresAHostRegistrationAndConsumesAValidCodeOnce() {
 		var now = new AtomicLong(1_000);
-		var registry = new SignalingRoomRegistry(now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
+		var registry = new SignalingRoomRegistry(new HostSessionArbiter(), now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
 		var host = openSession("host", "192.168.1.10");
 		var controller = openSession("controller", "192.168.1.20");
 
@@ -146,7 +146,7 @@ class SignalingRoomRegistryTests {
 	@Test
 	void rateLimitsRepeatedInvalidControllerCodesPerInvitation() {
 		var now = new AtomicLong(1_000);
-		var registry = new SignalingRoomRegistry(now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
+		var registry = new SignalingRoomRegistry(new HostSessionArbiter(), now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 20);
 		var controller = openSession("controller", "192.168.1.30");
 
 		for (var attempt = 0; attempt < 5; attempt++) {
@@ -174,7 +174,7 @@ class SignalingRoomRegistryTests {
 	@Test
 	void rateLimitsCodeCyclingAcrossInvitationsPerSourceAddress() {
 		var now = new AtomicLong(1_000);
-		var registry = new SignalingRoomRegistry(now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 8);
+		var registry = new SignalingRoomRegistry(new HostSessionArbiter(), now::get, Duration.ofMinutes(5), Duration.ofMinutes(1), 5, 8);
 		var controller = openSession("controller", "192.168.1.31");
 
 		for (var attempt = 0; attempt < 8; attempt++) {

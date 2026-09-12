@@ -9,6 +9,9 @@ pub const FEATURE_PROTOBUF_V1: u64 = 1 << 1;
 pub const FEATURE_CLIPBOARD_PROTOCOL_V1: u64 = 1 << 2;
 pub const FEATURE_FILE_TRANSFER_PROTOCOL_V1: u64 = 1 << 3;
 pub const FEATURE_WEBRTC_TRANSFER_TRANSPORT: u64 = 1 << 4;
+pub const FEATURE_TRUSTED_DEVICE_AUTH_V1: u64 = 1 << 5;
+pub const FEATURE_SIGNED_WEBRTC_BINDING_V1: u64 = 1 << 6;
+pub const FEATURE_TRUST_LEASE_RENEWAL_V1: u64 = 1 << 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreBuildInfo {
@@ -25,7 +28,10 @@ pub const fn core_build_info() -> CoreBuildInfo {
             | FEATURE_PROTOBUF_V1
             | FEATURE_CLIPBOARD_PROTOCOL_V1
             | FEATURE_FILE_TRANSFER_PROTOCOL_V1
-            | FEATURE_WEBRTC_TRANSFER_TRANSPORT,
+            | FEATURE_WEBRTC_TRANSFER_TRANSPORT
+            | FEATURE_TRUSTED_DEVICE_AUTH_V1
+            | FEATURE_SIGNED_WEBRTC_BINDING_V1
+            | FEATURE_TRUST_LEASE_RENEWAL_V1,
     }
 }
 
@@ -57,6 +63,15 @@ pub struct NegotiatedDataCapabilities {
     pub legacy_peer: bool,
     pub clipboard: NegotiatedClipboardCapabilities,
     pub transfer: NegotiatedTransferCapabilities,
+    pub trusted_device: NegotiatedTrustedDeviceCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NegotiatedTrustedDeviceCapabilities {
+    pub enabled: bool,
+    pub protocol_version: Option<ProtocolVersion>,
+    pub signed_webrtc_binding: bool,
+    pub lease_renewal: bool,
 }
 
 /// Computes only mutually advertised features. A peer that predates the data
@@ -68,9 +83,41 @@ pub fn negotiate_data_capabilities(
     remote: &ClientCapabilities,
 ) -> NegotiatedDataCapabilities {
     NegotiatedDataCapabilities {
-        legacy_peer: remote.clipboard.is_none() && remote.transfer.is_none(),
+        legacy_peer: remote.clipboard.is_none()
+            && remote.transfer.is_none()
+            && remote.trusted_device.is_none(),
         clipboard: negotiate_clipboard(local, remote),
         transfer: negotiate_transfer(local, remote),
+        trusted_device: negotiate_trusted_device(local, remote),
+    }
+}
+
+fn negotiate_trusted_device(
+    local: &ClientCapabilities,
+    remote: &ClientCapabilities,
+) -> NegotiatedTrustedDeviceCapabilities {
+    let (Some(local), Some(remote)) = (&local.trusted_device, &remote.trusted_device) else {
+        return NegotiatedTrustedDeviceCapabilities::default();
+    };
+    let Some(protocol_version) = negotiate_version(
+        local.protocol_version.as_ref(),
+        remote.protocol_version.as_ref(),
+    ) else {
+        return NegotiatedTrustedDeviceCapabilities::default();
+    };
+    let enabled = local.supports_device_identity
+        && remote.supports_device_identity
+        && local.supports_trusted_device_auth
+        && remote.supports_trusted_device_auth
+        && local.supports_signed_webrtc_binding
+        && remote.supports_signed_webrtc_binding;
+    NegotiatedTrustedDeviceCapabilities {
+        enabled,
+        protocol_version: Some(protocol_version),
+        signed_webrtc_binding: enabled,
+        lease_renewal: enabled
+            && local.supports_trust_lease_renewal
+            && remote.supports_trust_lease_renewal,
     }
 }
 
@@ -195,7 +242,7 @@ fn negotiate_version(
 
 #[cfg(test)]
 mod tests {
-    use protocol::v1::{ClipboardCapabilities, TransferCapabilities};
+    use protocol::v1::{ClipboardCapabilities, TransferCapabilities, TrustedDeviceCapabilities};
 
     use super::*;
 
@@ -210,6 +257,9 @@ mod tests {
         assert_ne!(info.feature_flags & FEATURE_CLIPBOARD_PROTOCOL_V1, 0);
         assert_ne!(info.feature_flags & FEATURE_FILE_TRANSFER_PROTOCOL_V1, 0);
         assert_ne!(info.feature_flags & FEATURE_WEBRTC_TRANSFER_TRANSPORT, 0);
+        assert_ne!(info.feature_flags & FEATURE_TRUSTED_DEVICE_AUTH_V1, 0);
+        assert_ne!(info.feature_flags & FEATURE_SIGNED_WEBRTC_BINDING_V1, 0);
+        assert_ne!(info.feature_flags & FEATURE_TRUST_LEASE_RENEWAL_V1, 0);
     }
 
     #[test]
@@ -219,6 +269,7 @@ mod tests {
         assert!(negotiated.legacy_peer);
         assert!(!negotiated.clipboard.enabled);
         assert!(!negotiated.transfer.enabled);
+        assert!(!negotiated.trusted_device.enabled);
     }
 
     #[test]
@@ -248,6 +299,9 @@ mod tests {
         assert_eq!(negotiated.transfer.max_wire_fragment_bytes, 16 * 1024);
         assert_eq!(negotiated.transfer.max_in_flight_fragments, 4);
         assert!(negotiated.transfer.supports_resume);
+        assert!(negotiated.trusted_device.enabled);
+        assert!(negotiated.trusted_device.signed_webrtc_binding);
+        assert!(negotiated.trusted_device.lease_renewal);
     }
 
     #[test]
@@ -300,6 +354,13 @@ mod tests {
                 max_entries: 100,
                 supports_resume: true,
                 supports_sha256: true,
+            }),
+            trusted_device: Some(TrustedDeviceCapabilities {
+                protocol_version: Some(ProtocolVersion { major: 1, minor: 0 }),
+                supports_device_identity: true,
+                supports_trusted_device_auth: true,
+                supports_signed_webrtc_binding: true,
+                supports_trust_lease_renewal: true,
             }),
             ..Default::default()
         }

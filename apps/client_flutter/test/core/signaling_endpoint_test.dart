@@ -84,4 +84,41 @@ void main() {
       throwsFormatException,
     );
   });
+
+  test('builds a trusted route without a connection code', () {
+    final endpoint = buildSignalingUri(
+      serverUrl: 'ws://192.168.1.8:8080/ws/signaling',
+      roomCode: '',
+      role: RemoteRole.controller,
+      trustedMachineCode: 'CDR2-1234-5678-9ABC-DEFG-HJKM-NPQR',
+      trustedTargetMachineCode: 'CDR2-ZYXW-VTSR-QPNM-KJHG-FEDC-BA98',
+    );
+
+    expect(endpoint.queryParameters.containsKey('room'), isFalse);
+    expect(
+      endpoint.queryParameters['trustedTarget'],
+      'CDR2-ZYXW-VTSR-QPNM-KJHG-FEDC-BA98',
+    );
+  });
+
+  test('rejects ambiguous or malformed trusted routes', () {
+    expect(
+      () => buildSignalingUri(
+        serverUrl: 'ws://192.168.1.8:8080/ws/signaling',
+        roomCode: '123456',
+        role: RemoteRole.controller,
+        trustedTargetMachineCode: 'CDR2-ZYXW-VTSR-QPNM-KJHG-FEDC-BA98',
+      ),
+      throwsFormatException,
+    );
+    expect(
+      () => buildSignalingUri(
+        serverUrl: 'ws://192.168.1.8:8080/ws/signaling',
+        roomCode: '',
+        role: RemoteRole.controller,
+        trustedTargetMachineCode: 'not-a-machine-code',
+      ),
+      throwsFormatException,
+    );
+  });
 }

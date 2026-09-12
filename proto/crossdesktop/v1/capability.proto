@@ -3,6 +3,7 @@ syntax = "proto3";
 package crossdesktop.v1;
 
 import "crossdesktop/v1/clipboard.proto";
+import "crossdesktop/v1/common.proto";
 import "crossdesktop/v1/transfer.proto";
 
 option java_multiple_files = true;
@@ -49,6 +50,14 @@ message DisplayCapability {
   bool supports_multiple_displays = 4;
 }
 
+message TrustedDeviceCapabilities {
+  ProtocolVersion protocol_version = 1;
+  bool supports_device_identity = 2;
+  bool supports_trusted_device_auth = 3;
+  bool supports_signed_webrtc_binding = 4;
+  bool supports_trust_lease_renewal = 5;
+}
+
 message ClientCapabilities {
   Platform platform = 1;
   repeated DeviceRole roles = 2;
@@ -59,4 +68,5 @@ message ClientCapabilities {
   bool supports_file_resume = 7;
   ClipboardCapabilities clipboard = 8;
   TransferCapabilities transfer = 9;
+  TrustedDeviceCapabilities trusted_device = 10;
 }

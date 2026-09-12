@@ -5,6 +5,8 @@ import 'package:cross_desktop_remote/core/discovery/lan_discovery_service.dart';
 import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/network/lan_address_service.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
+import 'package:cross_desktop_remote/core/security/trusted_device_coordinator.dart';
+import 'package:cross_desktop_remote/core/security/trusted_device_models.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/remote/application/host_availability_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
@@ -21,6 +23,7 @@ class DevicesPage extends StatefulWidget {
     required this.hostAvailability,
     required this.discoveryService,
     required this.identity,
+    required this.trustedDevices,
     required this.settings,
     required this.onOpenRemoteDesktop,
     this.addressService = const LanAddressService(),
@@ -30,6 +33,7 @@ class DevicesPage extends StatefulWidget {
   final HostAvailabilityController? hostAvailability;
   final LanDiscoveryService discoveryService;
   final DeviceIdentityController identity;
+  final TrustedDeviceCoordinator trustedDevices;
   final AppSettingsController settings;
   final VoidCallback onOpenRemoteDesktop;
   final LanAddressService addressService;
@@ -325,6 +329,80 @@ class _DevicesPageState extends State<DevicesPage> {
 
   Future<void> _disconnectController() => _controllerSession.disconnect();
 
+  Future<void> _connectTrustedDevice(TrustedDeviceRecord record) async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    try {
+      await _controllerSession.connectTrusted(
+        serverUrl: _serverController.text,
+        host: record,
+      );
+    } catch (error) {
+      AppMessenger.show('可信连接失败：$error', level: AppMessageLevel.error);
+    }
+  }
+
+  Future<void> _startTrustedPairing() async {
+    try {
+      await _controllerSession.beginTrustedPairing();
+    } catch (error) {
+      AppMessenger.show('无法开始可信认证：$error', level: AppMessageLevel.error);
+    }
+  }
+
+  Future<void> _confirmTrustedPairing(RemoteSessionController session) async {
+    try {
+      await session.confirmTrustedPairing();
+    } catch (error) {
+      AppMessenger.show('可信认证失败：$error', level: AppMessageLevel.error);
+    }
+  }
+
+  Future<void> _revokeTrustedDevice(TrustedDeviceRecord record) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('撤销可信设备'),
+        content: Text('撤销后，${record.peerName} 必须重新使用连接码建立可信关系。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('撤销'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await widget.trustedDevices.revoke(record);
+    await Future.wait([
+      _controllerSession.enforceTrustedDevicePolicy(),
+      if (_hostSession != null) _hostSession!.enforceTrustedDevicePolicy(),
+    ]);
+    AppMessenger.show('已撤销 ${record.peerName}', level: AppMessageLevel.success);
+  }
+
+  Future<void> _setTrustedConnectionsPaused(bool paused) async {
+    try {
+      await widget.trustedDevices.setConnectionsPaused(paused);
+      if (paused) {
+        await Future.wait([
+          _controllerSession.enforceTrustedDevicePolicy(),
+          if (_hostSession != null) _hostSession!.enforceTrustedDevicePolicy(),
+        ]);
+      }
+      await _hostAvailability?.refreshRegistration();
+      AppMessenger.show(
+        paused ? '已暂停所有可信免码连接' : '已恢复可信免码连接',
+        level: AppMessageLevel.success,
+      );
+    } catch (error) {
+      AppMessenger.show('更新可信连接状态失败：$error', level: AppMessageLevel.error);
+    }
+  }
+
   Future<void> _disconnectIncomingSession() async {
     await _hostSession?.disconnect();
   }
@@ -472,7 +550,11 @@ class _DevicesPageState extends State<DevicesPage> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([_controllerSession, ?_hostAvailability]),
+      animation: Listenable.merge([
+        _controllerSession,
+        ?_hostAvailability,
+        widget.trustedDevices,
+      ]),
       builder: (context, _) {
         return CustomScrollView(
           slivers: [
@@ -507,6 +589,8 @@ class _DevicesPageState extends State<DevicesPage> {
                     constraints: const BoxConstraints(maxWidth: 1160),
                     child: Column(
                       children: [
+                        _buildTrustedDevicesCard(),
+                        const SizedBox(height: 16),
                         if (_hostAvailability != null) ...[
                           _buildHostConnectionCard(),
                           const SizedBox(height: 16),
@@ -532,6 +616,230 @@ class _DevicesPageState extends State<DevicesPage> {
         );
       },
     );
+  }
+
+  Widget _buildTrustedDevicesCard() {
+    final theme = Theme.of(context);
+    final trusted = widget.trustedDevices.devices;
+    final pairingSession = _hostSession?.trustedPairing != null
+        ? _hostSession!
+        : _controllerSession.trustedPairing != null
+        ? _controllerSession
+        : null;
+    final pairing = pairingSession?.trustedPairing;
+    final now = DateTime.now().toUtc();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.verified_user_outlined),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('可信设备', style: theme.textTheme.titleLarge),
+                      const SizedBox(height: 2),
+                      const Text('可信关系由两端设备密钥验证，不依赖当前信令服务器。'),
+                    ],
+                  ),
+                ),
+                if (_controllerSession.canStartTrustedPairing)
+                  FilledButton.tonalIcon(
+                    onPressed: _startTrustedPairing,
+                    icon: const Icon(Icons.add_moderator_outlined),
+                    label: const Text('信任当前设备'),
+                  ),
+                if (widget.trustedDevices.supported)
+                  Switch.adaptive(
+                    value: !widget.trustedDevices.connectionsPaused,
+                    onChanged: (enabled) =>
+                        _setTrustedConnectionsPaused(!enabled),
+                  ),
+              ],
+            ),
+            if (pairing != null) ...[
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.secondaryContainer,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(pairing.peerName, style: theme.textTheme.titleMedium),
+                    if (pairing.peerMachineCode.isNotEmpty)
+                      SelectableText(pairing.peerMachineCode),
+                    if (pairing.verificationCode != null) ...[
+                      const SizedBox(height: 12),
+                      Text('设备校验码', style: theme.textTheme.labelLarge),
+                      SelectableText(
+                        '${pairing.verificationCode!.substring(0, 3)} '
+                        '${pairing.verificationCode!.substring(3)}',
+                        style: theme.textTheme.headlineMedium,
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    Text(
+                      '授权范围：${_trustedPermissionLabel(pairing.permissions)}',
+                    ),
+                    if (pairing.message != null) ...[
+                      const SizedBox(height: 8),
+                      Text(pairing.message!),
+                    ],
+                    if (pairingSession?.role == RemoteRole.host &&
+                        pairing.phase == TrustedPairingPhase.verifyCode)
+                      ...[
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('允许控制键鼠'),
+                          value: pairing.permissions.contains(
+                            TrustedPermission.controlInput,
+                          ),
+                          onChanged: pairing.remoteConfirmed
+                              ? null
+                              : (value) => pairingSession!
+                                    .setTrustedPairingPermission(
+                                      TrustedPermission.controlInput,
+                                      value,
+                                    ),
+                        ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('允许同步剪贴板'),
+                          value:
+                              pairing.permissions.contains(
+                                TrustedPermission.readClipboard,
+                              ) &&
+                              pairing.permissions.contains(
+                                TrustedPermission.writeClipboard,
+                              ),
+                          onChanged: pairing.remoteConfirmed
+                              ? null
+                              : pairingSession!
+                                    .setTrustedPairingClipboardEnabled,
+                        ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('允许文件传输'),
+                          value: pairing.permissions.contains(
+                            TrustedPermission.transferFiles,
+                          ),
+                          onChanged: pairing.remoteConfirmed
+                              ? null
+                              : (value) => pairingSession!
+                                    .setTrustedPairingPermission(
+                                      TrustedPermission.transferFiles,
+                                      value,
+                                    ),
+                        ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('自动续期可信关系'),
+                          subtitle: const Text(
+                            '每次成功认证后可续期 90 天，但不会超过一年人工复核期限。',
+                          ),
+                          value: pairing.automaticRenewal,
+                          onChanged: pairingSession!
+                              .setTrustedPairingAutomaticRenewal,
+                        ),
+                      ],
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        if (pairing.phase == TrustedPairingPhase.verifyCode)
+                          FilledButton(
+                            onPressed: () =>
+                                _confirmTrustedPairing(pairingSession!),
+                            child: const Text('校验码一致，信任设备'),
+                          ),
+                        if (pairing.phase != TrustedPairingPhase.completed &&
+                            pairing.phase != TrustedPairingPhase.failed)
+                          TextButton(
+                            onPressed: pairingSession!.cancelTrustedPairing,
+                            child: const Text('取消'),
+                          ),
+                        if (pairing.phase == TrustedPairingPhase.completed ||
+                            pairing.phase == TrustedPairingPhase.failed)
+                          TextButton(
+                            onPressed: pairingSession!.dismissTrustedPairing,
+                            child: const Text('关闭'),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            if (!widget.trustedDevices.supported)
+              const Text('当前设备的受保护身份密钥不可用；仍可继续使用动态连接码。')
+            else if (trusted.isEmpty)
+              const Text('暂无可信设备。先使用动态连接码连接，再在这里确认两端校验码。')
+            else
+              ...trusted.map(
+                (record) => ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    record.localIsIssuer
+                        ? Icons.admin_panel_settings_outlined
+                        : Icons.desktop_windows_outlined,
+                  ),
+                  title: Text(record.peerName),
+                  subtitle: Text(
+                    '${record.peerIdentity.machineCode}\n'
+                    '${record.localIsIssuer ? '可控制本机' : '本机可免码连接'} · '
+                    '授权至 ${_shortDate(record.grant.softExpiresAt)}',
+                  ),
+                  isThreeLine: true,
+                  trailing: Wrap(
+                    spacing: 8,
+                    children: [
+                      if (!record.localIsIssuer && record.usableAt(now))
+                        FilledButton.tonal(
+                          onPressed: () => _connectTrustedDevice(record),
+                          child: const Text('连接'),
+                        ),
+                      IconButton(
+                        tooltip: '撤销可信关系',
+                        onPressed: () => _revokeTrustedDevice(record),
+                        icon: const Icon(Icons.delete_outline),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _shortDate(DateTime value) =>
+      '${value.toLocal().year}-${value.toLocal().month.toString().padLeft(2, '0')}-'
+      '${value.toLocal().day.toString().padLeft(2, '0')}';
+
+  String _trustedPermissionLabel(Set<TrustedPermission> permissions) {
+    final labels = <String>['查看屏幕'];
+    if (permissions.contains(TrustedPermission.controlInput)) {
+      labels.add('控制键鼠');
+    }
+    if (permissions.contains(TrustedPermission.readClipboard) ||
+        permissions.contains(TrustedPermission.writeClipboard)) {
+      labels.add('剪贴板');
+    }
+    if (permissions.contains(TrustedPermission.transferFiles)) {
+      labels.add('文件传输');
+    }
+    return labels.join('、');
   }
 
   _ConnectionCard _buildHostConnectionCard() {

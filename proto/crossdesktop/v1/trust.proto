@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package crossdesktop.v1;
+
+import "crossdesktop/v1/capability.proto";
+
+option java_multiple_files = true;
+option java_package = "com.crossdesktopremote.protocol.v1";
+option java_outer_classname = "TrustProto";
+
+message DeviceIdentityPublic {
+  string machine_code = 1;
+  bytes root_public_key_sec1 = 2;
+  bytes root_fingerprint_sha256 = 3;
+  bytes authentication_public_key_sec1 = 4;
+  uint64 authentication_key_not_before_unix_ms = 5;
+  uint64 authentication_key_expires_at_unix_ms = 6;
+  bytes authentication_key_certificate = 7;
+}
+
+message TrustGrant {
+  bytes grant_id = 1;
+  bytes issuer_root_fingerprint = 2;
+  bytes subject_root_fingerprint = 3;
+  repeated PermissionScope permissions = 4;
+  uint64 issued_at_unix_ms = 5;
+  uint64 soft_expires_at_unix_ms = 6;
+  uint64 hard_expires_at_unix_ms = 7;
+  bool automatic_renewal = 8;
+  bytes issuer_signature = 9;
+}
+
+message SignedPeerEnvelope {
+  uint32 protocol_version = 1;
+  string session_id = 2;
+  bytes sender_root_fingerprint = 3;
+  bytes recipient_root_fingerprint = 4;
+  uint64 sequence = 5;
+  uint64 issued_at_unix_ms = 6;
+  uint64 expires_at_unix_ms = 7;
+  bytes nonce = 8;
+  bytes payload = 9;
+  bytes authentication_public_key_sec1 = 10;
+  bytes authentication_key_certificate = 11;
+  bytes signature = 12;
+}
+
+message TrustedSessionBinding {
+  string session_id = 1;
+  bytes controller_nonce = 2;
+  bytes host_nonce = 3;
+  repeated PermissionScope requested_permissions = 4;
+  bytes controller_ephemeral_public_key = 5;
+  bytes host_ephemeral_public_key = 6;
+  bytes offer_sha256 = 7;
+  bytes answer_sha256 = 8;
+  bytes controller_dtls_fingerprint_sha256 = 9;
+  bytes host_dtls_fingerprint_sha256 = 10;
+  uint64 expires_at_unix_ms = 11;
+}
+
+enum TrustAuditAction {
+  TRUST_AUDIT_ACTION_UNSPECIFIED = 0;
+  TRUST_AUDIT_ACTION_PAIRED = 1;
+  TRUST_AUDIT_ACTION_CONNECTED = 2;
+  TRUST_AUDIT_ACTION_RENEWED = 3;
+  TRUST_AUDIT_ACTION_PERMISSIONS_CHANGED = 4;
+  TRUST_AUDIT_ACTION_REVOKED = 5;
+  TRUST_AUDIT_ACTION_EXPIRED = 6;
+}

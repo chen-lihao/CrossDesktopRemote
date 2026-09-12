@@ -39,7 +39,23 @@ enum CdrResult {
   CDR_ERROR_TRANSPORT = -8,
   CDR_ERROR_INTEGRITY = -9,
   CDR_ERROR_IO = -10,
+  CDR_ERROR_BUFFER_TOO_SMALL = -11,
+  CDR_ERROR_INVALID_SIGNATURE = -12,
 };
+
+/* Security helpers never accept or return private key material. Native
+ * platform keystores own signing keys and pass only public data/signatures. */
+int32_t cdr_security_machine_code_v2(
+    const uint8_t *public_key, size_t public_key_len, uint8_t *output,
+    size_t output_capacity, size_t *output_len);
+int32_t cdr_security_verify_p256_signature_der(
+    const uint8_t *public_key, size_t public_key_len, const uint8_t *message,
+    size_t message_len, const uint8_t *signature, size_t signature_len);
+int32_t cdr_security_sas_code(
+    const uint8_t *first_public_key, size_t first_public_key_len,
+    const uint8_t *second_public_key, size_t second_public_key_len,
+    const uint8_t *session_nonce, size_t session_nonce_len, uint8_t *output,
+    size_t output_capacity);
 
 enum CdrTransferDirection {
   CDR_TRANSFER_DIRECTION_UPLOAD = 1,

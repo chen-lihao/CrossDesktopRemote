@@ -9,6 +9,10 @@ String generateRoomCode([Random? random]) {
 
 bool isValidRoomCode(String value) => RegExp(r'^[0-9]{6}$').hasMatch(value);
 
+bool isValidTrustedMachineCode(String value) =>
+    RegExp(r'^CDR2(?:-[0-9A-HJKMNP-TV-Z]{1,4}){4,8}$')
+        .hasMatch(value.trim().toUpperCase());
+
 String normalizeSignalingServerUrl(String value) {
   final trimmed = value.trim();
   final uri = Uri.parse(trimmed);
@@ -48,10 +52,27 @@ Uri buildSignalingUri({
   String deviceId = '',
   String clientPlatform = '',
   Iterable<String> clientCapabilities = const [],
+  String trustedMachineCode = '',
+  String trustedTargetMachineCode = '',
 }) {
   final baseUri = Uri.parse(normalizeSignalingServerUrl(serverUrl));
-  if (role == RemoteRole.controller && !isValidRoomCode(roomCode)) {
-    throw const FormatException('连接码必须是 6 位数字');
+  final normalizedTrustedMachineCode = trustedMachineCode.trim().toUpperCase();
+  final trustedTarget = trustedTargetMachineCode.trim().toUpperCase();
+  if (normalizedTrustedMachineCode.isNotEmpty &&
+      !isValidTrustedMachineCode(normalizedTrustedMachineCode)) {
+    throw const FormatException('本机可信机器码格式无效');
+  }
+  if (trustedTarget.isNotEmpty && !isValidTrustedMachineCode(trustedTarget)) {
+    throw const FormatException('目标可信机器码格式无效');
+  }
+  if (role == RemoteRole.controller) {
+    final hasRoom = isValidRoomCode(roomCode);
+    final hasTrustedTarget = trustedTarget.isNotEmpty;
+    if (hasRoom == hasTrustedTarget) {
+      throw const FormatException('请选择连接码或可信设备中的一种连接方式');
+    }
+  } else if (trustedTarget.isNotEmpty) {
+    throw const FormatException('被控端不能指定可信连接目标');
   }
 
   final capabilities = clientCapabilities
@@ -69,6 +90,9 @@ Uri buildSignalingUri({
       if (deviceId.trim().isNotEmpty) 'deviceId': deviceId.trim().toLowerCase(),
       if (clientPlatform.trim().isNotEmpty)
         'platform': clientPlatform.trim().toLowerCase(),
+      if (normalizedTrustedMachineCode.isNotEmpty)
+        'trustedMachineCode': normalizedTrustedMachineCode,
+      if (trustedTarget.isNotEmpty) 'trustedTarget': trustedTarget,
       // Keep the first capability for servers that only understand the legacy
       // singular value. New servers consume every repeated capability entry,
       // avoiding delimiter encoding differences between Dart and Spring.

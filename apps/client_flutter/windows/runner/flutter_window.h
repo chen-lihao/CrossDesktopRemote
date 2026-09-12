@@ -10,6 +10,7 @@
 
 #include "win32_window.h"
 #include "windows_clipboard_bridge.h"
+#include "windows_device_identity_bridge.h"
 #include "windows_file_paste_target_bridge.h"
 #include "windows_host_bridge.h"
 #include "windows_lan_discovery_bridge.h"
@@ -43,6 +44,7 @@ class FlutterWindow : public Win32Window {
       window_channel_;
   std::unique_ptr<WindowsHostBridge> host_bridge_;
   std::unique_ptr<WindowsClipboardBridge> clipboard_bridge_;
+  std::unique_ptr<WindowsDeviceIdentityBridge> device_identity_bridge_;
   std::unique_ptr<WindowsFilePasteTargetBridge> file_paste_target_bridge_;
   std::unique_ptr<WindowsLanDiscoveryBridge> lan_discovery_bridge_;
   bool minimized_ = false;

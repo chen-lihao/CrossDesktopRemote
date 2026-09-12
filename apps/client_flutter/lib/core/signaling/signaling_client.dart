@@ -10,6 +10,8 @@ typedef SignalingClosedHandler = void Function(int? code, String? reason);
 class SignalingClient {
   WebSocket? _socket;
   StreamSubscription<dynamic>? _subscription;
+  Future<void> _messageQueue = Future<void>.value();
+  int _connectionGeneration = 0;
 
   bool get isConnected => _socket?.readyState == WebSocket.open;
 
@@ -19,18 +21,26 @@ class SignalingClient {
     required SignalingClosedHandler onDone,
   }) async {
     await close();
+    final generation = ++_connectionGeneration;
     final socket = await WebSocket.connect(uri.toString());
     socket.pingInterval = const Duration(seconds: 15);
     _socket = socket;
     _subscription = socket.listen(
-      (dynamic payload) async {
-        if (payload is! String) {
-          return;
-        }
-        final decoded = jsonDecode(payload);
-        if (decoded is Map<String, dynamic>) {
-          await onMessage(decoded);
-        }
+      (dynamic payload) {
+        _messageQueue = _messageQueue
+            .then((_) async {
+              if (generation != _connectionGeneration || payload is! String) {
+                return;
+              }
+              final decoded = jsonDecode(payload);
+              if (decoded is Map<String, dynamic>) await onMessage(decoded);
+            })
+            .catchError((Object _) async {
+              if (generation == _connectionGeneration &&
+                  socket.readyState == WebSocket.open) {
+                await socket.close(WebSocketStatus.invalidFramePayloadData);
+              }
+            });
       },
       onDone: () => onDone(socket.closeCode, socket.closeReason),
       onError: (_) => onDone(socket.closeCode, socket.closeReason),
@@ -47,6 +57,7 @@ class SignalingClient {
   }
 
   Future<void> close() async {
+    _connectionGeneration += 1;
     final subscription = _subscription;
     _subscription = null;
     await subscription?.cancel();

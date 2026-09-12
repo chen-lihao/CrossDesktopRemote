@@ -12,6 +12,7 @@ add_executable(${BINARY_NAME} WIN32
   "utils.cpp"
   "win32_window.cpp"
   "windows_clipboard_bridge.cpp"
+  "windows_device_identity_bridge.cpp"
   "windows_file_paste_target_bridge.cpp"
   "windows_host_bridge.cpp"
   "windows_lan_discovery_bridge.cpp"
@@ -48,6 +49,10 @@ target_link_libraries(${BINARY_NAME} PRIVATE "shcore.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "shell32.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "ole32.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "oleaut32.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "bcrypt.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "crypt32.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "ncrypt.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "advapi32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

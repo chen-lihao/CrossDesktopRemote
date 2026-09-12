@@ -183,6 +183,14 @@ class HostAvailabilityController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> refreshRegistration() async {
+    if (_disposed || !_desiredOnline || busy) return;
+    await session.disconnect();
+    _connectedEndpoint = null;
+    _reconnectAttempt = 0;
+    await ensureOnline();
+  }
+
   void _handleSessionChanged() {
     final previous = _lastState;
     final next = session.state;

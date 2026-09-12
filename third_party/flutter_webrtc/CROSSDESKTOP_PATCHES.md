@@ -92,6 +92,21 @@ CrossDesktopRemote-specific iOS renderer changes:
 - emit privacy-safe decoder-output and Flutter-texture-input luma diagnostics;
 - never move full video frames into Dart for diagnostics.
 
+CrossDesktopRemote-specific cross-platform renderer binding changes:
+
+- pass the real receiver video track ID from `RTCPeerConnection.onTrack` to
+  every Texture binding; never use `"0"` or a track index as a sentinel ID;
+- validate that the renderer, media stream, and requested video track exist
+  before attaching a native video sink;
+- return the actual bound track ID to Dart on success and a structured platform
+  error on failure instead of acknowledging an unbound Texture;
+- update Dart `srcObject` only after native binding succeeds, so presentation
+  state cannot diverge from the native renderer;
+- apply the same exact/default-track contract to Windows/Linux C++, Darwin,
+  Android, and Web implementations;
+- keep presentation repair non-destructive: a healthy Texture may be rebound to
+  the same exact track for validation but must not be cleared first.
+
 Do not patch `~/.pub-cache`. Upgrade by importing a reviewed upstream release
 into this directory, reapplying the documented patch, and running every
 platform build before changing the dependency lock file.
