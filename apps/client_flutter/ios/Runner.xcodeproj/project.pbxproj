@@ -417,7 +417,7 @@
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"-Wl,-u,_cdr_core_abi_version,-u,_cdr_core_protocol_major_version,-u,_cdr_core_feature_flags,-u,_cdr_security_engine_create,-u,_cdr_security_engine_destroy,-u,_cdr_security_engine_phase,-u,_cdr_security_engine_set_paused,-u,_cdr_security_engine_begin_session,-u,_cdr_security_engine_confirm_pairing,-u,_cdr_security_engine_complete_pairing,-u,_cdr_security_engine_end_session,-u,_cdr_security_engine_revoke_grant,-u,_cdr_security_engine_verify_envelope,-u,_cdr_security_engine_authorize_grant,-u,_cdr_security_engine_configure_webrtc_context,-u,_cdr_security_engine_bind_webrtc",
+					"-Wl,-u,_cdr_core_abi_version,-u,_cdr_core_protocol_major_version,-u,_cdr_core_feature_flags,-u,_cdr_security_engine_create,-u,_cdr_security_engine_destroy,-u,_cdr_security_engine_phase,-u,_cdr_security_engine_set_paused,-u,_cdr_security_engine_begin_session,-u,_cdr_security_engine_confirm_pairing,-u,_cdr_security_engine_complete_pairing,-u,_cdr_security_engine_end_session,-u,_cdr_security_engine_revoke_grant,-u,_cdr_security_engine_verify_envelope,-u,_cdr_security_engine_authorize_grant,-u,_cdr_security_engine_authenticate_credential,-u,_cdr_security_engine_apply_host_authorization,-u,_cdr_security_engine_confirm_host_authorization_ack,-u,_cdr_security_engine_configure_webrtc_context,-u,_cdr_security_engine_bind_webrtc",
 					"$(BUILT_PRODUCTS_DIR)/libcrossdesktop_core.a",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.crossdesktopremote.crossDesktopRemote;
@@ -607,7 +607,7 @@
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"-Wl,-u,_cdr_core_abi_version,-u,_cdr_core_protocol_major_version,-u,_cdr_core_feature_flags,-u,_cdr_security_engine_create,-u,_cdr_security_engine_destroy,-u,_cdr_security_engine_phase,-u,_cdr_security_engine_set_paused,-u,_cdr_security_engine_begin_session,-u,_cdr_security_engine_confirm_pairing,-u,_cdr_security_engine_complete_pairing,-u,_cdr_security_engine_end_session,-u,_cdr_security_engine_revoke_grant,-u,_cdr_security_engine_verify_envelope,-u,_cdr_security_engine_authorize_grant,-u,_cdr_security_engine_configure_webrtc_context,-u,_cdr_security_engine_bind_webrtc",
+					"-Wl,-u,_cdr_core_abi_version,-u,_cdr_core_protocol_major_version,-u,_cdr_core_feature_flags,-u,_cdr_security_engine_create,-u,_cdr_security_engine_destroy,-u,_cdr_security_engine_phase,-u,_cdr_security_engine_set_paused,-u,_cdr_security_engine_begin_session,-u,_cdr_security_engine_confirm_pairing,-u,_cdr_security_engine_complete_pairing,-u,_cdr_security_engine_end_session,-u,_cdr_security_engine_revoke_grant,-u,_cdr_security_engine_verify_envelope,-u,_cdr_security_engine_authorize_grant,-u,_cdr_security_engine_authenticate_credential,-u,_cdr_security_engine_apply_host_authorization,-u,_cdr_security_engine_confirm_host_authorization_ack,-u,_cdr_security_engine_configure_webrtc_context,-u,_cdr_security_engine_bind_webrtc",
 					"$(BUILT_PRODUCTS_DIR)/libcrossdesktop_core.a",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.crossdesktopremote.crossDesktopRemote;
@@ -638,7 +638,7 @@
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"-Wl,-u,_cdr_core_abi_version,-u,_cdr_core_protocol_major_version,-u,_cdr_core_feature_flags,-u,_cdr_security_engine_create,-u,_cdr_security_engine_destroy,-u,_cdr_security_engine_phase,-u,_cdr_security_engine_set_paused,-u,_cdr_security_engine_begin_session,-u,_cdr_security_engine_confirm_pairing,-u,_cdr_security_engine_complete_pairing,-u,_cdr_security_engine_end_session,-u,_cdr_security_engine_revoke_grant,-u,_cdr_security_engine_verify_envelope,-u,_cdr_security_engine_authorize_grant,-u,_cdr_security_engine_configure_webrtc_context,-u,_cdr_security_engine_bind_webrtc",
+					"-Wl,-u,_cdr_core_abi_version,-u,_cdr_core_protocol_major_version,-u,_cdr_core_feature_flags,-u,_cdr_security_engine_create,-u,_cdr_security_engine_destroy,-u,_cdr_security_engine_phase,-u,_cdr_security_engine_set_paused,-u,_cdr_security_engine_begin_session,-u,_cdr_security_engine_confirm_pairing,-u,_cdr_security_engine_complete_pairing,-u,_cdr_security_engine_end_session,-u,_cdr_security_engine_revoke_grant,-u,_cdr_security_engine_verify_envelope,-u,_cdr_security_engine_authorize_grant,-u,_cdr_security_engine_authenticate_credential,-u,_cdr_security_engine_apply_host_authorization,-u,_cdr_security_engine_confirm_host_authorization_ack,-u,_cdr_security_engine_configure_webrtc_context,-u,_cdr_security_engine_bind_webrtc",
 					"$(BUILT_PRODUCTS_DIR)/libcrossdesktop_core.a",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.crossdesktopremote.crossDesktopRemote;

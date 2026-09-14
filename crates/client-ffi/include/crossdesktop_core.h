@@ -78,9 +78,11 @@ enum CdrSecurityPhase {
   CDR_SECURITY_PHASE_PAIRING_AWAITING_CONFIRMATION = 1,
   CDR_SECURITY_PHASE_PAIRING_CONFIRMED = 2,
   CDR_SECURITY_PHASE_AUTHENTICATING = 3,
-  CDR_SECURITY_PHASE_AWAITING_WEBRTC_BINDING = 4,
-  CDR_SECURITY_PHASE_AUTHORIZED = 5,
-  CDR_SECURITY_PHASE_FAILED = 6,
+  CDR_SECURITY_PHASE_AWAITING_HOST_AUTHORIZATION = 4,
+  CDR_SECURITY_PHASE_AWAITING_AUTHORIZATION_ACK = 5,
+  CDR_SECURITY_PHASE_AWAITING_WEBRTC_BINDING = 6,
+  CDR_SECURITY_PHASE_AUTHORIZED = 7,
+  CDR_SECURITY_PHASE_FAILED = 8,
 };
 
 enum CdrSecuritySessionMode {
@@ -125,6 +127,20 @@ int32_t cdr_security_engine_authorize_grant(
     size_t issuer_root_public_key_len,
     const uint8_t *expected_subject_fingerprint,
     size_t expected_subject_fingerprint_len, uint64_t now_unix_ms,
+    uint64_t *out_permission_bits);
+int32_t cdr_security_engine_authenticate_credential(
+    CdrSecurityEngine *engine, const uint8_t *grant_protobuf,
+    size_t grant_protobuf_len, const uint8_t *issuer_root_public_key,
+    size_t issuer_root_public_key_len,
+    const uint8_t *expected_subject_fingerprint,
+    size_t expected_subject_fingerprint_len, uint64_t now_unix_ms);
+int32_t cdr_security_engine_apply_host_authorization(
+    CdrSecurityEngine *engine, const uint8_t *authorization_protobuf,
+    size_t authorization_protobuf_len, uint64_t now_unix_ms,
+    uint8_t local_is_host, uint64_t *out_permission_bits);
+int32_t cdr_security_engine_confirm_host_authorization_ack(
+    CdrSecurityEngine *engine, const uint8_t *acknowledgement_protobuf,
+    size_t acknowledgement_protobuf_len, uint64_t now_unix_ms,
     uint64_t *out_permission_bits);
 int32_t cdr_security_engine_configure_webrtc_context(
     CdrSecurityEngine *engine, const uint8_t *controller_nonce,

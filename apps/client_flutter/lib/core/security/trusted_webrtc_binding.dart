@@ -20,6 +20,9 @@ final class TrustedWebRtcBindingCodec {
     required String offerSdp,
     required String answerSdp,
     required DateTime expiresAt,
+    int authSuiteVersion = trustedAuthSuiteLegacy,
+    Uint8List? authorizationSha256,
+    Uint8List? capabilitySha256,
   }) {
     final binding = TrustedSessionBinding(
       sessionId: sessionId,
@@ -36,6 +39,9 @@ final class TrustedWebRtcBindingCodec {
       controllerDtlsFingerprintSha256: dtlsSha256Fingerprint(answerSdp),
       hostDtlsFingerprintSha256: dtlsSha256Fingerprint(offerSdp),
       expiresAt: expiresAt.toUtc(),
+      authSuiteVersion: authSuiteVersion,
+      authorizationSha256: authorizationSha256 ?? Uint8List(32),
+      capabilitySha256: capabilitySha256 ?? Uint8List(32),
     );
     binding.validateStructure();
     return binding;
@@ -51,6 +57,9 @@ final class TrustedWebRtcBindingCodec {
     required TrustedPeerIdentity hostIdentity,
     required String offerSdp,
     required String answerSdp,
+    int authSuiteVersion = trustedAuthSuiteLegacy,
+    Uint8List? authorizationSha256,
+    Uint8List? capabilitySha256,
   }) {
     final expected = build(
       sessionId: sessionId,
@@ -62,6 +71,9 @@ final class TrustedWebRtcBindingCodec {
       offerSdp: offerSdp,
       answerSdp: answerSdp,
       expiresAt: binding.expiresAt,
+      authSuiteVersion: authSuiteVersion,
+      authorizationSha256: authorizationSha256,
+      capabilitySha256: capabilitySha256,
     );
     return constantTimeBytesEqual(expected.signingBytes, binding.signingBytes);
   }

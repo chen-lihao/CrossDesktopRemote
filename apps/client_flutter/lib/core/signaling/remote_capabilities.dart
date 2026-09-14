@@ -1,4 +1,8 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
+import 'package:crypto/crypto.dart';
 
 const activeContentGeometryV2Capability = 'active-content-geometry-v2';
 const activeContentGeometryV3Capability = 'active-content-geometry-v3';
@@ -18,6 +22,12 @@ const trustedDeviceAuthV1Capability = 'trusted-device-auth-v1';
 const signedWebRtcBindingV1Capability = 'signed-webrtc-binding-v1';
 const trustLeaseRenewalV1Capability = 'trust-lease-renewal-v1';
 const trustedPairingTransactionV1Capability = 'trusted-pairing-transaction-v1';
+const decoupledTrustPolicyV1Capability = 'decoupled-trust-policy-v1';
+const hostSessionAuthorizationV1Capability = 'host-session-authorization-v1';
+const directionalFilePermissionsV1Capability =
+    'directional-file-permissions-v1';
+const trustedAuthSuiteV2Capability = 'trusted-auth-suite-v2';
+const completeCapabilityManifestV1Capability = 'capability-manifest-v1';
 const iosActiveContentGeometryV3Enabled = bool.fromEnvironment(
   'CDR_IOS_ACTIVE_CONTENT_GEOMETRY_V3',
   defaultValue: true,
@@ -77,6 +87,10 @@ List<String> buildRemoteClientCapabilities({
       signedWebRtcBindingV1Capability,
       trustLeaseRenewalV1Capability,
       trustedPairingTransactionV1Capability,
+      decoupledTrustPolicyV1Capability,
+      hostSessionAuthorizationV1Capability,
+      directionalFilePermissionsV1Capability,
+      trustedAuthSuiteV2Capability,
     ]);
   }
   return capabilities;
@@ -90,6 +104,48 @@ bool supportsTrustedDeviceAuthentication(Iterable<String> capabilities) =>
 bool supportsTransactionalTrustedPairing(Iterable<String> capabilities) =>
     supportsTrustedDeviceAuthentication(capabilities) &&
     capabilities.contains(trustedPairingTransactionV1Capability);
+
+bool supportsHostOwnedTrustedPolicy(Iterable<String> capabilities) =>
+    supportsTrustedDeviceAuthentication(capabilities) &&
+    capabilities.contains(decoupledTrustPolicyV1Capability) &&
+    capabilities.contains(hostSessionAuthorizationV1Capability) &&
+    capabilities.contains(directionalFilePermissionsV1Capability);
+
+bool supportsTrustedAuthSuiteV2(Iterable<String> capabilities) =>
+    supportsHostOwnedTrustedPolicy(capabilities) &&
+    capabilities.contains(trustedAuthSuiteV2Capability);
+
+/// Produces the canonical transcript hash for the capabilities that both
+/// endpoints actually advertised. The same intersection is computed on both
+/// roles, so signaling reordering and duplicates cannot change the result.
+Uint8List negotiatedTrustedCapabilityHash({
+  required int authSuiteVersion,
+  required Iterable<String> localCapabilities,
+  required Iterable<String> remoteCapabilities,
+}) {
+  if (authSuiteVersion <= 1) return Uint8List(32);
+  final local = localCapabilities
+      .map((value) => value.trim().toLowerCase())
+      .toSet();
+  final negotiated =
+      remoteCapabilities
+          .map((value) => value.trim().toLowerCase())
+          .where(local.contains)
+          .toSet()
+          .toList(growable: false)
+        ..sort();
+  return Uint8List.fromList(
+    sha256
+        .convert(
+          utf8.encode(
+            'CrossDesktopRemote/NegotiatedCapabilities/v1\n'
+            '$authSuiteVersion\n'
+            '${negotiated.join('\n')}\n',
+          ),
+        )
+        .bytes,
+  );
+}
 
 bool supportsActiveContentGeometry(Iterable<String> capabilities) {
   return activeContentGeometryVersion(capabilities) > 0;

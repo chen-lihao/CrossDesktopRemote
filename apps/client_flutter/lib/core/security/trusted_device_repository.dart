@@ -104,6 +104,15 @@ class TrustedDeviceRepository {
         PRIMARY KEY(pairing_session_id, grant_id)
       )
     ''');
+    _database.execute('''
+      CREATE TABLE IF NOT EXISTS host_access_policies (
+        controller_fingerprint TEXT PRIMARY KEY,
+        revision INTEGER NOT NULL,
+        enabled INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        encrypted_payload TEXT NOT NULL
+      )
+    ''');
     _database.execute(
       'CREATE INDEX IF NOT EXISTS trusted_devices_expiry_idx '
       'ON trusted_devices(revoked_at, soft_expires_at, last_connected_at DESC)',
@@ -165,6 +174,7 @@ class TrustedDeviceRepository {
     required String pairingSessionId,
     required List<int> grantId,
     required DateTime now,
+    Set<TrustedPermission>? initialHostAccessPermissions,
   }) async {
     if (grantId.length != 16) {
       throw const FormatException('Invalid pairing grant id');
@@ -184,7 +194,36 @@ class TrustedDeviceRepository {
       );
       throw StateError('Pairing transaction expired');
     }
+    HostAccessPolicy? initialPolicy;
+    String? encryptedInitialPolicy;
+    if (initialHostAccessPermissions != null) {
+      if (!transaction.record.localIsIssuer) {
+        throw StateError('Only a host pairing may create an access policy');
+      }
+      final permissions = normalizeHostAccessPermissions(
+        initialHostAccessPermissions,
+      );
+      initialPolicy = HostAccessPolicy(
+        controllerRootFingerprint:
+            transaction.record.peerIdentity.rootFingerprint,
+        revision: 1,
+        enabled: true,
+        permissions: permissions,
+        updatedAt: now.toUtc(),
+      );
+      initialPolicy.validateStructure();
+      final fingerprint = base64UrlEncode(
+        initialPolicy.controllerRootFingerprint,
+      );
+      encryptedInitialPolicy = await _cipher.encrypt(
+        initialPolicy.toJson(),
+        aad: _hostPolicyAad(fingerprint),
+      );
+    }
     if (transaction.state == TrustedPairingTransactionState.committed) {
+      if (initialPolicy != null && encryptedInitialPolicy != null) {
+        _insertInitialHostAccessPolicy(initialPolicy, encryptedInitialPolicy);
+      }
       return TrustedPairingCommitResult(
         record: transaction.record,
         committedNow: false,
@@ -194,6 +233,9 @@ class TrustedDeviceRepository {
     _database.execute('BEGIN IMMEDIATE');
     try {
       _upsertEncryptedRecord(encryptedRecord);
+      if (initialPolicy != null && encryptedInitialPolicy != null) {
+        _insertInitialHostAccessPolicy(initialPolicy, encryptedInitialPolicy);
+      }
       _database.execute(
         '''
         UPDATE trusted_pairing_transactions
@@ -215,6 +257,27 @@ class TrustedDeviceRepository {
     return TrustedPairingCommitResult(
       record: transaction.record,
       committedNow: true,
+    );
+  }
+
+  void _insertInitialHostAccessPolicy(
+    HostAccessPolicy policy,
+    String encryptedPayload,
+  ) {
+    _database.execute(
+      '''
+      INSERT INTO host_access_policies(
+        controller_fingerprint, revision, enabled, updated_at, encrypted_payload
+      ) VALUES(?, ?, ?, ?, ?)
+      ON CONFLICT(controller_fingerprint) DO NOTHING
+      ''',
+      [
+        base64UrlEncode(policy.controllerRootFingerprint),
+        policy.revision,
+        policy.enabled ? 1 : 0,
+        policy.updatedAt.millisecondsSinceEpoch,
+        encryptedPayload,
+      ],
     );
   }
 
@@ -282,6 +345,95 @@ class TrustedDeviceRepository {
 
   Future<void> upsert(TrustedDeviceRecord record) async {
     _upsertEncryptedRecord(await _encryptRecord(record));
+  }
+
+  Future<HostAccessPolicy?> readHostAccessPolicy(
+    List<int> controllerFingerprint,
+  ) async {
+    if (controllerFingerprint.length != 32) {
+      throw const FormatException('Invalid controller fingerprint');
+    }
+    final fingerprint = base64UrlEncode(controllerFingerprint);
+    final rows = _database.select(
+      'SELECT encrypted_payload FROM host_access_policies '
+      'WHERE controller_fingerprint = ? LIMIT 1',
+      [fingerprint],
+    );
+    if (rows.isEmpty) return null;
+    try {
+      final policy = HostAccessPolicy.fromJson(
+        await _cipher.decrypt(
+          rows.first['encrypted_payload'] as String,
+          aad: _hostPolicyAad(fingerprint),
+        ),
+      );
+      policy.validateStructure();
+      return policy;
+    } catch (error) {
+      // Missing and corrupt are deliberately different states. Recreating a
+      // corrupt policy from legacy defaults could silently expand access.
+      throw StateError('Host access policy is unreadable: $error');
+    }
+  }
+
+  Future<void> writeHostAccessPolicy(HostAccessPolicy policy) async {
+    policy.validateStructure();
+    final fingerprint = base64UrlEncode(policy.controllerRootFingerprint);
+    final encrypted = await _cipher.encrypt(
+      policy.toJson(),
+      aad: _hostPolicyAad(fingerprint),
+    );
+    _database.execute(
+      '''
+      INSERT INTO host_access_policies(
+        controller_fingerprint, revision, enabled, updated_at, encrypted_payload
+      ) VALUES(?, ?, ?, ?, ?)
+      ON CONFLICT(controller_fingerprint) DO UPDATE SET
+        revision=excluded.revision,
+        enabled=excluded.enabled,
+        updated_at=excluded.updated_at,
+        encrypted_payload=excluded.encrypted_payload
+      WHERE excluded.revision > host_access_policies.revision
+      ''',
+      [
+        fingerprint,
+        policy.revision,
+        policy.enabled ? 1 : 0,
+        policy.updatedAt.millisecondsSinceEpoch,
+        encrypted,
+      ],
+    );
+  }
+
+  Future<bool> replaceHostAccessPolicy(
+    HostAccessPolicy policy, {
+    required int expectedRevision,
+  }) async {
+    policy.validateStructure();
+    if (expectedRevision < 1 || policy.revision != expectedRevision + 1) {
+      throw const FormatException('Invalid host access policy revision');
+    }
+    final fingerprint = base64UrlEncode(policy.controllerRootFingerprint);
+    final encrypted = await _cipher.encrypt(
+      policy.toJson(),
+      aad: _hostPolicyAad(fingerprint),
+    );
+    _database.execute(
+      '''
+      UPDATE host_access_policies
+      SET revision = ?, enabled = ?, updated_at = ?, encrypted_payload = ?
+      WHERE controller_fingerprint = ? AND revision = ?
+      ''',
+      [
+        policy.revision,
+        policy.enabled ? 1 : 0,
+        policy.updatedAt.millisecondsSinceEpoch,
+        encrypted,
+        fingerprint,
+        expectedRevision,
+      ],
+    );
+    return _database.updatedRows == 1;
   }
 
   Future<_EncryptedTrustedDeviceRecord> _encryptRecord(
@@ -416,6 +568,12 @@ class TrustedDeviceRepository {
           [base64UrlEncode(previous.grantId), now.millisecondsSinceEpoch],
         );
       }
+      if (record.localIsIssuer) {
+        _database.execute(
+          'DELETE FROM host_access_policies WHERE controller_fingerprint = ?',
+          [base64UrlEncode(record.peerIdentity.rootFingerprint)],
+        );
+      }
       _database.execute('COMMIT');
     } catch (_) {
       _database.execute('ROLLBACK');
@@ -428,6 +586,13 @@ class TrustedDeviceRepository {
       'DELETE FROM trusted_devices WHERE hard_expires_at <= ?',
       [now.millisecondsSinceEpoch],
     );
+    _database.execute('''
+      DELETE FROM host_access_policies
+      WHERE controller_fingerprint NOT IN (
+        SELECT peer_fingerprint FROM trusted_devices
+        WHERE local_is_issuer = 1 AND revoked_at IS NULL
+      )
+      ''');
   }
 
   Future<void> appendAudit(TrustedAuditRecord record) async {
@@ -528,6 +693,10 @@ class TrustedDeviceRepository {
         'CrossDesktopRemote/TrustedPairingRow/v1\n'
         '$pairingSessionId\n$grantId',
       );
+
+  static List<int> _hostPolicyAad(String controllerFingerprint) => utf8.encode(
+    'CrossDesktopRemote/HostAccessPolicy/v1\n$controllerFingerprint',
+  );
 }
 
 class _StoredPairingTransaction {

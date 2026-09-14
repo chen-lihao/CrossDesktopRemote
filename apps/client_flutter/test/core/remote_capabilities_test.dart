@@ -136,10 +136,16 @@ void main() {
           signedWebRtcBindingV1Capability,
           trustLeaseRenewalV1Capability,
           trustedPairingTransactionV1Capability,
+          decoupledTrustPolicyV1Capability,
+          hostSessionAuthorizationV1Capability,
+          directionalFilePermissionsV1Capability,
+          trustedAuthSuiteV2Capability,
         ]),
       );
       expect(supportsTrustedDeviceAuthentication(capabilities), isTrue);
       expect(supportsTransactionalTrustedPairing(capabilities), isTrue);
+      expect(supportsHostOwnedTrustedPolicy(capabilities), isTrue);
+      expect(supportsTrustedAuthSuiteV2(capabilities), isTrue);
       expect(
         supportsTrustedDeviceAuthentication(const [
           trustedDeviceAuthV1Capability,
@@ -151,6 +157,27 @@ void main() {
           deviceIdentityV1Capability,
           trustedDeviceAuthV1Capability,
           signedWebRtcBindingV1Capability,
+        ]),
+        isFalse,
+      );
+      expect(
+        supportsHostOwnedTrustedPolicy(const [
+          deviceIdentityV1Capability,
+          trustedDeviceAuthV1Capability,
+          signedWebRtcBindingV1Capability,
+          decoupledTrustPolicyV1Capability,
+          hostSessionAuthorizationV1Capability,
+        ]),
+        isFalse,
+      );
+      expect(
+        supportsTrustedAuthSuiteV2(const [
+          deviceIdentityV1Capability,
+          trustedDeviceAuthV1Capability,
+          signedWebRtcBindingV1Capability,
+          decoupledTrustPolicyV1Capability,
+          hostSessionAuthorizationV1Capability,
+          directionalFilePermissionsV1Capability,
         ]),
         isFalse,
       );
@@ -179,6 +206,51 @@ void main() {
         fileClipboardSupported: true,
       ),
       isNot(contains(fileClipboardV1Capability)),
+    );
+  });
+
+  test('trusted capability transcript is symmetric and order independent', () {
+    const host = [
+      deviceIdentityV1Capability,
+      trustedDeviceAuthV1Capability,
+      signedWebRtcBindingV1Capability,
+      decoupledTrustPolicyV1Capability,
+      hostSessionAuthorizationV1Capability,
+      directionalFilePermissionsV1Capability,
+      trustedAuthSuiteV2Capability,
+      explicitFileTransferV1Capability,
+    ];
+    const controller = [
+      activeContentGeometryV3Capability,
+      trustedAuthSuiteV2Capability,
+      directionalFilePermissionsV1Capability,
+      hostSessionAuthorizationV1Capability,
+      decoupledTrustPolicyV1Capability,
+      signedWebRtcBindingV1Capability,
+      trustedDeviceAuthV1Capability,
+      deviceIdentityV1Capability,
+    ];
+
+    final hostHash = negotiatedTrustedCapabilityHash(
+      authSuiteVersion: 2,
+      localCapabilities: host,
+      remoteCapabilities: controller,
+    );
+    final controllerHash = negotiatedTrustedCapabilityHash(
+      authSuiteVersion: 2,
+      localCapabilities: controller,
+      remoteCapabilities: host,
+    );
+
+    expect(hostHash, controllerHash);
+    expect(hostHash, isNot(everyElement(0)));
+    expect(
+      negotiatedTrustedCapabilityHash(
+        authSuiteVersion: 1,
+        localCapabilities: host,
+        remoteCapabilities: controller,
+      ),
+      everyElement(0),
     );
   });
 }

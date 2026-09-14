@@ -5,6 +5,7 @@ import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_models.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_repository.dart';
 import 'package:cross_desktop_remote/core/security/trusted_security_engine.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 enum TrustedAuthenticationFailure {
@@ -208,6 +209,54 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
     }
   }
 
+  void authenticateSessionCredential({
+    required String sessionId,
+    required TrustedDeviceGrant grant,
+    required Uint8List issuerRootPublicKey,
+    required Uint8List expectedSubjectFingerprint,
+  }) {
+    try {
+      _requireSecuritySession(sessionId).authenticateCredential(
+        grant: grant,
+        issuerRootPublicKey: issuerRootPublicKey,
+        expectedSubjectFingerprint: expectedSubjectFingerprint,
+        now: _now(),
+      );
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
+    }
+  }
+
+  Set<TrustedPermission> applyHostSessionAuthorization({
+    required String sessionId,
+    required TrustedSessionAuthorization authorization,
+    required bool localIsHost,
+  }) {
+    try {
+      return _requireSecuritySession(sessionId).applyHostAuthorization(
+        authorization: authorization,
+        localIsHost: localIsHost,
+        now: _now(),
+      );
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
+    }
+  }
+
+  Set<TrustedPermission> confirmHostSessionAuthorizationAck({
+    required String sessionId,
+    required TrustedSessionAuthorizationAck acknowledgement,
+  }) {
+    try {
+      return _requireSecuritySession(sessionId).confirmHostAuthorizationAck(
+        acknowledgement: acknowledgement,
+        now: _now(),
+      );
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
+    }
+  }
+
   Set<TrustedPermission> validatePairingGrant({
     required String sessionId,
     required TrustedDeviceGrant grant,
@@ -360,12 +409,14 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
   Future<TrustedDeviceRecord> commitPairing({
     required String pairingSessionId,
     required Uint8List grantId,
+    Set<TrustedPermission>? initialHostAccessPermissions,
   }) async {
     await initialize();
     final result = await _repository!.commitPairing(
       pairingSessionId: pairingSessionId,
       grantId: grantId,
       now: _now(),
+      initialHostAccessPermissions: initialHostAccessPermissions,
     );
     if (result.committedNow) {
       await _appendAudit(TrustedAuditAction.paired, result.record);
@@ -411,6 +462,137 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
       }
     }
     return null;
+  }
+
+  Future<HostAccessPolicy> hostAccessPolicyFor(
+    TrustedDeviceRecord record, {
+    Set<TrustedPermission>? initialPermissions,
+  }) async {
+    await initialize();
+    if (!record.localIsIssuer || record.revoked) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.permissionsDenied,
+        '只有被控端持有该可信设备的访问策略',
+      );
+    }
+    final existing = await _repository!.readHostAccessPolicy(
+      record.peerIdentity.rootFingerprint,
+    );
+    if (existing != null) return existing;
+    final seeded = normalizeHostAccessPermissions(
+      initialPermissions ?? record.grant.permissions,
+    );
+    final permissions = seeded.contains(TrustedPermission.viewScreen)
+        ? seeded
+        : const {TrustedPermission.viewScreen};
+    final policy = HostAccessPolicy(
+      controllerRootFingerprint: record.peerIdentity.rootFingerprint,
+      revision: 1,
+      enabled: true,
+      permissions: permissions,
+      updatedAt: _now().toUtc(),
+    );
+    await _repository!.writeHostAccessPolicy(policy);
+    return policy;
+  }
+
+  Future<HostAccessPolicy> updateHostAccessPolicy({
+    required TrustedDeviceRecord record,
+    required int expectedRevision,
+    required bool enabled,
+    required Set<TrustedPermission> permissions,
+  }) async {
+    final current = await hostAccessPolicyFor(record);
+    if (current.revision != expectedRevision) {
+      throw StateError('访问策略已被其他操作更新，请刷新后重试');
+    }
+    final normalized = normalizeHostAccessPermissions(permissions);
+    if (!normalized.contains(TrustedPermission.viewScreen)) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.permissionsDenied,
+        '可信连接必须至少允许查看屏幕',
+      );
+    }
+    final updated = HostAccessPolicy(
+      controllerRootFingerprint: record.peerIdentity.rootFingerprint,
+      revision: current.revision + 1,
+      enabled: enabled,
+      permissions: normalized,
+      updatedAt: _now().toUtc(),
+    );
+    final replaced = await _repository!.replaceHostAccessPolicy(
+      updated,
+      expectedRevision: expectedRevision,
+    );
+    if (!replaced) {
+      throw StateError('访问策略已被其他操作更新，请刷新后重试');
+    }
+    await _appendAudit(
+      TrustedAuditAction.permissionsChanged,
+      record,
+      detail:
+          'policyRevision=${updated.revision};permissionBits=${trustedPermissionBits(updated.permissions)};enabled=${updated.enabled}',
+    );
+    notifyListeners();
+    return updated;
+  }
+
+  Future<TrustedSessionAuthorization> createHostSessionAuthorization({
+    required String sessionId,
+    required TrustedDeviceRecord controllerRecord,
+    required Uint8List controllerNonce,
+    required Uint8List hostNonce,
+  }) async {
+    final policy = await hostAccessPolicyFor(controllerRecord);
+    if (!policy.enabled) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.permissionsDenied,
+        '被控端已暂停该可信设备的远程访问',
+      );
+    }
+    final local = localPublicIdentity();
+    final now = _now().toUtc();
+    final authorization = TrustedSessionAuthorization(
+      sessionId: sessionId,
+      credentialId: controllerRecord.grant.grantId,
+      policyRevision: policy.revision,
+      permissions: policy.permissions,
+      controllerRootFingerprint: controllerRecord.peerIdentity.rootFingerprint,
+      hostRootFingerprint: local.rootFingerprint,
+      controllerNonce: controllerNonce,
+      hostNonce: hostNonce,
+      issuedAt: now,
+      expiresAt: now.add(const Duration(seconds: 45)),
+      authSuiteVersion: trustedAuthSuiteV2,
+      capabilitySha256: trustedAuthSuiteCapabilityHash(trustedAuthSuiteV2),
+    );
+    authorization.validateStructure();
+    return authorization;
+  }
+
+  TrustedSessionAuthorizationAck createHostSessionAuthorizationAck(
+    TrustedSessionAuthorization authorization,
+  ) {
+    authorization.validateStructure();
+    final now = _now().toUtc();
+    final acknowledgement = TrustedSessionAuthorizationAck(
+      sessionId: authorization.sessionId,
+      authorizationSha256: Uint8List.fromList(
+        sha256.convert(authorization.signingBytes).bytes,
+      ),
+      policyRevision: authorization.policyRevision,
+      permissions: authorization.permissions,
+      controllerRootFingerprint: authorization.controllerRootFingerprint,
+      hostRootFingerprint: authorization.hostRootFingerprint,
+      controllerNonce: authorization.controllerNonce,
+      hostNonce: authorization.hostNonce,
+      issuedAt: now,
+      expiresAt: now.add(const Duration(seconds: 45)),
+      authSuiteVersion: authorization.authSuiteVersion,
+      capabilitySha256: authorization.capabilitySha256,
+    );
+    acknowledgement.validateStructure();
+    return acknowledgement;
   }
 
   Future<SignedTrustedEnvelope> createEnvelope({
@@ -544,10 +726,25 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
     );
   }
 
-  Future<void> markConnected(TrustedDeviceRecord record) async {
+  Future<void> markConnected(
+    TrustedDeviceRecord record, {
+    Set<TrustedPermission>? sessionPermissions,
+    int? policyRevision,
+  }) async {
     final updated = record.copyWith(lastConnectedAt: _now().toUtc());
     await _save(updated);
-    await _appendAudit(TrustedAuditAction.connected, updated);
+    final permissions = sessionPermissions ?? updated.grant.permissions;
+    final detail = StringBuffer(
+      'permissionBits=${trustedPermissionBits(permissions)}',
+    );
+    if (policyRevision != null) {
+      detail.write(';policyRevision=$policyRevision');
+    }
+    await _appendAudit(
+      TrustedAuditAction.connected,
+      updated,
+      detail: detail.toString(),
+    );
   }
 
   Future<TrustedDeviceRecord> renewControllerGrant(
@@ -869,8 +1066,9 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
 
   Future<void> _appendAudit(
     TrustedAuditAction action,
-    TrustedDeviceRecord record,
-  ) async {
+    TrustedDeviceRecord record, {
+    String? detail,
+  }) async {
     final repository = _repository;
     if (repository == null) return;
     final now = _now().toUtc();
@@ -882,6 +1080,7 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
         peerMachineCode: record.peerIdentity.machineCode,
         occurredAt: now,
         detail:
+            detail ??
             'permissionBits=${trustedPermissionBits(record.grant.permissions)}',
       ),
     );

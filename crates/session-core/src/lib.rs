@@ -12,6 +12,9 @@ pub const FEATURE_WEBRTC_TRANSFER_TRANSPORT: u64 = 1 << 4;
 pub const FEATURE_TRUSTED_DEVICE_AUTH_V1: u64 = 1 << 5;
 pub const FEATURE_SIGNED_WEBRTC_BINDING_V1: u64 = 1 << 6;
 pub const FEATURE_TRUST_LEASE_RENEWAL_V1: u64 = 1 << 7;
+pub const FEATURE_DECOUPLED_TRUST_POLICY_V1: u64 = 1 << 8;
+pub const FEATURE_HOST_SESSION_AUTHORIZATION_V1: u64 = 1 << 9;
+pub const FEATURE_DIRECTIONAL_FILE_PERMISSIONS_V1: u64 = 1 << 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreBuildInfo {
@@ -31,7 +34,10 @@ pub const fn core_build_info() -> CoreBuildInfo {
             | FEATURE_WEBRTC_TRANSFER_TRANSPORT
             | FEATURE_TRUSTED_DEVICE_AUTH_V1
             | FEATURE_SIGNED_WEBRTC_BINDING_V1
-            | FEATURE_TRUST_LEASE_RENEWAL_V1,
+            | FEATURE_TRUST_LEASE_RENEWAL_V1
+            | FEATURE_DECOUPLED_TRUST_POLICY_V1
+            | FEATURE_HOST_SESSION_AUTHORIZATION_V1
+            | FEATURE_DIRECTIONAL_FILE_PERMISSIONS_V1,
     }
 }
 
@@ -72,6 +78,10 @@ pub struct NegotiatedTrustedDeviceCapabilities {
     pub protocol_version: Option<ProtocolVersion>,
     pub signed_webrtc_binding: bool,
     pub lease_renewal: bool,
+    pub decoupled_trust_policy: bool,
+    pub host_session_authorization: bool,
+    pub directional_file_permissions: bool,
+    pub trusted_auth_suite_v2: bool,
 }
 
 /// Computes only mutually advertised features. A peer that predates the data
@@ -111,6 +121,11 @@ fn negotiate_trusted_device(
         && remote.supports_trusted_device_auth
         && local.supports_signed_webrtc_binding
         && remote.supports_signed_webrtc_binding;
+    let decoupled_trust_policy =
+        enabled && local.supports_decoupled_trust_policy && remote.supports_decoupled_trust_policy;
+    let host_session_authorization = decoupled_trust_policy
+        && local.supports_host_session_authorization
+        && remote.supports_host_session_authorization;
     NegotiatedTrustedDeviceCapabilities {
         enabled,
         protocol_version: Some(protocol_version),
@@ -118,6 +133,16 @@ fn negotiate_trusted_device(
         lease_renewal: enabled
             && local.supports_trust_lease_renewal
             && remote.supports_trust_lease_renewal,
+        decoupled_trust_policy,
+        host_session_authorization,
+        directional_file_permissions: host_session_authorization
+            && local.supports_directional_file_permissions
+            && remote.supports_directional_file_permissions,
+        trusted_auth_suite_v2: host_session_authorization
+            && local.supports_directional_file_permissions
+            && remote.supports_directional_file_permissions
+            && local.supports_trusted_auth_suite_v2
+            && remote.supports_trusted_auth_suite_v2,
     }
 }
 
@@ -260,6 +285,15 @@ mod tests {
         assert_ne!(info.feature_flags & FEATURE_TRUSTED_DEVICE_AUTH_V1, 0);
         assert_ne!(info.feature_flags & FEATURE_SIGNED_WEBRTC_BINDING_V1, 0);
         assert_ne!(info.feature_flags & FEATURE_TRUST_LEASE_RENEWAL_V1, 0);
+        assert_ne!(info.feature_flags & FEATURE_DECOUPLED_TRUST_POLICY_V1, 0);
+        assert_ne!(
+            info.feature_flags & FEATURE_HOST_SESSION_AUTHORIZATION_V1,
+            0
+        );
+        assert_ne!(
+            info.feature_flags & FEATURE_DIRECTIONAL_FILE_PERMISSIONS_V1,
+            0
+        );
     }
 
     #[test]
@@ -302,6 +336,27 @@ mod tests {
         assert!(negotiated.trusted_device.enabled);
         assert!(negotiated.trusted_device.signed_webrtc_binding);
         assert!(negotiated.trusted_device.lease_renewal);
+        assert!(negotiated.trusted_device.decoupled_trust_policy);
+        assert!(negotiated.trusted_device.host_session_authorization);
+        assert!(negotiated.trusted_device.directional_file_permissions);
+    }
+
+    #[test]
+    fn host_policy_features_require_a_complete_mutual_chain() {
+        let local = full_capabilities();
+        let mut remote = full_capabilities();
+        remote
+            .trusted_device
+            .as_mut()
+            .expect("trusted device")
+            .supports_host_session_authorization = false;
+
+        let negotiated = negotiate_data_capabilities(&local, &remote);
+
+        assert!(negotiated.trusted_device.enabled);
+        assert!(negotiated.trusted_device.decoupled_trust_policy);
+        assert!(!negotiated.trusted_device.host_session_authorization);
+        assert!(!negotiated.trusted_device.directional_file_permissions);
     }
 
     #[test]
@@ -361,6 +416,10 @@ mod tests {
                 supports_trusted_device_auth: true,
                 supports_signed_webrtc_binding: true,
                 supports_trust_lease_renewal: true,
+                supports_decoupled_trust_policy: true,
+                supports_host_session_authorization: true,
+                supports_directional_file_permissions: true,
+                supports_trusted_auth_suite_v2: true,
             }),
             ..Default::default()
         }

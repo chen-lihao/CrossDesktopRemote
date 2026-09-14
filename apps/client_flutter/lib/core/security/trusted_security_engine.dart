@@ -11,6 +11,8 @@ enum TrustedSecurityPhase {
   pairingAwaitingConfirmation,
   pairingConfirmed,
   authenticating,
+  awaitingHostAuthorization,
+  awaitingAuthorizationAck,
   awaitingWebRtcBinding,
   authorized,
   failed,
@@ -88,6 +90,24 @@ abstract interface class TrustedSecuritySession {
     required TrustedDeviceGrant grant,
     required Uint8List issuerRootPublicKey,
     required Uint8List expectedSubjectFingerprint,
+    required DateTime now,
+  });
+
+  void authenticateCredential({
+    required TrustedDeviceGrant grant,
+    required Uint8List issuerRootPublicKey,
+    required Uint8List expectedSubjectFingerprint,
+    required DateTime now,
+  });
+
+  Set<TrustedPermission> applyHostAuthorization({
+    required TrustedSessionAuthorization authorization,
+    required bool localIsHost,
+    required DateTime now,
+  });
+
+  Set<TrustedPermission> confirmHostAuthorizationAck({
+    required TrustedSessionAuthorizationAck acknowledgement,
     required DateTime now,
   });
 
@@ -342,6 +362,91 @@ class _NativeTrustedSecuritySession implements TrustedSecuritySession {
   }
 
   @override
+  void authenticateCredential({
+    required TrustedDeviceGrant grant,
+    required Uint8List issuerRootPublicKey,
+    required Uint8List expectedSubjectFingerprint,
+    required DateTime now,
+  }) {
+    _ensureOpen();
+    final encodedGrant = _encodeGrant(grant);
+    _withBytes(encodedGrant, (grantPointer, grantLength) {
+      _withBytes(issuerRootPublicKey, (keyPointer, keyLength) {
+        _withBytes(expectedSubjectFingerprint, (subjectPointer, subjectLength) {
+          _check(
+            _bindings.authenticateCredential(
+              _handle,
+              grantPointer,
+              grantLength,
+              keyPointer,
+              keyLength,
+              subjectPointer,
+              subjectLength,
+              now.toUtc().millisecondsSinceEpoch,
+            ),
+          );
+        });
+      });
+    });
+  }
+
+  @override
+  Set<TrustedPermission> applyHostAuthorization({
+    required TrustedSessionAuthorization authorization,
+    required bool localIsHost,
+    required DateTime now,
+  }) {
+    _ensureOpen();
+    authorization.validateStructure();
+    final encoded = _encodeSessionAuthorization(authorization);
+    final output = calloc<Uint64>();
+    try {
+      _withBytes(encoded, (pointer, length) {
+        _check(
+          _bindings.applyHostAuthorization(
+            _handle,
+            pointer,
+            length,
+            now.toUtc().millisecondsSinceEpoch,
+            localIsHost ? 1 : 0,
+            output,
+          ),
+        );
+      });
+      return Set.unmodifiable(trustedPermissionsFromBits(output.value));
+    } finally {
+      calloc.free(output);
+    }
+  }
+
+  @override
+  Set<TrustedPermission> confirmHostAuthorizationAck({
+    required TrustedSessionAuthorizationAck acknowledgement,
+    required DateTime now,
+  }) {
+    _ensureOpen();
+    acknowledgement.validateStructure();
+    final encoded = _encodeSessionAuthorizationAck(acknowledgement);
+    final output = calloc<Uint64>();
+    try {
+      _withBytes(encoded, (pointer, length) {
+        _check(
+          _bindings.confirmHostAuthorizationAck(
+            _handle,
+            pointer,
+            length,
+            now.toUtc().millisecondsSinceEpoch,
+            output,
+          ),
+        );
+      });
+      return Set.unmodifiable(trustedPermissionsFromBits(output.value));
+    } finally {
+      calloc.free(output);
+    }
+  }
+
+  @override
   void configureWebRtcContext({
     required Uint8List controllerNonce,
     required Uint8List hostNonce,
@@ -544,6 +649,42 @@ typedef _AuthorizeGrantDart = int Function(
   int,
   Pointer<Uint64>,
 );
+typedef _AuthenticateCredentialNative = Int32 Function(
+  Pointer<Void>,
+  Pointer<Uint8>,
+  IntPtr,
+  Pointer<Uint8>,
+  IntPtr,
+  Pointer<Uint8>,
+  IntPtr,
+  Uint64,
+);
+typedef _AuthenticateCredentialDart = int Function(
+  Pointer<Void>,
+  Pointer<Uint8>,
+  int,
+  Pointer<Uint8>,
+  int,
+  Pointer<Uint8>,
+  int,
+  int,
+);
+typedef _ApplyHostAuthorizationNative = Int32 Function(
+  Pointer<Void>,
+  Pointer<Uint8>,
+  IntPtr,
+  Uint64,
+  Uint8,
+  Pointer<Uint64>,
+);
+typedef _ApplyHostAuthorizationDart = int Function(
+  Pointer<Void>,
+  Pointer<Uint8>,
+  int,
+  int,
+  int,
+  Pointer<Uint64>,
+);
 typedef _ValidatePairingGrantNative = Int32 Function(
   Pointer<Void>,
   Pointer<Uint8>,
@@ -645,6 +786,20 @@ class _TrustedSecurityBindings {
           .lookupFunction<_AuthorizeGrantNative, _AuthorizeGrantDart>(
             'cdr_security_engine_authorize_grant',
           ),
+      authenticateCredential = library
+          .lookupFunction<
+            _AuthenticateCredentialNative,
+            _AuthenticateCredentialDart
+          >('cdr_security_engine_authenticate_credential'),
+      applyHostAuthorization = library
+          .lookupFunction<
+            _ApplyHostAuthorizationNative,
+            _ApplyHostAuthorizationDart
+          >('cdr_security_engine_apply_host_authorization'),
+      confirmHostAuthorizationAck = library
+          .lookupFunction<_BindWebRtcNative, _BindWebRtcDart>(
+            'cdr_security_engine_confirm_host_authorization_ack',
+          ),
       validatePairingGrant = library
           .lookupFunction<
             _ValidatePairingGrantNative,
@@ -671,6 +826,9 @@ class _TrustedSecurityBindings {
   final _BytesOperationDart revokeGrant;
   final _VerifyEnvelopeDart verifyEnvelope;
   final _AuthorizeGrantDart authorizeGrant;
+  final _AuthenticateCredentialDart authenticateCredential;
+  final _ApplyHostAuthorizationDart applyHostAuthorization;
+  final _BindWebRtcDart confirmHostAuthorizationAck;
   final _ValidatePairingGrantDart validatePairingGrant;
   final _ConfigureWebRtcContextDart configureWebRtcContext;
   final _BindWebRtcDart bindWebRtc;
@@ -756,7 +914,56 @@ Uint8List _encodeBinding(TrustedSessionBinding binding) {
     ..bytes(8, binding.answerSha256)
     ..bytes(9, binding.controllerDtlsFingerprintSha256)
     ..bytes(10, binding.hostDtlsFingerprintSha256)
-    ..uint64(11, binding.expiresAt.millisecondsSinceEpoch);
+    ..uint64(11, binding.expiresAt.millisecondsSinceEpoch)
+    ..uint64(12, binding.authSuiteVersion)
+    ..bytes(13, binding.authorizationSha256)
+    ..bytes(14, binding.capabilitySha256);
+  return writer.takeBytes();
+}
+
+Uint8List _encodeSessionAuthorization(
+  TrustedSessionAuthorization authorization,
+) {
+  final writer = _ProtoWriter()
+    ..uint64(1, 1)
+    ..string(2, authorization.sessionId)
+    ..bytes(3, authorization.credentialId)
+    ..uint64(4, authorization.policyRevision);
+  for (final permission in authorization.permissions) {
+    writer.uint64(5, permission.index + 1);
+  }
+  writer
+    ..bytes(6, authorization.controllerRootFingerprint)
+    ..bytes(7, authorization.hostRootFingerprint)
+    ..bytes(8, authorization.controllerNonce)
+    ..bytes(9, authorization.hostNonce)
+    ..uint64(10, authorization.issuedAt.millisecondsSinceEpoch)
+    ..uint64(11, authorization.expiresAt.millisecondsSinceEpoch)
+    ..uint64(12, authorization.authSuiteVersion)
+    ..bytes(13, authorization.capabilitySha256);
+  return writer.takeBytes();
+}
+
+Uint8List _encodeSessionAuthorizationAck(
+  TrustedSessionAuthorizationAck acknowledgement,
+) {
+  final writer = _ProtoWriter()
+    ..uint64(1, 1)
+    ..string(2, acknowledgement.sessionId)
+    ..bytes(3, acknowledgement.authorizationSha256)
+    ..uint64(4, acknowledgement.policyRevision);
+  for (final permission in acknowledgement.permissions) {
+    writer.uint64(5, permission.index + 1);
+  }
+  writer
+    ..bytes(6, acknowledgement.controllerRootFingerprint)
+    ..bytes(7, acknowledgement.hostRootFingerprint)
+    ..bytes(8, acknowledgement.controllerNonce)
+    ..bytes(9, acknowledgement.hostNonce)
+    ..uint64(10, acknowledgement.issuedAt.millisecondsSinceEpoch)
+    ..uint64(11, acknowledgement.expiresAt.millisecondsSinceEpoch)
+    ..uint64(12, acknowledgement.authSuiteVersion)
+    ..bytes(13, acknowledgement.capabilitySha256);
   return writer.takeBytes();
 }
 

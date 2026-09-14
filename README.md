@@ -348,10 +348,10 @@ flutter build ios --simulator --debug
 
 | 模块 | 已通过 | 未通过或未完成 |
 | --- | --- | --- |
-| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、窗口级全屏；桌面DNS-SD、统一跨平台切屏事务、可靠输入FIFO与无状态motion；macOS/Windows文本剪贴板；Mac/Windows/iPad显式文件通道和传输中心；桌面文件`Offer/PasteIntent/DestinationLease/Commit`事务；稳定`sessionId`与领域事件；SQLite十条分页、AES-GCM敏感元数据和文件传输审计；分辨率/帧率/码率独立策略；macOS同一isolate原生窗口宿主、Windows主View持久Texture展示面和媒体/展示生命周期分离；真实Track ID绑定、原生绑定确认、有界首帧门禁和非破坏修复；平台受保护设备身份、SAS配对、可信直连/续期/撤销；`analyze`零告警、232项测试通过且1项按设计跳过，macOS/iOS Debug构建成功 | 基线Flutter stable尚未开放windowing，OS独立窗口需单独main SDK或自有原生宿主验证；Windows MSVC构建、Windows打开/关闭远程桌面30次、Windows/iPad各30次主副屏往返和三端文件/剪贴板验收；可信认证三端真机验收；20 GB、磁盘满、输入P95与应用重启后续传；真正并列多屏仍由`multi-display-stream-v1`门禁关闭 |
-| Rust | `fmt`、Clippy；31个workspace单测；传输状态机、限额、Manifest/路径、恢复位图、SHA-256、WebRTC背压抽象与任务C ABI；P-256可信授权、签名信封、防重放、机器码v2与安全C ABI | 桌面MVP磁盘数据泵仍在Dart应用服务；下沉Rust/原生层和发布打包待接入 |
-| Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、服务端定时轮换与主动推送、lease/generation 原子更新、邀请/来源两级限流、`retryAfter`；可信机器码临时路由与跨认证方式单控制端仲裁；无数据库的注册表定向测试通过 | 本机未启动PostgreSQL时全量集成测试不可运行；可信路由仍为单JVM内存实现，Redis分布式路由/限流、生产会话票据和WSS尚未实现 |
-| Protobuf | v1基础消息、剪贴板/文件传输协议、显式能力协商和旧客户端降级；Buf lint、Java/Rust/Dart生成和编译 | 平台互操作、模糊测试和breaking基线待增加 |
+| Flutter / Native | 响应式壳层、Apple纵向链路、Windows/macOS桌面直接IME、窗口级全屏；桌面DNS-SD、统一跨平台切屏事务、可靠输入FIFO与无状态motion；macOS/Windows文本剪贴板；Mac/Windows/iPad显式文件通道和传输中心；桌面文件`Offer/PasteIntent/DestinationLease/Commit`事务；稳定`sessionId`与领域事件；SQLite十条分页、AES-GCM敏感元数据和文件传输审计；分辨率/帧率/码率独立策略；macOS同一isolate原生窗口宿主、Windows主View持久Texture展示面和媒体/展示生命周期分离；真实Track ID绑定、原生绑定确认、有界首帧门禁和非破坏修复；平台受保护设备身份、SAS配对、可信直连/续期/撤销；Host 持有的可编辑方向权限策略、签名 ACK 与短期会话权限同步；`analyze`零告警，Flutter 254 项通过、3 项环境跳过且真实 Rust FFI 3 项另行通过，macOS Debug 与无签名 iOS device Debug 构建成功 | iOS Rust 模拟器静态库及新增 FFI 符号已验证，但完整 simulator 打包当前被 GitHub 上游 sqlite3 原生资源网络超时阻塞；Windows MSVC 构建、Windows打开/关闭远程桌面30次、Windows/iPad各30次主副屏往返和三端文件/剪贴板验收；可信认证三端真机验收；20 GB、磁盘满、输入P95与应用重启后续传；真正并列多屏仍由`multi-display-stream-v1`门禁关闭 |
+| Rust | `fmt`、Clippy；workspace 43 项单测通过；传输状态机、限额、Manifest/路径、恢复位图、SHA-256、WebRTC背压抽象与任务C ABI；P-256可信身份、Host会话授权、Controller ACK、ACK 前媒体门禁、授权/能力摘要绑定、签名信封、防重放、机器码v2与安全C ABI | 桌面MVP磁盘数据泵仍在Dart应用服务；下沉Rust/原生层和发布打包待接入 |
+| Java | PostgreSQL/Redis、Flyway V1、健康检查；连接码 5 分钟 TTL、单次消费、服务端定时轮换与主动推送、lease/generation 原子更新、邀请/来源两级限流、`retryAfter`；可信机器码临时路由、授权 ACK 白名单转发与跨认证方式单控制端仲裁；全量测试通过 | 可信路由仍为单JVM内存实现，Redis分布式路由/限流、生产会话票据和WSS尚未实现 |
+| Protobuf | v1基础消息、剪贴板/文件传输协议、可信认证套件 v2、显式能力协商和旧客户端降级；Buf lint、Java/Rust/Dart生成和编译 | 平台互操作、模糊测试和breaking基线待增加 |
 | Infrastructure | PostgreSQL、Redis、coturn Compose 均健康 | 当前仅本地开发配置；生产密钥、TLS、高可用尚未配置 |
 
 相关说明：

@@ -385,6 +385,127 @@ class _DevicesPageState extends State<DevicesPage> {
     AppMessenger.show('已撤销 ${record.peerName}', level: AppMessageLevel.success);
   }
 
+  Future<void> _editHostAccessPolicy(TrustedDeviceRecord record) async {
+    final hostSession = _hostSession;
+    if (hostSession == null || !hostSession.canEditTrustedAccessPolicies) {
+      AppMessenger.show('远程会话期间不能修改权限，请断开后重试', level: AppMessageLevel.warning);
+      return;
+    }
+    final current = await widget.trustedDevices.hostAccessPolicyFor(record);
+    if (!mounted) return;
+    var enabled = current.enabled;
+    var permissions = {...current.permissions};
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          void setPermission(TrustedPermission permission, bool value) {
+            setDialogState(() {
+              if (value) {
+                permissions.add(permission);
+              } else {
+                permissions.remove(permission);
+              }
+            });
+          }
+
+          return AlertDialog(
+            title: Text('${record.peerName} 的访问权限'),
+            content: SizedBox(
+              width: 460,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SwitchListTile.adaptive(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('允许可信连接'),
+                      subtitle: const Text('关闭后保留可信身份，但拒绝新的免码连接。'),
+                      value: enabled,
+                      onChanged: (value) =>
+                          setDialogState(() => enabled = value),
+                    ),
+                    const Divider(),
+                    const CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text('查看屏幕'),
+                      value: true,
+                      onChanged: null,
+                    ),
+                    _policyPermissionTile(
+                      permission: TrustedPermission.controlInput,
+                      title: '控制键鼠',
+                      permissions: permissions,
+                      onChanged: setPermission,
+                    ),
+                    _policyPermissionTile(
+                      permission: TrustedPermission.readClipboard,
+                      title: '读取本机剪贴板',
+                      permissions: permissions,
+                      onChanged: setPermission,
+                    ),
+                    _policyPermissionTile(
+                      permission: TrustedPermission.writeClipboard,
+                      title: '写入本机剪贴板',
+                      permissions: permissions,
+                      onChanged: setPermission,
+                    ),
+                    _policyPermissionTile(
+                      permission: TrustedPermission.uploadFilesToHost,
+                      title: '向本机发送文件',
+                      permissions: permissions,
+                      onChanged: setPermission,
+                    ),
+                    _policyPermissionTile(
+                      permission: TrustedPermission.downloadFilesFromHost,
+                      title: '从本机下载文件',
+                      permissions: permissions,
+                      onChanged: setPermission,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('保存'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (saved != true || !mounted) return;
+    try {
+      await hostSession.updateTrustedAccessPolicy(
+        controllerRecord: record,
+        expectedRevision: current.revision,
+        enabled: enabled,
+        permissions: {...permissions, TrustedPermission.viewScreen},
+      );
+      AppMessenger.show('访问权限已保存，将在下次连接生效', level: AppMessageLevel.success);
+    } catch (error) {
+      AppMessenger.show('无法保存访问权限：$error', level: AppMessageLevel.error);
+    }
+  }
+
+  Widget _policyPermissionTile({
+    required TrustedPermission permission,
+    required String title,
+    required Set<TrustedPermission> permissions,
+    required void Function(TrustedPermission, bool) onChanged,
+  }) => CheckboxListTile(
+    contentPadding: EdgeInsets.zero,
+    title: Text(title),
+    value: permissions.contains(permission),
+    onChanged: (value) => onChanged(permission, value ?? false),
+  );
+
   Future<void> _setTrustedConnectionsPaused(bool paused) async {
     try {
       await widget.trustedDevices.setConnectionsPaused(paused);
@@ -850,15 +971,29 @@ class _DevicesPageState extends State<DevicesPage> {
                       ),
                       SwitchListTile.adaptive(
                         contentPadding: EdgeInsets.zero,
-                        title: const Text('允许文件传输'),
+                        title: const Text('允许向本机发送文件'),
                         value: pairing.permissions.contains(
-                          TrustedPermission.transferFiles,
+                          TrustedPermission.uploadFilesToHost,
                         ),
                         onChanged: pairing.remoteConfirmed
                             ? null
                             : (value) =>
                                   pairingSession!.setTrustedPairingPermission(
-                                    TrustedPermission.transferFiles,
+                                    TrustedPermission.uploadFilesToHost,
+                                    value,
+                                  ),
+                      ),
+                      SwitchListTile.adaptive(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('允许从本机下载文件'),
+                        value: pairing.permissions.contains(
+                          TrustedPermission.downloadFilesFromHost,
+                        ),
+                        onChanged: pairing.remoteConfirmed
+                            ? null
+                            : (value) =>
+                                  pairingSession!.setTrustedPairingPermission(
+                                    TrustedPermission.downloadFilesFromHost,
                                     value,
                                   ),
                       ),
@@ -928,6 +1063,18 @@ class _DevicesPageState extends State<DevicesPage> {
                         FilledButton.tonal(
                           onPressed: () => _connectTrustedDevice(record),
                           child: const Text('连接'),
+                        ),
+                      if (record.localIsIssuer)
+                        IconButton(
+                          tooltip:
+                              _hostSession?.canEditTrustedAccessPolicies == true
+                              ? '设置下次连接权限'
+                              : '远程会话期间不可修改权限',
+                          onPressed:
+                              _hostSession?.canEditTrustedAccessPolicies == true
+                              ? () => _editHostAccessPolicy(record)
+                              : null,
+                          icon: const Icon(Icons.tune_outlined),
                         ),
                       IconButton(
                         tooltip: '撤销可信关系',
@@ -1071,7 +1218,9 @@ class _DevicesPageState extends State<DevicesPage> {
         permissions.contains(TrustedPermission.writeClipboard)) {
       labels.add('剪贴板');
     }
-    if (permissions.contains(TrustedPermission.transferFiles)) {
+    if (permissions.contains(TrustedPermission.transferFiles) ||
+        permissions.contains(TrustedPermission.uploadFilesToHost) ||
+        permissions.contains(TrustedPermission.downloadFilesFromHost)) {
       labels.add('文件传输');
     }
     return labels.join('、');

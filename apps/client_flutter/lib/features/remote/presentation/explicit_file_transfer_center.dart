@@ -443,6 +443,9 @@ String _transferAvailabilityMessage(RemoteSessionController session) {
         ? '选择文件可发送；接收文件先进入应用暂存区，完成后由你导出或分享。'
         : '可以双向发送文件或目录；接收方选择保存位置后开始传输。';
   }
+  if (!session.trustedFileTransferSendAllowed) {
+    return '被控端未授权当前方向的文件传输；可在被控端断开会话后修改。';
+  }
   if (session.remoteSupportsExplicitFileTransferV1) {
     return '文件通道正在建立，请稍候。';
   }

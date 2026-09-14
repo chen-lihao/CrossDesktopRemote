@@ -69,6 +69,30 @@ void main() {
     );
   });
 
+  test('rejects an incoming offer before creating a transfer task', () async {
+    receiver.dispose();
+    receiver = ExplicitFileTransferEngine(incomingTransferAllowed: () => false);
+    _connect(sender, receiver);
+    await _waitFor(() => sender.transportReady && receiver.transportReady);
+    final source = File(
+      '${sandbox.path}${Platform.pathSeparator}not-authorized.txt',
+    );
+    await source.writeAsString('denied');
+
+    final transferId = await sender.sendFiles([source.path]);
+    await _waitFor(
+      () =>
+          sender.tasks.singleWhere((task) => task.id == transferId).state ==
+          ExplicitFileTransferState.failed,
+    );
+
+    expect(receiver.tasks, isEmpty);
+    expect(
+      sender.tasks.singleWhere((task) => task.id == transferId).message,
+      contains('未授权'),
+    );
+  });
+
   test('clipboard purpose survives offer negotiation without changing v1 transport', () async {
     _connect(sender, receiver);
     await _waitFor(() => sender.transportReady && receiver.transportReady);

@@ -41,6 +41,10 @@ enum PermissionScope {
   PERMISSION_SCOPE_TRANSFER_FILE = 5;
   PERMISSION_SCOPE_CAPTURE_SCREENSHOT = 6;
   PERMISSION_SCOPE_RECORD_SESSION = 7;
+  // Directional file permissions are used by host-owned session policy.
+  // PERMISSION_SCOPE_TRANSFER_FILE remains the legacy bidirectional scope.
+  PERMISSION_SCOPE_UPLOAD_FILE_TO_HOST = 8;
+  PERMISSION_SCOPE_DOWNLOAD_FILE_FROM_HOST = 9;
 }
 
 message DisplayCapability {
@@ -56,6 +60,10 @@ message TrustedDeviceCapabilities {
   bool supports_trusted_device_auth = 3;
   bool supports_signed_webrtc_binding = 4;
   bool supports_trust_lease_renewal = 5;
+  bool supports_decoupled_trust_policy = 6;
+  bool supports_host_session_authorization = 7;
+  bool supports_directional_file_permissions = 8;
+  bool supports_trusted_auth_suite_v2 = 9;
 }
 
 message ClientCapabilities {

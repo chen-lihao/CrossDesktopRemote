@@ -4,11 +4,12 @@ import java.io.IOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -24,6 +25,8 @@ import tools.jackson.databind.ObjectMapper;
 final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 	private static final int MAX_MESSAGE_BYTES = 64 * 1024;
+	private static final int MAX_CAPABILITY_COUNT = 64;
+	private static final int MAX_CAPABILITY_MANIFEST_BYTES = 4 * 1024;
 	private static final Set<String> ALLOWED_MESSAGE_TYPES = Set.of(
 			"approve",
 			"answer",
@@ -35,6 +38,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			"trusted-auth-start",
 			"trusted-auth-challenge",
 			"trusted-auth-response",
+			"trusted-session-authorization",
+			"trusted-session-authorization-accepted",
 			"trusted-offer",
 			"trusted-answer",
 			"trusted-binding-ack",
@@ -82,7 +87,13 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		if (repeatedCapabilities != null) capabilityValues.addAll(repeatedCapabilities);
 		var legacyCapabilities = query.getFirst("capabilities");
 		if (StringUtils.hasText(legacyCapabilities)) capabilityValues.add(legacyCapabilities);
-		var clientCapabilities = normalizedCapabilities(capabilityValues);
+		Set<String> clientCapabilities;
+		try {
+			clientCapabilities = normalizedCapabilities(capabilityValues);
+		} catch (CapabilityManifestException exception) {
+			session.close(CloseStatus.BAD_DATA.withReason(exception.reason()));
+			return;
+		}
 		var trustedController = role.isPresent()
 				&& role.get() == SignalingRole.CONTROLLER
 				&& StringUtils.hasText(trustedTarget);
@@ -147,6 +158,7 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		ready.put("type", "ready");
 		ready.put("protocolVersion", 2);
 		ready.put("capabilities", Set.of(
+				"capability-manifest-v1",
 				"server-invitations",
 				"invitation-rotation",
 				"server-invitation-push",
@@ -375,23 +387,43 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 	private Set<String> normalizedCapabilities(List<String> values) {
 		if (values == null || values.isEmpty()) return Set.of();
-		var capabilities = new HashSet<String>();
+		var capabilities = new TreeSet<String>();
+		var manifestBytes = 0;
 		for (var value : values) {
 			if (!StringUtils.hasText(value)) continue;
 			String decoded;
 			try {
 				decoded = URLDecoder.decode(value, StandardCharsets.UTF_8);
-			} catch (IllegalArgumentException ignored) {
-				continue;
+			} catch (IllegalArgumentException exception) {
+				throw new CapabilityManifestException("CAPABILITY_MANIFEST_INVALID");
 			}
 			for (var candidate : decoded.split(",")) {
 				var normalized = candidate.trim().toLowerCase();
-				if (normalized.matches("[a-z0-9_-]{1,64}")) {
-					capabilities.add(normalized);
-					if (capabilities.size() >= 16) return Set.copyOf(capabilities);
+				if (normalized.isEmpty()) continue;
+				if (!normalized.matches("[a-z0-9_-]{1,64}")) {
+					throw new CapabilityManifestException("CAPABILITY_MANIFEST_INVALID");
+				}
+				if (!capabilities.add(normalized)) continue;
+				manifestBytes += normalized.getBytes(StandardCharsets.UTF_8).length + 1;
+				if (capabilities.size() > MAX_CAPABILITY_COUNT
+						|| manifestBytes > MAX_CAPABILITY_MANIFEST_BYTES) {
+					throw new CapabilityManifestException("CAPABILITY_MANIFEST_TOO_LARGE");
 				}
 			}
 		}
-		return Set.copyOf(capabilities);
+		return Collections.unmodifiableSet(capabilities);
+	}
+
+	private static final class CapabilityManifestException extends RuntimeException {
+		private final String reason;
+
+		CapabilityManifestException(String reason) {
+			super(reason);
+			this.reason = reason;
+		}
+
+		String reason() {
+			return reason;
+		}
 	}
 }

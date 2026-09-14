@@ -19,6 +19,8 @@ pub const MAX_SIGNED_PAYLOAD_BYTES: usize = 32 * 1_024;
 pub const MAX_DER_SIGNATURE_BYTES: usize = 80;
 pub const MAX_EPHEMERAL_PUBLIC_KEY_BYTES: usize = 512;
 pub const P256_UNCOMPRESSED_PUBLIC_KEY_BYTES: usize = 65;
+pub const TRUSTED_AUTH_SUITE_LEGACY: u32 = 1;
+pub const TRUSTED_AUTH_SUITE_V2: u32 = 2;
 
 /// One time-validity policy is shared by certificates, grants and signed
 /// envelopes. Clock skew is accepted only at the lower (not-before) bound;
@@ -69,6 +71,8 @@ pub enum SessionPermission {
     TransferFiles = 4,
     CaptureScreenshot = 5,
     RecordSession = 6,
+    UploadFilesToHost = 7,
+    DownloadFilesFromHost = 8,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -77,7 +81,7 @@ pub struct PermissionSet(u64);
 impl PermissionSet {
     #[must_use]
     pub const fn from_bits(bits: u64) -> Self {
-        Self(bits & 0x7f)
+        Self(bits & 0x1ff)
     }
 
     #[must_use]
@@ -286,13 +290,150 @@ pub struct TrustedSessionBinding {
     pub controller_dtls_fingerprint_sha256: [u8; ROOT_FINGERPRINT_BYTES],
     pub host_dtls_fingerprint_sha256: [u8; ROOT_FINGERPRINT_BYTES],
     pub expires_at_unix_ms: u64,
+    pub auth_suite_version: u32,
+    pub authorization_sha256: [u8; ROOT_FINGERPRINT_BYTES],
+    pub capability_sha256: [u8; ROOT_FINGERPRINT_BYTES],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedSessionAuthorization {
+    pub protocol_version: u32,
+    pub session_id: String,
+    pub credential_id: [u8; 16],
+    pub policy_revision: u64,
+    pub permissions: PermissionSet,
+    pub controller_root_fingerprint: [u8; ROOT_FINGERPRINT_BYTES],
+    pub host_root_fingerprint: [u8; ROOT_FINGERPRINT_BYTES],
+    pub controller_nonce: [u8; NONCE_BYTES],
+    pub host_nonce: [u8; NONCE_BYTES],
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    pub auth_suite_version: u32,
+    pub capability_sha256: [u8; ROOT_FINGERPRINT_BYTES],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedSessionAuthorizationAck {
+    pub protocol_version: u32,
+    pub session_id: String,
+    pub authorization_sha256: [u8; ROOT_FINGERPRINT_BYTES],
+    pub policy_revision: u64,
+    pub permissions: PermissionSet,
+    pub controller_root_fingerprint: [u8; ROOT_FINGERPRINT_BYTES],
+    pub host_root_fingerprint: [u8; ROOT_FINGERPRINT_BYTES],
+    pub controller_nonce: [u8; NONCE_BYTES],
+    pub host_nonce: [u8; NONCE_BYTES],
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    pub auth_suite_version: u32,
+    pub capability_sha256: [u8; ROOT_FINGERPRINT_BYTES],
+}
+
+impl TrustedSessionAuthorization {
+    #[must_use]
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut output = Vec::with_capacity(256);
+        append_domain(
+            &mut output,
+            b"CrossDesktopRemote/TrustedSessionAuthorization/v2",
+        );
+        append_bytes(&mut output, self.session_id.as_bytes());
+        append_bytes(&mut output, &self.credential_id);
+        output.extend_from_slice(&self.policy_revision.to_be_bytes());
+        output.extend_from_slice(&self.permissions.bits().to_be_bytes());
+        append_bytes(&mut output, &self.controller_root_fingerprint);
+        append_bytes(&mut output, &self.host_root_fingerprint);
+        append_bytes(&mut output, &self.controller_nonce);
+        append_bytes(&mut output, &self.host_nonce);
+        output.extend_from_slice(&self.issued_at_unix_ms.to_be_bytes());
+        output.extend_from_slice(&self.expires_at_unix_ms.to_be_bytes());
+        output.extend_from_slice(&self.auth_suite_version.to_be_bytes());
+        append_bytes(&mut output, &self.capability_sha256);
+        output
+    }
+
+    fn validate_time(&self, now_unix_ms: u64) -> Result<(), SecurityError> {
+        if self.protocol_version != 1
+            || self.session_id.is_empty()
+            || self.session_id.len() > MAX_SESSION_ID_BYTES
+            || self.policy_revision == 0
+            || self.permissions.bits() == 0
+            || !self.permissions.contains(SessionPermission::ViewScreen)
+            || self.permissions.contains(SessionPermission::TransferFiles)
+            || self.auth_suite_version != TRUSTED_AUTH_SUITE_V2
+            || self.capability_sha256.iter().all(|byte| *byte == 0)
+            || self.expires_at_unix_ms <= self.issued_at_unix_ms
+            || self.expires_at_unix_ms - self.issued_at_unix_ms > DEFAULT_SESSION_TICKET_LIFETIME_MS
+        {
+            return Err(SecurityError::InvalidMessage);
+        }
+        TrustedTimePolicy::default().validate_not_before(self.issued_at_unix_ms, now_unix_ms)?;
+        if now_unix_ms >= self.expires_at_unix_ms {
+            return Err(SecurityError::Expired);
+        }
+        Ok(())
+    }
+}
+
+impl TrustedSessionAuthorizationAck {
+    #[must_use]
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut output = Vec::with_capacity(256);
+        append_domain(
+            &mut output,
+            b"CrossDesktopRemote/TrustedSessionAuthorizationAck/v1",
+        );
+        append_bytes(&mut output, self.session_id.as_bytes());
+        append_bytes(&mut output, &self.authorization_sha256);
+        output.extend_from_slice(&self.policy_revision.to_be_bytes());
+        output.extend_from_slice(&self.permissions.bits().to_be_bytes());
+        append_bytes(&mut output, &self.controller_root_fingerprint);
+        append_bytes(&mut output, &self.host_root_fingerprint);
+        append_bytes(&mut output, &self.controller_nonce);
+        append_bytes(&mut output, &self.host_nonce);
+        output.extend_from_slice(&self.issued_at_unix_ms.to_be_bytes());
+        output.extend_from_slice(&self.expires_at_unix_ms.to_be_bytes());
+        output.extend_from_slice(&self.auth_suite_version.to_be_bytes());
+        append_bytes(&mut output, &self.capability_sha256);
+        output
+    }
+
+    fn validate_time(&self, now_unix_ms: u64) -> Result<(), SecurityError> {
+        if self.protocol_version != 1
+            || self.session_id.is_empty()
+            || self.session_id.len() > MAX_SESSION_ID_BYTES
+            || self.authorization_sha256.iter().all(|byte| *byte == 0)
+            || self.policy_revision == 0
+            || self.permissions.bits() == 0
+            || !self.permissions.contains(SessionPermission::ViewScreen)
+            || self.permissions.contains(SessionPermission::TransferFiles)
+            || self.auth_suite_version != TRUSTED_AUTH_SUITE_V2
+            || self.capability_sha256.iter().all(|byte| *byte == 0)
+            || self.expires_at_unix_ms <= self.issued_at_unix_ms
+            || self.expires_at_unix_ms - self.issued_at_unix_ms > DEFAULT_SESSION_TICKET_LIFETIME_MS
+        {
+            return Err(SecurityError::InvalidMessage);
+        }
+        TrustedTimePolicy::default().validate_not_before(self.issued_at_unix_ms, now_unix_ms)?;
+        if now_unix_ms >= self.expires_at_unix_ms {
+            return Err(SecurityError::Expired);
+        }
+        Ok(())
+    }
 }
 
 impl TrustedSessionBinding {
     #[must_use]
     pub fn signing_bytes(&self) -> Vec<u8> {
         let mut output = Vec::with_capacity(320);
-        append_domain(&mut output, b"CrossDesktopRemote/TrustedSessionBinding/v1");
+        append_domain(
+            &mut output,
+            if self.auth_suite_version == TRUSTED_AUTH_SUITE_V2 {
+                b"CrossDesktopRemote/TrustedSessionBinding/v2"
+            } else {
+                b"CrossDesktopRemote/TrustedSessionBinding/v1"
+            },
+        );
         append_bytes(&mut output, self.session_id.as_bytes());
         append_bytes(&mut output, &self.controller_nonce);
         append_bytes(&mut output, &self.host_nonce);
@@ -304,6 +445,11 @@ impl TrustedSessionBinding {
         append_bytes(&mut output, &self.controller_dtls_fingerprint_sha256);
         append_bytes(&mut output, &self.host_dtls_fingerprint_sha256);
         output.extend_from_slice(&self.expires_at_unix_ms.to_be_bytes());
+        if self.auth_suite_version == TRUSTED_AUTH_SUITE_V2 {
+            output.extend_from_slice(&self.auth_suite_version.to_be_bytes());
+            append_bytes(&mut output, &self.authorization_sha256);
+            append_bytes(&mut output, &self.capability_sha256);
+        }
         output
     }
 
@@ -329,6 +475,20 @@ impl TrustedSessionBinding {
                 .iter()
                 .all(|byte| *byte == 0)
         {
+            return Err(SecurityError::InvalidMessage);
+        }
+        let valid_suite = match self.auth_suite_version {
+            TRUSTED_AUTH_SUITE_LEGACY => {
+                self.authorization_sha256.iter().all(|byte| *byte == 0)
+                    && self.capability_sha256.iter().all(|byte| *byte == 0)
+            }
+            TRUSTED_AUTH_SUITE_V2 => {
+                !self.authorization_sha256.iter().all(|byte| *byte == 0)
+                    && !self.capability_sha256.iter().all(|byte| *byte == 0)
+            }
+            _ => false,
+        };
+        if !valid_suite {
             return Err(SecurityError::InvalidMessage);
         }
         validate_p256_public_key(&self.controller_ephemeral_public_key)?;
@@ -426,9 +586,11 @@ pub enum TrustedSecurityPhase {
     PairingAwaitingConfirmation = 1,
     PairingConfirmed = 2,
     Authenticating = 3,
-    AwaitingWebRtcBinding = 4,
-    Authorized = 5,
-    Failed = 6,
+    AwaitingHostAuthorization = 4,
+    AwaitingAuthorizationAck = 5,
+    AwaitingWebRtcBinding = 6,
+    Authorized = 7,
+    Failed = 8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -448,6 +610,9 @@ struct ActiveTrustedSession {
     peer_authentication_public_key: Option<Vec<u8>>,
     verified_payload: Option<Vec<u8>>,
     web_rtc_context: Option<TrustedWebRtcContext>,
+    authorization_sha256: Option<[u8; ROOT_FINGERPRINT_BYTES]>,
+    authorization_policy_revision: Option<u64>,
+    authorization_capability_sha256: Option<[u8; ROOT_FINGERPRINT_BYTES]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,6 +720,9 @@ impl TrustedSecurityEngine {
             peer_authentication_public_key: None,
             verified_payload: None,
             web_rtc_context: None,
+            authorization_sha256: None,
+            authorization_policy_revision: None,
+            authorization_capability_sha256: None,
         });
         self.phase = match mode {
             TrustedSessionMode::Pairing => TrustedSecurityPhase::PairingAwaitingConfirmation,
@@ -576,7 +744,10 @@ impl TrustedSecurityEngine {
         if self.paused
             || !matches!(
                 self.phase,
-                TrustedSecurityPhase::Authenticating | TrustedSecurityPhase::AwaitingWebRtcBinding
+                TrustedSecurityPhase::Authenticating
+                    | TrustedSecurityPhase::AwaitingWebRtcBinding
+                    | TrustedSecurityPhase::AwaitingHostAuthorization
+                    | TrustedSecurityPhase::AwaitingAuthorizationAck
             )
         {
             return Err(SecurityError::InvalidState);
@@ -692,6 +863,8 @@ impl TrustedSecurityEngine {
             || !matches!(
                 self.phase,
                 TrustedSecurityPhase::Authenticating
+                    | TrustedSecurityPhase::AwaitingHostAuthorization
+                    | TrustedSecurityPhase::AwaitingAuthorizationAck
                     | TrustedSecurityPhase::AwaitingWebRtcBinding
                     | TrustedSecurityPhase::Authorized
             )
@@ -775,6 +948,165 @@ impl TrustedSecurityEngine {
         Ok(granted)
     }
 
+    /// Validates a trust grant only as a device credential. Its legacy
+    /// permission bits never become live session authority.
+    pub fn authenticate_credential(
+        &mut self,
+        grant: &TrustGrant,
+        issuer_root_public_key_sec1: &[u8],
+        expected_subject: &[u8; ROOT_FINGERPRINT_BYTES],
+        now_unix_ms: u64,
+    ) -> Result<(), SecurityError> {
+        if self.paused
+            || !matches!(
+                self.phase,
+                TrustedSecurityPhase::Authenticating
+                    | TrustedSecurityPhase::AwaitingHostAuthorization
+                    | TrustedSecurityPhase::Authorized
+            )
+        {
+            return Err(SecurityError::InvalidState);
+        }
+        let active = self.active.as_ref().ok_or(SecurityError::InvalidState)?;
+        if self.revoked_grants.contains(&grant.grant_id) {
+            self.fail_closed();
+            return Err(SecurityError::Revoked);
+        }
+        let identity_scope = PermissionSet::default().grant(SessionPermission::ViewScreen);
+        if let Err(error) = grant.validate(
+            issuer_root_public_key_sec1,
+            expected_subject,
+            identity_scope,
+            now_unix_ms,
+        ) {
+            self.fail_closed();
+            return Err(error);
+        }
+        if self.phase == TrustedSecurityPhase::Authorized {
+            return Ok(());
+        }
+        if active.requested_permissions != identity_scope {
+            self.fail_closed();
+            return Err(SecurityError::PermissionDenied);
+        }
+        let active = self.active.as_mut().ok_or(SecurityError::InvalidState)?;
+        active.grant_id = Some(grant.grant_id);
+        self.advance_after_authentication_inputs();
+        Ok(())
+    }
+
+    /// Installs the host-owned policy snapshot on the host side. The security
+    /// core validates every binding field; Dart cannot expand its authority.
+    pub fn install_host_authorization(
+        &mut self,
+        authorization: &TrustedSessionAuthorization,
+        now_unix_ms: u64,
+    ) -> Result<PermissionSet, SecurityError> {
+        self.apply_host_authorization(authorization, now_unix_ms, true)
+    }
+
+    /// Accepts the exact authorization payload previously verified inside the
+    /// host's signed envelope on the controller side.
+    pub fn accept_host_authorization(
+        &mut self,
+        authorization: &TrustedSessionAuthorization,
+        now_unix_ms: u64,
+    ) -> Result<PermissionSet, SecurityError> {
+        self.apply_host_authorization(authorization, now_unix_ms, false)
+    }
+
+    fn apply_host_authorization(
+        &mut self,
+        authorization: &TrustedSessionAuthorization,
+        now_unix_ms: u64,
+        local_is_host: bool,
+    ) -> Result<PermissionSet, SecurityError> {
+        if self.paused || self.phase != TrustedSecurityPhase::AwaitingHostAuthorization {
+            return Err(SecurityError::InvalidState);
+        }
+        if let Err(error) = authorization.validate_time(now_unix_ms) {
+            self.fail_closed();
+            return Err(error);
+        }
+        let active = self.active.as_ref().ok_or(SecurityError::InvalidState)?;
+        let Some(context) = active.web_rtc_context.as_ref() else {
+            self.fail_closed();
+            return Err(SecurityError::InvalidState);
+        };
+        let identities_match = if local_is_host {
+            authorization.host_root_fingerprint == self.local_root_fingerprint
+                && authorization.controller_root_fingerprint == active.peer_root_fingerprint
+        } else {
+            authorization.controller_root_fingerprint == self.local_root_fingerprint
+                && authorization.host_root_fingerprint == active.peer_root_fingerprint
+        };
+        let signed_payload_matches = local_is_host
+            || active.verified_payload.as_deref() == Some(authorization.signing_bytes().as_slice());
+        if authorization.session_id != active.session_id
+            || active.grant_id != Some(authorization.credential_id)
+            || authorization.controller_nonce != context.controller_nonce
+            || authorization.host_nonce != context.host_nonce
+            || !identities_match
+            || !signed_payload_matches
+        {
+            self.fail_closed();
+            return Err(SecurityError::SessionMismatch);
+        }
+        let authorization_sha256: [u8; ROOT_FINGERPRINT_BYTES] =
+            Sha256::digest(authorization.signing_bytes()).into();
+        let active = self.active.as_mut().ok_or(SecurityError::InvalidState)?;
+        active.requested_permissions = authorization.permissions;
+        active.granted_permissions = authorization.permissions;
+        active.authorization_sha256 = Some(authorization_sha256);
+        active.authorization_policy_revision = Some(authorization.policy_revision);
+        active.authorization_capability_sha256 = Some(authorization.capability_sha256);
+        self.phase = if local_is_host {
+            TrustedSecurityPhase::AwaitingAuthorizationAck
+        } else {
+            TrustedSecurityPhase::AwaitingWebRtcBinding
+        };
+        Ok(authorization.permissions)
+    }
+
+    /// Confirms that the controller accepted the exact host-owned permission
+    /// snapshot. The host must not start capture or create a WebRTC offer until
+    /// the controller's signed acknowledgement has passed this check.
+    pub fn confirm_host_authorization_ack(
+        &mut self,
+        acknowledgement: &TrustedSessionAuthorizationAck,
+        now_unix_ms: u64,
+    ) -> Result<PermissionSet, SecurityError> {
+        if self.paused || self.phase != TrustedSecurityPhase::AwaitingAuthorizationAck {
+            return Err(SecurityError::InvalidState);
+        }
+        if let Err(error) = acknowledgement.validate_time(now_unix_ms) {
+            self.fail_closed();
+            return Err(error);
+        }
+        let active = self.active.as_ref().ok_or(SecurityError::InvalidState)?;
+        let Some(context) = active.web_rtc_context.as_ref() else {
+            self.fail_closed();
+            return Err(SecurityError::InvalidState);
+        };
+        if acknowledgement.session_id != active.session_id
+            || acknowledgement.controller_root_fingerprint != active.peer_root_fingerprint
+            || acknowledgement.host_root_fingerprint != self.local_root_fingerprint
+            || acknowledgement.controller_nonce != context.controller_nonce
+            || acknowledgement.host_nonce != context.host_nonce
+            || acknowledgement.permissions != active.granted_permissions
+            || active.authorization_sha256 != Some(acknowledgement.authorization_sha256)
+            || active.authorization_policy_revision != Some(acknowledgement.policy_revision)
+            || active.authorization_capability_sha256 != Some(acknowledgement.capability_sha256)
+            || active.verified_payload.as_deref()
+                != Some(acknowledgement.signing_bytes().as_slice())
+        {
+            self.fail_closed();
+            return Err(SecurityError::SessionMismatch);
+        }
+        self.phase = TrustedSecurityPhase::AwaitingWebRtcBinding;
+        Ok(active.granted_permissions)
+    }
+
     pub fn bind_webrtc(
         &mut self,
         binding: &TrustedSessionBinding,
@@ -797,11 +1129,20 @@ impl TrustedSecurityEngine {
             context.controller_authentication_public_key == *peer_authentication_public_key;
         let host_is_peer =
             context.host_authentication_public_key == *peer_authentication_public_key;
+        let authorization_matches = match active.authorization_sha256 {
+            Some(expected) => {
+                binding.auth_suite_version == TRUSTED_AUTH_SUITE_V2
+                    && binding.authorization_sha256 == expected
+                    && active.authorization_capability_sha256 == Some(binding.capability_sha256)
+            }
+            None => binding.auth_suite_version == TRUSTED_AUTH_SUITE_LEGACY,
+        };
         if binding.session_id != active.session_id
             || binding.requested_permissions != active.requested_permissions
             || active.verified_payload.as_deref() != Some(binding.signing_bytes().as_slice())
             || !context.matches(binding)
             || controller_is_peer == host_is_peer
+            || !authorization_matches
         {
             self.fail_closed();
             return Err(SecurityError::SessionMismatch);
@@ -844,13 +1185,20 @@ impl TrustedSecurityEngine {
     }
 
     fn advance_after_authentication_inputs(&mut self) {
-        if self.phase != TrustedSecurityPhase::Authorized
-            && self
-                .active
-                .as_ref()
-                .is_some_and(|active| active.peer_proof_verified && active.grant_id.is_some())
+        let ready = self
+            .active
+            .as_ref()
+            .filter(|active| active.peer_proof_verified && active.grant_id.is_some());
+        if matches!(
+            self.phase,
+            TrustedSecurityPhase::Authenticating | TrustedSecurityPhase::AwaitingHostAuthorization
+        ) && ready.is_some()
         {
-            self.phase = TrustedSecurityPhase::AwaitingWebRtcBinding;
+            self.phase = if ready.is_some_and(|active| active.granted_permissions.bits() == 0) {
+                TrustedSecurityPhase::AwaitingHostAuthorization
+            } else {
+                TrustedSecurityPhase::AwaitingWebRtcBinding
+            };
         }
     }
 
@@ -1116,6 +1464,57 @@ mod tests {
         SigningKey::from_bytes((&[byte; 32]).into()).expect("test key")
     }
 
+    fn authentication_certificate(
+        root: &SigningKey,
+        authentication: &SigningKey,
+        root_fingerprint: [u8; ROOT_FINGERPRINT_BYTES],
+    ) -> AuthenticationKeyCertificate {
+        let mut certificate = AuthenticationKeyCertificate {
+            root_fingerprint,
+            authentication_public_key_sec1: authentication
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
+            not_before_unix_ms: 1_000,
+            expires_at_unix_ms: 1_000 + DEFAULT_AUTH_KEY_LIFETIME_MS,
+            root_signature_der: Vec::new(),
+        };
+        let signature: Signature = root.sign(&certificate.signing_bytes());
+        certificate.root_signature_der = signature.to_der().as_bytes().to_vec();
+        certificate
+    }
+
+    struct EnvelopeContext<'a> {
+        session_id: &'a str,
+        sender: [u8; ROOT_FINGERPRINT_BYTES],
+        recipient: [u8; ROOT_FINGERPRINT_BYTES],
+        sequence: u64,
+        nonce: [u8; NONCE_BYTES],
+        payload: Vec<u8>,
+    }
+
+    fn signed_envelope(
+        authentication: &SigningKey,
+        context: EnvelopeContext<'_>,
+    ) -> SignedPeerEnvelope {
+        let mut envelope = SignedPeerEnvelope {
+            protocol_version: 1,
+            session_id: context.session_id.into(),
+            sender_root_fingerprint: context.sender,
+            recipient_root_fingerprint: context.recipient,
+            sequence: context.sequence,
+            issued_at_unix_ms: 2_000 + context.sequence * 1_000,
+            expires_at_unix_ms: 55_000,
+            nonce: context.nonce,
+            payload: context.payload,
+            signature_der: Vec::new(),
+        };
+        let signature: Signature = authentication.sign(&envelope.signing_bytes());
+        envelope.signature_der = signature.to_der().as_bytes().to_vec();
+        envelope
+    }
+
     #[test]
     fn permissions_are_independent_and_intersected() {
         let allowed = PermissionSet::default()
@@ -1131,6 +1530,43 @@ mod tests {
             PermissionSet::default().grant(SessionPermission::ViewScreen)
         );
         assert!(!requested.is_subset_of(allowed));
+    }
+
+    #[test]
+    fn host_session_authorization_requires_directional_frozen_permissions() {
+        let authorization = TrustedSessionAuthorization {
+            protocol_version: 1,
+            session_id: "policy-session".into(),
+            credential_id: [1; 16],
+            policy_revision: 3,
+            permissions: PermissionSet::default()
+                .grant(SessionPermission::ViewScreen)
+                .grant(SessionPermission::UploadFilesToHost),
+            controller_root_fingerprint: [2; ROOT_FINGERPRINT_BYTES],
+            host_root_fingerprint: [3; ROOT_FINGERPRINT_BYTES],
+            controller_nonce: [4; NONCE_BYTES],
+            host_nonce: [5; NONCE_BYTES],
+            issued_at_unix_ms: 1_000,
+            expires_at_unix_ms: 46_000,
+            auth_suite_version: TRUSTED_AUTH_SUITE_V2,
+            capability_sha256: [6; ROOT_FINGERPRINT_BYTES],
+        };
+
+        assert_eq!(authorization.validate_time(2_000), Ok(()));
+        assert_eq!(
+            authorization.validate_time(46_000),
+            Err(SecurityError::Expired)
+        );
+        let legacy = TrustedSessionAuthorization {
+            permissions: PermissionSet::default()
+                .grant(SessionPermission::ViewScreen)
+                .grant(SessionPermission::TransferFiles),
+            ..authorization
+        };
+        assert_eq!(
+            legacy.validate_time(2_000),
+            Err(SecurityError::InvalidMessage)
+        );
     }
 
     #[test]
@@ -1392,6 +1828,9 @@ mod tests {
             controller_dtls_fingerprint_sha256: [5; ROOT_FINGERPRINT_BYTES],
             host_dtls_fingerprint_sha256: [6; ROOT_FINGERPRINT_BYTES],
             expires_at_unix_ms: 55_000,
+            auth_suite_version: TRUSTED_AUTH_SUITE_LEGACY,
+            authorization_sha256: [0; ROOT_FINGERPRINT_BYTES],
+            capability_sha256: [0; ROOT_FINGERPRINT_BYTES],
         };
 
         let mut certificate = AuthenticationKeyCertificate {
@@ -1509,6 +1948,497 @@ mod tests {
     }
 
     #[test]
+    fn controller_accepts_only_host_signed_session_policy_before_media() {
+        let host = key(71);
+        let controller = key(72);
+        let host_authentication = key(73);
+        let controller_authentication = key(74);
+        let host_public = host.verifying_key().to_encoded_point(false);
+        let controller_public = controller.verifying_key().to_encoded_point(false);
+        let host_fingerprint = root_fingerprint(host_public.as_bytes()).expect("host fingerprint");
+        let controller_fingerprint =
+            root_fingerprint(controller_public.as_bytes()).expect("controller fingerprint");
+        let identity_scope = PermissionSet::default().grant(SessionPermission::ViewScreen);
+        let policy_permissions = identity_scope
+            .grant(SessionPermission::ControlInput)
+            .grant(SessionPermission::DownloadFilesFromHost);
+        let controller_nonce = [1; NONCE_BYTES];
+        let host_nonce = [2; NONCE_BYTES];
+        let mut engine = TrustedSecurityEngine::new(controller_fingerprint);
+        engine
+            .begin_session(
+                "host-policy-session".into(),
+                host_fingerprint,
+                identity_scope,
+                TrustedSessionMode::TrustedAuthentication,
+            )
+            .expect("begin session");
+        engine
+            .configure_webrtc_context(
+                controller_nonce,
+                host_nonce,
+                controller_authentication
+                    .verifying_key()
+                    .to_encoded_point(false)
+                    .as_bytes()
+                    .to_vec(),
+                host_authentication
+                    .verifying_key()
+                    .to_encoded_point(false)
+                    .as_bytes()
+                    .to_vec(),
+            )
+            .expect("freeze WebRTC context");
+
+        let mut host_certificate = AuthenticationKeyCertificate {
+            root_fingerprint: host_fingerprint,
+            authentication_public_key_sec1: host_authentication
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
+            not_before_unix_ms: 1_000,
+            expires_at_unix_ms: 1_000 + DEFAULT_AUTH_KEY_LIFETIME_MS,
+            root_signature_der: Vec::new(),
+        };
+        let certificate_signature: Signature = host.sign(&host_certificate.signing_bytes());
+        host_certificate.root_signature_der = certificate_signature.to_der().as_bytes().to_vec();
+        let mut challenge = SignedPeerEnvelope {
+            protocol_version: 1,
+            session_id: "host-policy-session".into(),
+            sender_root_fingerprint: host_fingerprint,
+            recipient_root_fingerprint: controller_fingerprint,
+            sequence: 1,
+            issued_at_unix_ms: 2_000,
+            expires_at_unix_ms: 50_000,
+            nonce: [3; NONCE_BYTES],
+            payload: b"host-challenge".to_vec(),
+            signature_der: Vec::new(),
+        };
+        let challenge_signature: Signature = host_authentication.sign(&challenge.signing_bytes());
+        challenge.signature_der = challenge_signature.to_der().as_bytes().to_vec();
+        engine
+            .verify_envelope(&challenge, host_public.as_bytes(), &host_certificate, 3_000)
+            .expect("host proof");
+
+        let mut credential = TrustGrant {
+            grant_id: [4; 16],
+            issuer_root_fingerprint: host_fingerprint,
+            subject_root_fingerprint: controller_fingerprint,
+            permissions: identity_scope,
+            issued_at_unix_ms: 1_000,
+            soft_expires_at_unix_ms: 10_000,
+            hard_expires_at_unix_ms: 20_000,
+            automatic_renewal: true,
+            issuer_signature_der: Vec::new(),
+        };
+        let credential_signature: Signature = host.sign(&credential.signing_bytes());
+        credential.issuer_signature_der = credential_signature.to_der().as_bytes().to_vec();
+        engine
+            .authenticate_credential(
+                &credential,
+                host_public.as_bytes(),
+                &controller_fingerprint,
+                4_000,
+            )
+            .expect("identity credential");
+        assert_eq!(
+            engine.phase(),
+            TrustedSecurityPhase::AwaitingHostAuthorization
+        );
+
+        let authorization = TrustedSessionAuthorization {
+            protocol_version: 1,
+            session_id: "host-policy-session".into(),
+            credential_id: credential.grant_id,
+            policy_revision: 7,
+            permissions: policy_permissions,
+            controller_root_fingerprint: controller_fingerprint,
+            host_root_fingerprint: host_fingerprint,
+            controller_nonce,
+            host_nonce,
+            issued_at_unix_ms: 4_000,
+            expires_at_unix_ms: 49_000,
+            auth_suite_version: TRUSTED_AUTH_SUITE_V2,
+            capability_sha256: [11; ROOT_FINGERPRINT_BYTES],
+        };
+        let mut policy_envelope = SignedPeerEnvelope {
+            protocol_version: 1,
+            session_id: "host-policy-session".into(),
+            sender_root_fingerprint: host_fingerprint,
+            recipient_root_fingerprint: controller_fingerprint,
+            sequence: 2,
+            issued_at_unix_ms: 4_000,
+            expires_at_unix_ms: 50_000,
+            nonce: [5; NONCE_BYTES],
+            payload: authorization.signing_bytes(),
+            signature_der: Vec::new(),
+        };
+        let policy_signature: Signature =
+            host_authentication.sign(&policy_envelope.signing_bytes());
+        policy_envelope.signature_der = policy_signature.to_der().as_bytes().to_vec();
+        engine
+            .verify_envelope(
+                &policy_envelope,
+                host_public.as_bytes(),
+                &host_certificate,
+                5_000,
+            )
+            .expect("signed host policy");
+        assert_eq!(
+            engine
+                .accept_host_authorization(&authorization, 5_000)
+                .expect("accept policy"),
+            policy_permissions
+        );
+
+        let authorization_sha256: [u8; ROOT_FINGERPRINT_BYTES] =
+            Sha256::digest(authorization.signing_bytes()).into();
+        let binding = TrustedSessionBinding {
+            session_id: "host-policy-session".into(),
+            controller_nonce,
+            host_nonce,
+            requested_permissions: policy_permissions,
+            controller_ephemeral_public_key: controller_authentication
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
+            host_ephemeral_public_key: host_authentication
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
+            offer_sha256: [6; ROOT_FINGERPRINT_BYTES],
+            answer_sha256: [7; ROOT_FINGERPRINT_BYTES],
+            controller_dtls_fingerprint_sha256: [8; ROOT_FINGERPRINT_BYTES],
+            host_dtls_fingerprint_sha256: [9; ROOT_FINGERPRINT_BYTES],
+            expires_at_unix_ms: 50_000,
+            auth_suite_version: TRUSTED_AUTH_SUITE_V2,
+            authorization_sha256,
+            capability_sha256: authorization.capability_sha256,
+        };
+        let mut offer_envelope = SignedPeerEnvelope {
+            protocol_version: 1,
+            session_id: "host-policy-session".into(),
+            sender_root_fingerprint: host_fingerprint,
+            recipient_root_fingerprint: controller_fingerprint,
+            sequence: 3,
+            issued_at_unix_ms: 5_000,
+            expires_at_unix_ms: 50_000,
+            nonce: [10; NONCE_BYTES],
+            payload: binding.signing_bytes(),
+            signature_der: Vec::new(),
+        };
+        let offer_signature: Signature = host_authentication.sign(&offer_envelope.signing_bytes());
+        offer_envelope.signature_der = offer_signature.to_der().as_bytes().to_vec();
+        engine
+            .verify_envelope(
+                &offer_envelope,
+                host_public.as_bytes(),
+                &host_certificate,
+                5_500,
+            )
+            .expect("signed media offer");
+        assert_eq!(
+            engine.bind_webrtc(&binding, 6_000).expect("media binding"),
+            policy_permissions
+        );
+        assert_eq!(engine.phase(), TrustedSecurityPhase::Authorized);
+    }
+
+    #[test]
+    fn suite_v2_requires_controller_authorization_ack_before_media() {
+        let host_root = key(81);
+        let controller_root = key(82);
+        let host_authentication = key(83);
+        let controller_authentication = key(84);
+        let host_public = host_root.verifying_key().to_encoded_point(false);
+        let controller_public = controller_root.verifying_key().to_encoded_point(false);
+        let host_fingerprint = root_fingerprint(host_public.as_bytes()).expect("host fingerprint");
+        let controller_fingerprint =
+            root_fingerprint(controller_public.as_bytes()).expect("controller fingerprint");
+        let host_certificate =
+            authentication_certificate(&host_root, &host_authentication, host_fingerprint);
+        let controller_certificate = authentication_certificate(
+            &controller_root,
+            &controller_authentication,
+            controller_fingerprint,
+        );
+        let identity_scope = PermissionSet::default().grant(SessionPermission::ViewScreen);
+        let policy_permissions = identity_scope
+            .grant(SessionPermission::ControlInput)
+            .grant(SessionPermission::UploadFilesToHost)
+            .grant(SessionPermission::DownloadFilesFromHost);
+        let controller_nonce = [1; NONCE_BYTES];
+        let host_nonce = [2; NONCE_BYTES];
+        let capability_sha256 = [12; ROOT_FINGERPRINT_BYTES];
+        let mut host = TrustedSecurityEngine::new(host_fingerprint);
+        let mut controller = TrustedSecurityEngine::new(controller_fingerprint);
+        for (engine, peer) in [
+            (&mut host, controller_fingerprint),
+            (&mut controller, host_fingerprint),
+        ] {
+            engine
+                .begin_session(
+                    "suite-v2-session".into(),
+                    peer,
+                    identity_scope,
+                    TrustedSessionMode::TrustedAuthentication,
+                )
+                .expect("begin session");
+            engine
+                .configure_webrtc_context(
+                    controller_nonce,
+                    host_nonce,
+                    controller_authentication
+                        .verifying_key()
+                        .to_encoded_point(false)
+                        .as_bytes()
+                        .to_vec(),
+                    host_authentication
+                        .verifying_key()
+                        .to_encoded_point(false)
+                        .as_bytes()
+                        .to_vec(),
+                )
+                .expect("freeze WebRTC context");
+        }
+
+        let host_proof = signed_envelope(
+            &host_authentication,
+            EnvelopeContext {
+                session_id: "suite-v2-session",
+                sender: host_fingerprint,
+                recipient: controller_fingerprint,
+                sequence: 1,
+                nonce: [3; NONCE_BYTES],
+                payload: b"host-proof".to_vec(),
+            },
+        );
+        controller
+            .verify_envelope(
+                &host_proof,
+                host_public.as_bytes(),
+                &host_certificate,
+                4_000,
+            )
+            .expect("verify host proof");
+        let controller_proof = signed_envelope(
+            &controller_authentication,
+            EnvelopeContext {
+                session_id: "suite-v2-session",
+                sender: controller_fingerprint,
+                recipient: host_fingerprint,
+                sequence: 1,
+                nonce: [4; NONCE_BYTES],
+                payload: b"controller-proof".to_vec(),
+            },
+        );
+        host.verify_envelope(
+            &controller_proof,
+            controller_public.as_bytes(),
+            &controller_certificate,
+            4_000,
+        )
+        .expect("verify controller proof");
+
+        let mut credential = TrustGrant {
+            grant_id: [5; 16],
+            issuer_root_fingerprint: host_fingerprint,
+            subject_root_fingerprint: controller_fingerprint,
+            permissions: identity_scope,
+            issued_at_unix_ms: 1_000,
+            soft_expires_at_unix_ms: 30_000,
+            hard_expires_at_unix_ms: 60_000,
+            automatic_renewal: true,
+            issuer_signature_der: Vec::new(),
+        };
+        let signature: Signature = host_root.sign(&credential.signing_bytes());
+        credential.issuer_signature_der = signature.to_der().as_bytes().to_vec();
+        for engine in [&mut host, &mut controller] {
+            engine
+                .authenticate_credential(
+                    &credential,
+                    host_public.as_bytes(),
+                    &controller_fingerprint,
+                    5_000,
+                )
+                .expect("authenticate identity credential");
+            assert_eq!(
+                engine.phase(),
+                TrustedSecurityPhase::AwaitingHostAuthorization
+            );
+        }
+
+        let authorization = TrustedSessionAuthorization {
+            protocol_version: 1,
+            session_id: "suite-v2-session".into(),
+            credential_id: credential.grant_id,
+            policy_revision: 9,
+            permissions: policy_permissions,
+            controller_root_fingerprint: controller_fingerprint,
+            host_root_fingerprint: host_fingerprint,
+            controller_nonce,
+            host_nonce,
+            issued_at_unix_ms: 5_000,
+            expires_at_unix_ms: 50_000,
+            auth_suite_version: TRUSTED_AUTH_SUITE_V2,
+            capability_sha256,
+        };
+        assert_eq!(
+            host.install_host_authorization(&authorization, 6_000)
+                .expect("install host authorization"),
+            policy_permissions
+        );
+        assert_eq!(host.phase(), TrustedSecurityPhase::AwaitingAuthorizationAck);
+
+        let authorization_envelope = signed_envelope(
+            &host_authentication,
+            EnvelopeContext {
+                session_id: "suite-v2-session",
+                sender: host_fingerprint,
+                recipient: controller_fingerprint,
+                sequence: 2,
+                nonce: [6; NONCE_BYTES],
+                payload: authorization.signing_bytes(),
+            },
+        );
+        controller
+            .verify_envelope(
+                &authorization_envelope,
+                host_public.as_bytes(),
+                &host_certificate,
+                6_000,
+            )
+            .expect("verify host authorization");
+        controller
+            .accept_host_authorization(&authorization, 6_000)
+            .expect("accept host authorization");
+        assert_eq!(
+            controller.phase(),
+            TrustedSecurityPhase::AwaitingWebRtcBinding
+        );
+
+        let authorization_sha256: [u8; ROOT_FINGERPRINT_BYTES] =
+            Sha256::digest(authorization.signing_bytes()).into();
+        let binding = TrustedSessionBinding {
+            session_id: "suite-v2-session".into(),
+            controller_nonce,
+            host_nonce,
+            requested_permissions: policy_permissions,
+            controller_ephemeral_public_key: controller_authentication
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
+            host_ephemeral_public_key: host_authentication
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
+            offer_sha256: [7; ROOT_FINGERPRINT_BYTES],
+            answer_sha256: [8; ROOT_FINGERPRINT_BYTES],
+            controller_dtls_fingerprint_sha256: [9; ROOT_FINGERPRINT_BYTES],
+            host_dtls_fingerprint_sha256: [10; ROOT_FINGERPRINT_BYTES],
+            expires_at_unix_ms: 50_000,
+            auth_suite_version: TRUSTED_AUTH_SUITE_V2,
+            authorization_sha256,
+            capability_sha256,
+        };
+        assert_eq!(
+            host.bind_webrtc(&binding, 6_000),
+            Err(SecurityError::InvalidState)
+        );
+
+        let acknowledgement = TrustedSessionAuthorizationAck {
+            protocol_version: 1,
+            session_id: "suite-v2-session".into(),
+            authorization_sha256,
+            policy_revision: authorization.policy_revision,
+            permissions: policy_permissions,
+            controller_root_fingerprint: controller_fingerprint,
+            host_root_fingerprint: host_fingerprint,
+            controller_nonce,
+            host_nonce,
+            issued_at_unix_ms: 6_000,
+            expires_at_unix_ms: 50_000,
+            auth_suite_version: TRUSTED_AUTH_SUITE_V2,
+            capability_sha256,
+        };
+        let acknowledgement_envelope = signed_envelope(
+            &controller_authentication,
+            EnvelopeContext {
+                session_id: "suite-v2-session",
+                sender: controller_fingerprint,
+                recipient: host_fingerprint,
+                sequence: 2,
+                nonce: [11; NONCE_BYTES],
+                payload: acknowledgement.signing_bytes(),
+            },
+        );
+        host.verify_envelope(
+            &acknowledgement_envelope,
+            controller_public.as_bytes(),
+            &controller_certificate,
+            7_000,
+        )
+        .expect("verify controller authorization acknowledgement");
+        assert_eq!(
+            host.confirm_host_authorization_ack(&acknowledgement, 7_000)
+                .expect("confirm authorization acknowledgement"),
+            policy_permissions
+        );
+        assert_eq!(host.phase(), TrustedSecurityPhase::AwaitingWebRtcBinding);
+
+        let offer_envelope = signed_envelope(
+            &host_authentication,
+            EnvelopeContext {
+                session_id: "suite-v2-session",
+                sender: host_fingerprint,
+                recipient: controller_fingerprint,
+                sequence: 3,
+                nonce: [12; NONCE_BYTES],
+                payload: binding.signing_bytes(),
+            },
+        );
+        controller
+            .verify_envelope(
+                &offer_envelope,
+                host_public.as_bytes(),
+                &host_certificate,
+                8_000,
+            )
+            .expect("verify signed offer binding");
+        controller
+            .bind_webrtc(&binding, 8_000)
+            .expect("authorize controller media");
+
+        let answer_envelope = signed_envelope(
+            &controller_authentication,
+            EnvelopeContext {
+                session_id: "suite-v2-session",
+                sender: controller_fingerprint,
+                recipient: host_fingerprint,
+                sequence: 3,
+                nonce: [13; NONCE_BYTES],
+                payload: binding.signing_bytes(),
+            },
+        );
+        host.verify_envelope(
+            &answer_envelope,
+            controller_public.as_bytes(),
+            &controller_certificate,
+            8_000,
+        )
+        .expect("verify signed answer binding");
+        host.bind_webrtc(&binding, 8_000)
+            .expect("authorize host media");
+        assert_eq!(host.phase(), TrustedSecurityPhase::Authorized);
+        assert_eq!(controller.phase(), TrustedSecurityPhase::Authorized);
+    }
+
+    #[test]
     fn trusted_engine_rejects_replacing_frozen_webrtc_context() {
         let local = key(51).verifying_key().to_encoded_point(false);
         let peer = key(52).verifying_key().to_encoded_point(false);
@@ -1570,6 +2500,9 @@ mod tests {
             controller_dtls_fingerprint_sha256: [5; ROOT_FINGERPRINT_BYTES],
             host_dtls_fingerprint_sha256: [6; ROOT_FINGERPRINT_BYTES],
             expires_at_unix_ms: 55_000,
+            auth_suite_version: TRUSTED_AUTH_SUITE_LEGACY,
+            authorization_sha256: [0; ROOT_FINGERPRINT_BYTES],
+            capability_sha256: [0; ROOT_FINGERPRINT_BYTES],
         };
         assert_eq!(valid.validate(requested, 5_000), Ok(()));
 

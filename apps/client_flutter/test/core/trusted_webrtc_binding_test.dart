@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:cross_desktop_remote/core/security/trusted_device_models.dart';
@@ -100,6 +101,102 @@ void main() {
       throwsFormatException,
     );
   });
+
+  test('suite v2 binds the accepted authorization and capability set', () {
+    final authorizationSha256 = Uint8List.fromList(List.filled(32, 7));
+    final capabilitySha256 = trustedAuthSuiteCapabilityHash(trustedAuthSuiteV2);
+    final binding = codec.build(
+      sessionId: 'route-v2',
+      controllerNonce: Uint8List.fromList(List.filled(16, 3)),
+      hostNonce: Uint8List.fromList(List.filled(16, 4)),
+      requestedPermissions: defaultHostAccessPermissions,
+      controllerIdentity: controller,
+      hostIdentity: host,
+      offerSdp: offer,
+      answerSdp: answer,
+      expiresAt: DateTime.utc(2026, 9, 13, 10),
+      authSuiteVersion: trustedAuthSuiteV2,
+      authorizationSha256: authorizationSha256,
+      capabilitySha256: capabilitySha256,
+    );
+    final restored = TrustedSessionBinding.fromJson(binding.toJson());
+
+    expect(restored.signingBytes, orderedEquals(binding.signingBytes));
+    expect(
+      codec.matchesTranscript(
+        restored,
+        sessionId: 'route-v2',
+        controllerNonce: Uint8List.fromList(List.filled(16, 3)),
+        hostNonce: Uint8List.fromList(List.filled(16, 4)),
+        requestedPermissions: defaultHostAccessPermissions,
+        controllerIdentity: controller,
+        hostIdentity: host,
+        offerSdp: offer,
+        answerSdp: answer,
+        authSuiteVersion: trustedAuthSuiteV2,
+        authorizationSha256: authorizationSha256,
+        capabilitySha256: Uint8List.fromList(List.filled(32, 8)),
+      ),
+      isFalse,
+    );
+    expect(
+      codec.matchesTranscript(
+        restored,
+        sessionId: 'route-v2',
+        controllerNonce: Uint8List.fromList(List.filled(16, 3)),
+        hostNonce: Uint8List.fromList(List.filled(16, 4)),
+        requestedPermissions: defaultHostAccessPermissions,
+        controllerIdentity: controller,
+        hostIdentity: host,
+        offerSdp: offer,
+        answerSdp: answer,
+        authSuiteVersion: trustedAuthSuiteV2,
+        authorizationSha256: Uint8List.fromList(List.filled(32, 9)),
+        capabilitySha256: capabilitySha256,
+      ),
+      isFalse,
+    );
+  });
+
+  test(
+    'authorization acknowledgement round-trips without losing authority',
+    () {
+      final acknowledgement = TrustedSessionAuthorizationAck(
+        sessionId: 'route-ack',
+        authorizationSha256: Uint8List.fromList(List.filled(32, 7)),
+        policyRevision: 5,
+        permissions: defaultHostAccessPermissions,
+        controllerRootFingerprint: Uint8List.fromList(List.filled(32, 1)),
+        hostRootFingerprint: Uint8List.fromList(List.filled(32, 2)),
+        controllerNonce: Uint8List.fromList(List.filled(16, 3)),
+        hostNonce: Uint8List.fromList(List.filled(16, 4)),
+        issuedAt: DateTime.utc(2026, 9, 13, 9),
+        expiresAt: DateTime.utc(2026, 9, 13, 9, 0, 45),
+        authSuiteVersion: trustedAuthSuiteV2,
+        capabilitySha256: trustedAuthSuiteCapabilityHash(trustedAuthSuiteV2),
+      );
+      final restored = TrustedSessionAuthorizationAck.fromJson(
+        acknowledgement.toJson(),
+      );
+
+      restored.validateStructure();
+      expect(
+        restored.signingBytes,
+        orderedEquals(acknowledgement.signingBytes),
+      );
+
+      final tampered = <String, Object?>{
+        ...acknowledgement.toJson(),
+        'authorizationSha256': base64Encode(Uint8List(32)),
+      };
+      expect(
+        () =>
+            TrustedSessionAuthorizationAck.fromJson(tampered)
+                .validateStructure(),
+        throwsFormatException,
+      );
+    },
+  );
 }
 
 TrustedPeerIdentity _identity(int fill) => TrustedPeerIdentity(

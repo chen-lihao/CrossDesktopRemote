@@ -18,6 +18,28 @@ const trustedMaximumClockSkew = Duration(seconds: 30);
 const trustedMaximumSignedPayloadBytes = 32 * 1024;
 const trustedMaximumSessionIdBytes = 128;
 const trustedMaximumSignatureBytes = 80;
+const trustedAuthSuiteLegacy = 1;
+const trustedAuthSuiteV2 = 2;
+
+Uint8List trustedAuthSuiteCapabilityHash(int version) {
+  if (version != trustedAuthSuiteV2) {
+    return Uint8List(32);
+  }
+  return Uint8List.fromList(
+    sha256
+        .convert(
+          utf8.encode(
+            'CrossDesktopRemote/TrustedAuthSuite/v2\n'
+            'decoupled-trust-policy-v1\n'
+            'directional-file-permissions-v1\n'
+            'host-session-authorization-v1\n'
+            'signed-webrtc-binding-v1\n'
+            'trusted-auth-suite-v2',
+          ),
+        )
+        .bytes,
+  );
+}
 
 enum TrustedPermission {
   viewScreen,
@@ -27,6 +49,8 @@ enum TrustedPermission {
   transferFiles,
   captureScreenshot,
   recordSession,
+  uploadFilesToHost,
+  downloadFilesFromHost,
 }
 
 int trustedPermissionBits(Iterable<TrustedPermission> permissions) =>
@@ -37,10 +61,214 @@ Set<TrustedPermission> trustedPermissionsFromBits(int bits) => {
     if (bits & (1 << permission.index) != 0) permission,
 };
 
+Set<TrustedPermission> trustedPermissionsFromBitsStrict(int bits) {
+  final validMask = (1 << TrustedPermission.values.length) - 1;
+  if (bits < 0 || bits & ~validMask != 0) {
+    throw const FormatException('Unknown trusted permission bits');
+  }
+  return trustedPermissionsFromBits(bits);
+}
+
 const defaultTrustedPermissions = {
   TrustedPermission.viewScreen,
   TrustedPermission.controlInput,
 };
+
+const defaultHostAccessPermissions = {
+  TrustedPermission.viewScreen,
+  TrustedPermission.controlInput,
+  TrustedPermission.readClipboard,
+  TrustedPermission.writeClipboard,
+  TrustedPermission.uploadFilesToHost,
+  TrustedPermission.downloadFilesFromHost,
+};
+
+Set<TrustedPermission> normalizeHostAccessPermissions(
+  Iterable<TrustedPermission> permissions,
+) {
+  final normalized = permissions.toSet();
+  if (normalized.remove(TrustedPermission.transferFiles)) {
+    normalized
+      ..add(TrustedPermission.uploadFilesToHost)
+      ..add(TrustedPermission.downloadFilesFromHost);
+  }
+  return Set.unmodifiable(normalized);
+}
+
+Set<TrustedPermission> legacyCompatiblePermissions(
+  Iterable<TrustedPermission> permissions,
+) {
+  final compatible = permissions.toSet();
+  if (compatible.contains(TrustedPermission.uploadFilesToHost) &&
+      compatible.contains(TrustedPermission.downloadFilesFromHost)) {
+    compatible.add(TrustedPermission.transferFiles);
+  }
+  return Set.unmodifiable(compatible);
+}
+
+@immutable
+class HostAccessPolicy {
+  const HostAccessPolicy({
+    required this.controllerRootFingerprint,
+    required this.revision,
+    required this.enabled,
+    required this.permissions,
+    required this.updatedAt,
+  });
+
+  factory HostAccessPolicy.fromJson(Map<String, dynamic> value) =>
+      HostAccessPolicy(
+        controllerRootFingerprint: base64Decode(
+          value['controllerRootFingerprint'] as String,
+        ),
+        revision: (value['revision'] as num).toInt(),
+        enabled: value['enabled'] == true,
+        permissions: normalizeHostAccessPermissions(
+          trustedPermissionsFromBitsStrict(
+            (value['permissionBits'] as num).toInt(),
+          ),
+        ),
+        updatedAt: DateTime.parse(value['updatedAt'] as String).toUtc(),
+      );
+
+  final Uint8List controllerRootFingerprint;
+  final int revision;
+  final bool enabled;
+  final Set<TrustedPermission> permissions;
+  final DateTime updatedAt;
+
+  Map<String, dynamic> toJson() => {
+    'controllerRootFingerprint': base64Encode(controllerRootFingerprint),
+    'revision': revision,
+    'enabled': enabled,
+    'permissionBits': trustedPermissionBits(permissions),
+    'updatedAt': updatedAt.toIso8601String(),
+  };
+
+  void validateStructure() {
+    _requireLength(controllerRootFingerprint, 32, 'controllerRootFingerprint');
+    if (revision < 1 ||
+        permissions.isEmpty ||
+        !permissions.contains(TrustedPermission.viewScreen) ||
+        permissions.contains(TrustedPermission.transferFiles)) {
+      throw const FormatException('Invalid host access policy');
+    }
+  }
+}
+
+@immutable
+class TrustedSessionAuthorization {
+  const TrustedSessionAuthorization({
+    required this.sessionId,
+    required this.credentialId,
+    required this.policyRevision,
+    required this.permissions,
+    required this.controllerRootFingerprint,
+    required this.hostRootFingerprint,
+    required this.controllerNonce,
+    required this.hostNonce,
+    required this.issuedAt,
+    required this.expiresAt,
+    required this.authSuiteVersion,
+    required this.capabilitySha256,
+  });
+
+  factory TrustedSessionAuthorization.fromJson(Map<String, dynamic> value) =>
+      TrustedSessionAuthorization(
+        sessionId: value['sessionId'] as String,
+        credentialId: base64Decode(value['credentialId'] as String),
+        policyRevision: (value['policyRevision'] as num).toInt(),
+        permissions: normalizeHostAccessPermissions(
+          trustedPermissionsFromBitsStrict(
+            (value['permissionBits'] as num).toInt(),
+          ),
+        ),
+        controllerRootFingerprint: base64Decode(
+          value['controllerRootFingerprint'] as String,
+        ),
+        hostRootFingerprint: base64Decode(
+          value['hostRootFingerprint'] as String,
+        ),
+        controllerNonce: base64Decode(value['controllerNonce'] as String),
+        hostNonce: base64Decode(value['hostNonce'] as String),
+        issuedAt: DateTime.fromMillisecondsSinceEpoch(
+          (value['issuedAtUnixMs'] as num).toInt(),
+          isUtc: true,
+        ),
+        expiresAt: DateTime.fromMillisecondsSinceEpoch(
+          (value['expiresAtUnixMs'] as num).toInt(),
+          isUtc: true,
+        ),
+        authSuiteVersion: (value['authSuiteVersion'] as num).toInt(),
+        capabilitySha256: base64Decode(value['capabilitySha256'] as String),
+      );
+
+  final String sessionId;
+  final Uint8List credentialId;
+  final int policyRevision;
+  final Set<TrustedPermission> permissions;
+  final Uint8List controllerRootFingerprint;
+  final Uint8List hostRootFingerprint;
+  final Uint8List controllerNonce;
+  final Uint8List hostNonce;
+  final DateTime issuedAt;
+  final DateTime expiresAt;
+  final int authSuiteVersion;
+  final Uint8List capabilitySha256;
+
+  Uint8List get signingBytes => securityCanonicalBytes((out) {
+    out.bytes(utf8.encode('CrossDesktopRemote/TrustedSessionAuthorization/v2'));
+    out.bytes(utf8.encode(sessionId));
+    out.bytes(credentialId);
+    out.uint64(policyRevision);
+    out.uint64(trustedPermissionBits(permissions));
+    out.bytes(controllerRootFingerprint);
+    out.bytes(hostRootFingerprint);
+    out.bytes(controllerNonce);
+    out.bytes(hostNonce);
+    out.uint64(issuedAt.millisecondsSinceEpoch);
+    out.uint64(expiresAt.millisecondsSinceEpoch);
+    out.uint32(authSuiteVersion);
+    out.bytes(capabilitySha256);
+  });
+
+  Map<String, dynamic> toJson() => {
+    'sessionId': sessionId,
+    'credentialId': base64Encode(credentialId),
+    'policyRevision': policyRevision,
+    'permissionBits': trustedPermissionBits(permissions),
+    'controllerRootFingerprint': base64Encode(controllerRootFingerprint),
+    'hostRootFingerprint': base64Encode(hostRootFingerprint),
+    'controllerNonce': base64Encode(controllerNonce),
+    'hostNonce': base64Encode(hostNonce),
+    'issuedAtUnixMs': issuedAt.millisecondsSinceEpoch,
+    'expiresAtUnixMs': expiresAt.millisecondsSinceEpoch,
+    'authSuiteVersion': authSuiteVersion,
+    'capabilitySha256': base64Encode(capabilitySha256),
+  };
+
+  void validateStructure() {
+    if (utf8.encode(sessionId).isEmpty ||
+        utf8.encode(sessionId).length > trustedMaximumSessionIdBytes ||
+        credentialId.length != 16 ||
+        policyRevision < 1 ||
+        permissions.isEmpty ||
+        !permissions.contains(TrustedPermission.viewScreen) ||
+        permissions.contains(TrustedPermission.transferFiles) ||
+        !expiresAt.isAfter(issuedAt) ||
+        authSuiteVersion != trustedAuthSuiteV2) {
+      throw const FormatException('Invalid trusted session authorization');
+    }
+    _requireLength(controllerRootFingerprint, 32, 'controllerRootFingerprint');
+    _requireLength(hostRootFingerprint, 32, 'hostRootFingerprint');
+    _requireLength(capabilitySha256, 32, 'capabilitySha256');
+    if (_allZero(capabilitySha256)) {
+      throw const FormatException('Invalid trusted authentication suite');
+    }
+    _requireLength(controllerNonce, 16, 'controllerNonce');
+    _requireLength(hostNonce, 16, 'hostNonce');
+  }
+}
 
 @immutable
 class TrustedPeerIdentity {
@@ -250,6 +478,122 @@ class TrustedDeviceGrant {
 }
 
 @immutable
+class TrustedSessionAuthorizationAck {
+  const TrustedSessionAuthorizationAck({
+    required this.sessionId,
+    required this.authorizationSha256,
+    required this.policyRevision,
+    required this.permissions,
+    required this.controllerRootFingerprint,
+    required this.hostRootFingerprint,
+    required this.controllerNonce,
+    required this.hostNonce,
+    required this.issuedAt,
+    required this.expiresAt,
+    required this.authSuiteVersion,
+    required this.capabilitySha256,
+  });
+
+  factory TrustedSessionAuthorizationAck.fromJson(
+    Map<String, dynamic> value,
+  ) => TrustedSessionAuthorizationAck(
+    sessionId: value['sessionId'] as String,
+    authorizationSha256: base64Decode(value['authorizationSha256'] as String),
+    policyRevision: (value['policyRevision'] as num).toInt(),
+    permissions: normalizeHostAccessPermissions(
+      trustedPermissionsFromBitsStrict(
+        (value['permissionBits'] as num).toInt(),
+      ),
+    ),
+    controllerRootFingerprint: base64Decode(
+      value['controllerRootFingerprint'] as String,
+    ),
+    hostRootFingerprint: base64Decode(value['hostRootFingerprint'] as String),
+    controllerNonce: base64Decode(value['controllerNonce'] as String),
+    hostNonce: base64Decode(value['hostNonce'] as String),
+    issuedAt: DateTime.fromMillisecondsSinceEpoch(
+      (value['issuedAtUnixMs'] as num).toInt(),
+      isUtc: true,
+    ),
+    expiresAt: DateTime.fromMillisecondsSinceEpoch(
+      (value['expiresAtUnixMs'] as num).toInt(),
+      isUtc: true,
+    ),
+    authSuiteVersion: (value['authSuiteVersion'] as num).toInt(),
+    capabilitySha256: base64Decode(value['capabilitySha256'] as String),
+  );
+
+  final String sessionId;
+  final Uint8List authorizationSha256;
+  final int policyRevision;
+  final Set<TrustedPermission> permissions;
+  final Uint8List controllerRootFingerprint;
+  final Uint8List hostRootFingerprint;
+  final Uint8List controllerNonce;
+  final Uint8List hostNonce;
+  final DateTime issuedAt;
+  final DateTime expiresAt;
+  final int authSuiteVersion;
+  final Uint8List capabilitySha256;
+
+  Uint8List get signingBytes => securityCanonicalBytes((out) {
+    out.bytes(
+      utf8.encode('CrossDesktopRemote/TrustedSessionAuthorizationAck/v1'),
+    );
+    out.bytes(utf8.encode(sessionId));
+    out.bytes(authorizationSha256);
+    out.uint64(policyRevision);
+    out.uint64(trustedPermissionBits(permissions));
+    out.bytes(controllerRootFingerprint);
+    out.bytes(hostRootFingerprint);
+    out.bytes(controllerNonce);
+    out.bytes(hostNonce);
+    out.uint64(issuedAt.millisecondsSinceEpoch);
+    out.uint64(expiresAt.millisecondsSinceEpoch);
+    out.uint32(authSuiteVersion);
+    out.bytes(capabilitySha256);
+  });
+
+  Map<String, dynamic> toJson() => {
+    'sessionId': sessionId,
+    'authorizationSha256': base64Encode(authorizationSha256),
+    'policyRevision': policyRevision,
+    'permissionBits': trustedPermissionBits(permissions),
+    'controllerRootFingerprint': base64Encode(controllerRootFingerprint),
+    'hostRootFingerprint': base64Encode(hostRootFingerprint),
+    'controllerNonce': base64Encode(controllerNonce),
+    'hostNonce': base64Encode(hostNonce),
+    'issuedAtUnixMs': issuedAt.millisecondsSinceEpoch,
+    'expiresAtUnixMs': expiresAt.millisecondsSinceEpoch,
+    'authSuiteVersion': authSuiteVersion,
+    'capabilitySha256': base64Encode(capabilitySha256),
+  };
+
+  void validateStructure() {
+    final sessionBytes = utf8.encode(sessionId);
+    if (sessionBytes.isEmpty ||
+        sessionBytes.length > trustedMaximumSessionIdBytes ||
+        policyRevision < 1 ||
+        permissions.isEmpty ||
+        !permissions.contains(TrustedPermission.viewScreen) ||
+        permissions.contains(TrustedPermission.transferFiles) ||
+        !expiresAt.isAfter(issuedAt) ||
+        authSuiteVersion != trustedAuthSuiteV2) {
+      throw const FormatException('Invalid trusted authorization receipt');
+    }
+    _requireLength(authorizationSha256, 32, 'authorizationSha256');
+    _requireLength(controllerRootFingerprint, 32, 'controllerRootFingerprint');
+    _requireLength(hostRootFingerprint, 32, 'hostRootFingerprint');
+    _requireLength(controllerNonce, 16, 'controllerNonce');
+    _requireLength(hostNonce, 16, 'hostNonce');
+    _requireLength(capabilitySha256, 32, 'capabilitySha256');
+    if (_allZero(authorizationSha256) || _allZero(capabilitySha256)) {
+      throw const FormatException('Invalid trusted authorization receipt');
+    }
+  }
+}
+
+@immutable
 class TrustedDeviceRecord {
   const TrustedDeviceRecord({
     required this.peerName,
@@ -402,6 +746,9 @@ class TrustedSessionBinding {
     required this.controllerDtlsFingerprintSha256,
     required this.hostDtlsFingerprintSha256,
     required this.expiresAt,
+    required this.authSuiteVersion,
+    required this.authorizationSha256,
+    required this.capabilitySha256,
   });
 
   factory TrustedSessionBinding.fromJson(Map<String, dynamic> value) =>
@@ -430,6 +777,15 @@ class TrustedSessionBinding {
           (value['expiresAtUnixMs'] as num).toInt(),
           isUtc: true,
         ),
+        authSuiteVersion:
+            (value['authSuiteVersion'] as num?)?.toInt() ??
+            trustedAuthSuiteLegacy,
+        authorizationSha256: value['authorizationSha256'] is String
+            ? base64Decode(value['authorizationSha256'] as String)
+            : Uint8List(32),
+        capabilitySha256: value['capabilitySha256'] is String
+            ? base64Decode(value['capabilitySha256'] as String)
+            : Uint8List(32),
       );
 
   final String sessionId;
@@ -443,9 +799,18 @@ class TrustedSessionBinding {
   final Uint8List controllerDtlsFingerprintSha256;
   final Uint8List hostDtlsFingerprintSha256;
   final DateTime expiresAt;
+  final int authSuiteVersion;
+  final Uint8List authorizationSha256;
+  final Uint8List capabilitySha256;
 
   Uint8List get signingBytes => securityCanonicalBytes((out) {
-    out.bytes(utf8.encode('CrossDesktopRemote/TrustedSessionBinding/v1'));
+    out.bytes(
+      utf8.encode(
+        authSuiteVersion == trustedAuthSuiteV2
+            ? 'CrossDesktopRemote/TrustedSessionBinding/v2'
+            : 'CrossDesktopRemote/TrustedSessionBinding/v1',
+      ),
+    );
     out.bytes(utf8.encode(sessionId));
     out.bytes(controllerNonce);
     out.bytes(hostNonce);
@@ -457,6 +822,11 @@ class TrustedSessionBinding {
     out.bytes(controllerDtlsFingerprintSha256);
     out.bytes(hostDtlsFingerprintSha256);
     out.uint64(expiresAt.millisecondsSinceEpoch);
+    if (authSuiteVersion == trustedAuthSuiteV2) {
+      out.uint32(authSuiteVersion);
+      out.bytes(authorizationSha256);
+      out.bytes(capabilitySha256);
+    }
   });
 
   Map<String, dynamic> toJson() => {
@@ -473,6 +843,11 @@ class TrustedSessionBinding {
     ),
     'hostDtlsFingerprintSha256': base64Encode(hostDtlsFingerprintSha256),
     'expiresAtUnixMs': expiresAt.millisecondsSinceEpoch,
+    if (authSuiteVersion == trustedAuthSuiteV2) ...{
+      'authSuiteVersion': authSuiteVersion,
+      'authorizationSha256': base64Encode(authorizationSha256),
+      'capabilitySha256': base64Encode(capabilitySha256),
+    },
   };
 
   void validateStructure() {
@@ -506,6 +881,20 @@ class TrustedSessionBinding {
       'controllerDtlsFingerprintSha256',
     );
     _requireLength(hostDtlsFingerprintSha256, 32, 'hostDtlsFingerprintSha256');
+    _requireLength(authorizationSha256, 32, 'authorizationSha256');
+    _requireLength(capabilitySha256, 32, 'capabilitySha256');
+    if (authSuiteVersion != trustedAuthSuiteLegacy &&
+        authSuiteVersion != trustedAuthSuiteV2) {
+      throw const FormatException('Unsupported trusted authentication suite');
+    }
+    if (authSuiteVersion == trustedAuthSuiteV2 &&
+        (_allZero(authorizationSha256) || _allZero(capabilitySha256))) {
+      throw const FormatException('Trusted suite v2 binding is incomplete');
+    }
+    if (authSuiteVersion == trustedAuthSuiteLegacy &&
+        (!_allZero(authorizationSha256) || !_allZero(capabilitySha256))) {
+      throw const FormatException('Legacy binding contains v2 authorization');
+    }
     if (_allZero(offerSha256) ||
         _allZero(answerSha256) ||
         _allZero(controllerDtlsFingerprintSha256) ||

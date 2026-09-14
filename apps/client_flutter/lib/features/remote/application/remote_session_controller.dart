@@ -34,6 +34,7 @@ import 'package:cross_desktop_remote/features/remote/application/explicit_file_t
 import 'package:cross_desktop_remote/features/remote/application/explicit_file_transfer_models.dart';
 import 'package:cross_desktop_remote/features/remote/application/file_clipboard_sync_engine.dart';
 import 'package:cross_desktop_remote/features/remote/application/text_clipboard_sync_engine.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -215,6 +216,9 @@ class RemoteSessionController extends ChangeNotifier
          localIsController: role == RemoteRole.controller,
          initialMode: _platformClipboardMode(initialClipboardMode, role),
        ) {
+    _fileTransfer = ExplicitFileTransferEngine(
+      incomingTransferAllowed: () => _trustedFileTransferReceiveAllowed,
+    );
     _fileCopyPaste = FileCopyPasteCoordinator(
       publisher: (paths, destinationLeaseId) => _fileTransfer.sendFiles(
         paths,
@@ -244,7 +248,7 @@ class RemoteSessionController extends ChangeNotifier
   final FilePasteTargetPlatformAdapter _filePasteTargetPlatform;
   final TextClipboardSyncEngine _clipboardSync;
   final ClipboardApplyGate _clipboardApplyGate = ClipboardApplyGate();
-  final ExplicitFileTransferEngine _fileTransfer = ExplicitFileTransferEngine();
+  late final ExplicitFileTransferEngine _fileTransfer;
   late final FileCopyPasteCoordinator _fileCopyPaste;
   final Map<String, FilePasteDestinationLease> _filePasteLeaseByTransferId = {};
   final Map<String, List<String>> _stagedOutgoingFiles = {};
@@ -363,6 +367,7 @@ class RemoteSessionController extends ChangeNotifier
   HostInvitationState _hostInvitationState = HostInvitationState.unavailable;
   bool _supportsInvitationRotation = false;
   bool _supportsServerInvitationPush = false;
+  bool _supportsCompleteCapabilityManifest = false;
   bool _remoteSupportsVideoPolicyV2 = false;
   bool _remoteSupportsMultiDisplayStreamV1 = false;
   bool _remoteSupportsActiveContentGeometry = false;
@@ -374,6 +379,9 @@ class RemoteSessionController extends ChangeNotifier
   bool _remoteSupportsScopedInputResetV1 = false;
   bool _remoteSupportsTrustedDeviceAuthentication = false;
   bool _remoteSupportsTransactionalTrustedPairing = false;
+  bool _remoteSupportsHostOwnedTrustedPolicy = false;
+  bool _remoteSupportsTrustedAuthSuiteV2 = false;
+  Set<String> _localCapabilities = const {};
   bool _remoteClipboardSupportsApplied = false;
   bool _explicitFileTransferTransportAttached = false;
   Completer<void>? _invitationRotationCompleter;
@@ -389,7 +397,13 @@ class RemoteSessionController extends ChangeNotifier
   Uint8List? _trustedControllerNonce;
   Uint8List? _trustedHostNonce;
   Set<TrustedPermission> _trustedPermissions = const {};
+  int? _trustedPolicyRevision;
   bool _trustedSessionAuthorized = false;
+  bool _trustedUsesHostPolicyV1 = false;
+  int _trustedAuthSuiteVersion = trustedAuthSuiteLegacy;
+  Uint8List? _trustedAuthCapabilitySha256;
+  Uint8List? _trustedAuthorizationSha256;
+  Timer? _trustedAuthorizationAckTimer;
   TrustedSessionBinding? _trustedPendingBinding;
   String? _trustedOfferSdp;
   TrustedPairingSnapshot? _trustedPairing;
@@ -404,6 +418,7 @@ class RemoteSessionController extends ChangeNotifier
   bool _pairingLocalConfirmed = false;
   bool _pairingFinalizing = false;
   bool _pairingAutomaticRenewal = true;
+  bool _pairingUsesHostPolicyV1 = false;
   bool _pairingInputSuspended = false;
   Timer? _pairingTimer;
   RemoteQualityProfile _selectedQuality;
@@ -499,6 +514,7 @@ class RemoteSessionController extends ChangeNotifier
       _remoteSupportsExplicitFileTransferV1;
   bool get remoteSupportsDestinationLeasedFilePasteV1 =>
       _remoteSupportsDestinationLeasedFilePasteV1;
+  bool get trustedFileTransferSendAllowed => _trustedFileTransferSendAllowed;
   bool get fileClipboardReady =>
       fileClipboardSupported &&
       _remoteSupportsDestinationLeasedFilePasteV1 &&
@@ -508,7 +524,7 @@ class RemoteSessionController extends ChangeNotifier
   bool get explicitFileTransferReady =>
       localExplicitFileTransferSupported &&
       _remoteSupportsExplicitFileTransferV1 &&
-      _trustedFileTransferAllowed &&
+      _trustedFileTransferSendAllowed &&
       _fileTransfer.transportReady;
   List<ExplicitFileTransferTaskSnapshot> get fileTransferTasks =>
       _fileTransfer.tasks;
@@ -601,6 +617,15 @@ class RemoteSessionController extends ChangeNotifier
   String? get signalingServerUrl => _signalingServerUrl;
   RemoteAuthenticationMode get authenticationMode => _authenticationMode;
   bool get trustedSessionAuthorized => _trustedSessionAuthorized;
+  bool get canEditTrustedAccessPolicies =>
+      role == RemoteRole.host &&
+      const {
+        RemoteSessionState.idle,
+        RemoteSessionState.waitingForPeer,
+        RemoteSessionState.disconnected,
+        RemoteSessionState.failed,
+      }.contains(state) &&
+      _remoteDeviceId == null;
   TrustedPairingSnapshot? get trustedPairing => _trustedPairing;
   bool get canStartTrustedPairing =>
       _authenticationMode == RemoteAuthenticationMode.connectionCode &&
@@ -647,10 +672,25 @@ class RemoteSessionController extends ChangeNotifier
       (_trustedSessionAuthorized &&
           _trustedPermissions.contains(TrustedPermission.controlInput));
 
-  bool get _trustedFileTransferAllowed =>
+  bool get _trustedFileTransferSendAllowed =>
       _authenticationMode != RemoteAuthenticationMode.trustedDevice ||
       (_trustedSessionAuthorized &&
-          _trustedPermissions.contains(TrustedPermission.transferFiles));
+          (_trustedPermissions.contains(TrustedPermission.transferFiles) ||
+              _trustedPermissions.contains(
+                role == RemoteRole.controller
+                    ? TrustedPermission.uploadFilesToHost
+                    : TrustedPermission.downloadFilesFromHost,
+              )));
+
+  bool get _trustedFileTransferReceiveAllowed =>
+      _authenticationMode != RemoteAuthenticationMode.trustedDevice ||
+      (_trustedSessionAuthorized &&
+          (_trustedPermissions.contains(TrustedPermission.transferFiles) ||
+              _trustedPermissions.contains(
+                role == RemoteRole.controller
+                    ? TrustedPermission.downloadFilesFromHost
+                    : TrustedPermission.uploadFilesToHost,
+              )));
 
   bool get _trustedClipboardOutboundAllowed =>
       _authenticationMode != RemoteAuthenticationMode.trustedDevice ||
@@ -696,6 +736,23 @@ class RemoteSessionController extends ChangeNotifier
       _initialized = false;
       _fail('远程会话初始化失败：$error');
     }
+  }
+
+  Future<HostAccessPolicy> updateTrustedAccessPolicy({
+    required TrustedDeviceRecord controllerRecord,
+    required int expectedRevision,
+    required bool enabled,
+    required Set<TrustedPermission> permissions,
+  }) {
+    if (!canEditTrustedAccessPolicies) {
+      throw StateError('远程会话期间不能修改可信设备权限，请断开后重试');
+    }
+    return _requireTrustedCoordinator().updateHostAccessPolicy(
+      record: controllerRecord,
+      expectedRevision: expectedRevision,
+      enabled: enabled,
+      permissions: permissions,
+    );
   }
 
   void setLocalDeviceId(String value) {
@@ -1144,6 +1201,7 @@ class RemoteSessionController extends ChangeNotifier
         trustedDeviceAuthenticationSupported:
             _trustedDevices?.supported == true,
       );
+      _localCapabilities = Set.unmodifiable(clientCapabilities);
       final endpoint = buildSignalingUri(
         serverUrl: serverUrl,
         roomCode: roomCode,
@@ -1611,10 +1669,17 @@ class RemoteSessionController extends ChangeNotifier
     }
   }
 
-  Future<String> sendExplicitFiles(List<String> paths) =>
-      _fileTransfer.sendFiles(paths);
+  Future<String> sendExplicitFiles(List<String> paths) {
+    if (!_trustedFileTransferSendAllowed) {
+      throw StateError('被控端未授权当前方向的文件传输');
+    }
+    return _fileTransfer.sendFiles(paths);
+  }
 
   Future<String?> pickAndSendExplicitFiles() async {
+    if (!_trustedFileTransferSendAllowed) {
+      throw StateError('被控端未授权当前方向的文件传输');
+    }
     final paths = await _fileTransferPlatform.pickOutgoingFiles();
     if (paths.isEmpty) return null;
     try {
@@ -1628,19 +1693,31 @@ class RemoteSessionController extends ChangeNotifier
     }
   }
 
-  Future<String> sendExplicitDirectory(String path) =>
-      _fileTransferPlatform.supportsDirectorySelection
-      ? _fileTransfer.sendDirectory(path)
-      : throw UnsupportedError('iPad 暂不支持直接发送目录');
+  Future<String> sendExplicitDirectory(String path) {
+    if (!_trustedFileTransferSendAllowed) {
+      throw StateError('被控端未授权当前方向的文件传输');
+    }
+    return _fileTransferPlatform.supportsDirectorySelection
+        ? _fileTransfer.sendDirectory(path)
+        : throw UnsupportedError('iPad 暂不支持直接发送目录');
+  }
 
   Future<void> acceptExplicitFileTransfer(
     String transferId,
     String destinationRoot,
-  ) => _fileTransfer.accept(transferId, destinationRoot);
+  ) {
+    if (!_trustedFileTransferReceiveAllowed) {
+      throw StateError('被控端未授权当前方向的文件传输');
+    }
+    return _fileTransfer.accept(transferId, destinationRoot);
+  }
 
   Future<void> acceptExplicitFileTransferToManagedStorage(
     String transferId,
   ) async {
+    if (!_trustedFileTransferReceiveAllowed) {
+      throw StateError('被控端未授权当前方向的文件传输');
+    }
     final destination = await _fileTransferPlatform.createReceiveDirectory(
       transferId,
     );
@@ -2350,7 +2427,13 @@ class RemoteSessionController extends ChangeNotifier
           ? _trustedControllerRecord
           : _trustedHostRecord;
       if (record != null) {
-        unawaited(_trustedDevices?.markConnected(record));
+        unawaited(
+          _trustedDevices?.markConnected(
+            record,
+            sessionPermissions: _trustedPermissions,
+            policyRevision: _trustedPolicyRevision,
+          ),
+        );
       }
     }
   }
@@ -2644,7 +2727,7 @@ class RemoteSessionController extends ChangeNotifier
           }.contains(type) &&
           (!_trustedClipboardInboundAllowed ||
               ((type == 'file-offer' || type == 'file-paste-prepare') &&
-                  !_trustedFileTransferAllowed))) {
+                  !_trustedFileTransferReceiveAllowed))) {
         return;
       }
       switch (decoded['type']) {
@@ -2951,7 +3034,7 @@ class RemoteSessionController extends ChangeNotifier
   }
 
   Future<void> beginTrustedPairing({
-    Set<TrustedPermission> permissions = defaultTrustedPermissions,
+    Set<TrustedPermission> permissions = defaultHostAccessPermissions,
   }) async {
     if (!canStartTrustedPairing ||
         permissions.isEmpty ||
@@ -2967,6 +3050,7 @@ class RemoteSessionController extends ChangeNotifier
     final localNonce = securityRandomBytes(16);
     _resetTrustedPairing(notify: false);
     _pairingSessionId = pairingSessionId;
+    _pairingUsesHostPolicyV1 = _remoteSupportsHostOwnedTrustedPolicy;
     _pairingLocalNonce = localNonce;
     _pairingPermissions = Set.unmodifiable(permissions);
     _setTrustedPairing(
@@ -2993,6 +3077,7 @@ class RemoteSessionController extends ChangeNotifier
         ),
       ),
       'permissionBits': trustedPermissionBits(_pairingPermissions),
+      'hostPolicyV1': _pairingUsesHostPolicyV1,
     });
   }
 
@@ -3166,10 +3251,15 @@ class RemoteSessionController extends ChangeNotifier
     _pairingPeerCommitment = peerCommitment;
     _pairingLocalNonce = securityRandomBytes(16);
     _pairingPermissions = Set.unmodifiable(permissions);
+    _pairingUsesHostPolicyV1 =
+        message['hostPolicyV1'] == true &&
+        _remoteSupportsHostOwnedTrustedPolicy;
     coordinator.beginSecuritySession(
       sessionId: pairingSessionId,
       peerRootFingerprint: peer.rootFingerprint,
-      requestedPermissions: _pairingPermissions,
+      requestedPermissions: _pairingUsesHostPolicyV1
+          ? const {TrustedPermission.viewScreen}
+          : _pairingPermissions,
       mode: TrustedSecuritySessionMode.pairing,
     );
     _pairingInputSuspended = true;
@@ -3198,6 +3288,7 @@ class RemoteSessionController extends ChangeNotifier
         ),
       ),
       'permissionBits': rawPermissionBits,
+      'hostPolicyV1': _pairingUsesHostPolicyV1,
     });
   }
 
@@ -3215,6 +3306,9 @@ class RemoteSessionController extends ChangeNotifier
     if (rawPermissionBits != trustedPermissionBits(_pairingPermissions)) {
       throw const FormatException('Pairing permissions changed in transit');
     }
+    _pairingUsesHostPolicyV1 =
+        message['hostPolicyV1'] == true &&
+        _remoteSupportsHostOwnedTrustedPolicy;
     _pairingPeerIdentity = peer;
     _pairingPeerCommitment = _fixedBytes(
       message['nonceCommitment'],
@@ -3224,7 +3318,9 @@ class RemoteSessionController extends ChangeNotifier
     _requireTrustedCoordinator().beginSecuritySession(
       sessionId: _requirePairingSessionId(),
       peerRootFingerprint: peer.rootFingerprint,
-      requestedPermissions: _pairingPermissions,
+      requestedPermissions: _pairingUsesHostPolicyV1
+          ? const {TrustedPermission.viewScreen}
+          : _pairingPermissions,
       mode: TrustedSecuritySessionMode.pairing,
     );
     _updateTrustedPairing(
@@ -3335,7 +3431,9 @@ class RemoteSessionController extends ChangeNotifier
     try {
       final grant = await coordinator.issueGrant(
         subject: _pairingPeerIdentity!,
-        permissions: _pairingPermissions,
+        permissions: _pairingUsesHostPolicyV1
+            ? const {TrustedPermission.viewScreen}
+            : _pairingPermissions,
         automaticRenewal: _pairingAutomaticRenewal,
       );
       coordinator.validatePairingGrant(
@@ -3493,6 +3591,9 @@ class RemoteSessionController extends ChangeNotifier
       await coordinator.commitPairing(
         pairingSessionId: _requirePairingSessionId(),
         grantId: grant.grantId,
+        initialHostAccessPermissions: _pairingUsesHostPolicyV1
+            ? _pairingPermissions
+            : null,
       );
     }
     final committedSignature = await coordinator.identity.signWithRoot(
@@ -3744,6 +3845,7 @@ class RemoteSessionController extends ChangeNotifier
     _pairingLocalConfirmed = false;
     _pairingFinalizing = false;
     _pairingAutomaticRenewal = true;
+    _pairingUsesHostPolicyV1 = false;
     _pairingInputSuspended = false;
     if (notify) notifyListeners();
   }
@@ -5060,15 +5162,18 @@ class RemoteSessionController extends ChangeNotifier
     switch (message['type']) {
       case 'ready':
         _localNetworkAddress = message['clientAddress'] as String?;
+        final serverCapabilities =
+            (message['capabilities'] as List<dynamic>? ?? const [])
+                .whereType<String>()
+                .toSet();
+        _supportsCompleteCapabilityManifest = serverCapabilities.contains(
+          completeCapabilityManifestV1Capability,
+        );
         if (role == RemoteRole.host) {
-          final capabilities =
-              (message['capabilities'] as List<dynamic>? ?? const [])
-                  .whereType<String>()
-                  .toSet();
-          _supportsInvitationRotation = capabilities.contains(
+          _supportsInvitationRotation = serverCapabilities.contains(
             'invitation-rotation',
           );
-          _supportsServerInvitationPush = capabilities.contains(
+          _supportsServerInvitationPush = serverCapabilities.contains(
             'server-invitation-push',
           );
           _applyHostInvitationSnapshot(message, fallbackGeneration: 1);
@@ -5150,6 +5255,27 @@ class RemoteSessionController extends ChangeNotifier
             supportsTrustedDeviceAuthentication(peerCapabilities);
         _remoteSupportsTransactionalTrustedPairing =
             supportsTransactionalTrustedPairing(peerCapabilities);
+        _remoteSupportsHostOwnedTrustedPolicy = supportsHostOwnedTrustedPolicy(
+          peerCapabilities,
+        );
+        _remoteSupportsTrustedAuthSuiteV2 = supportsTrustedAuthSuiteV2(
+          peerCapabilities,
+        );
+        final mutuallySupportsTrustedAuthSuiteV2 =
+            _supportsCompleteCapabilityManifest &&
+            supportsTrustedAuthSuiteV2(_localCapabilities) &&
+            _remoteSupportsTrustedAuthSuiteV2;
+        _trustedAuthSuiteVersion =
+            trustedRoute && mutuallySupportsTrustedAuthSuiteV2
+            ? trustedAuthSuiteV2
+            : trustedAuthSuiteLegacy;
+        _trustedUsesHostPolicyV1 =
+            _trustedAuthSuiteVersion == trustedAuthSuiteV2;
+        _trustedAuthCapabilitySha256 = negotiatedTrustedCapabilityHash(
+          authSuiteVersion: _trustedAuthSuiteVersion,
+          localCapabilities: _localCapabilities,
+          remoteCapabilities: peerCapabilities,
+        );
         if (trustedRoute &&
             (!_remoteSupportsTrustedDeviceAuthentication ||
                 _trustedDevices?.supported != true ||
@@ -5230,6 +5356,10 @@ class RemoteSessionController extends ChangeNotifier
         await _handleTrustedAuthChallenge(message);
       case 'trusted-auth-response':
         await _handleTrustedAuthResponse(message);
+      case 'trusted-session-authorization':
+        await _handleTrustedSessionAuthorization(message);
+      case 'trusted-session-authorization-accepted':
+        await _handleTrustedSessionAuthorizationAccepted(message);
       case 'trusted-offer':
         await _acceptTrustedOffer(message);
       case 'trusted-answer':
@@ -5303,7 +5433,9 @@ class RemoteSessionController extends ChangeNotifier
       );
     }
     _trustedHostRecord = record;
-    _trustedPermissions = Set.unmodifiable(record.grant.permissions);
+    _trustedPermissions = _trustedUsesHostPolicyV1
+        ? const {TrustedPermission.viewScreen}
+        : Set.unmodifiable(record.grant.permissions);
     _trustedControllerNonce = securityRandomBytes(16);
     coordinator.beginSecuritySession(
       sessionId: routeSessionId,
@@ -5318,6 +5450,8 @@ class RemoteSessionController extends ChangeNotifier
       'grant': record.grant.toJson(),
       'controllerNonce': base64Encode(_trustedControllerNonce!),
       'permissionBits': trustedPermissionBits(_trustedPermissions),
+      'authSuiteVersion': _trustedAuthSuiteVersion,
+      'capabilitySha256': base64Encode(_trustedAuthCapabilitySha256!),
     });
     _setState(RemoteSessionState.connecting, '正在进行可信设备签名认证');
   }
@@ -5341,9 +5475,60 @@ class RemoteSessionController extends ChangeNotifier
       16,
       'controllerNonce',
     );
-    final permissions = trustedPermissionsFromBits(
+    final requestedSuite =
+        (message['authSuiteVersion'] as num?)?.toInt() ??
+        trustedAuthSuiteLegacy;
+    if (requestedSuite != trustedAuthSuiteLegacy &&
+        requestedSuite != trustedAuthSuiteV2) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.unsupported,
+        '控制端请求了不受支持的可信认证协议',
+      );
+    }
+    if (requestedSuite != _trustedAuthSuiteVersion) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.unsupported,
+        '控制端选择的可信认证协议未完成双端能力协商',
+      );
+    }
+    final requestedCapabilityHash =
+        message['capabilitySha256'] == null &&
+            requestedSuite == trustedAuthSuiteLegacy
+        ? Uint8List(32)
+        : _fixedBytes(message['capabilitySha256'], 32, 'capabilitySha256');
+    final expectedCapabilityHash = _trustedAuthCapabilitySha256;
+    if (expectedCapabilityHash == null) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.unsupported,
+        '可信认证能力协商尚未完成',
+      );
+    }
+    if (!constantTimeBytesEqual(
+      requestedCapabilityHash,
+      expectedCapabilityHash,
+    )) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '可信认证能力集合与协议版本不匹配',
+      );
+    }
+    _trustedAuthSuiteVersion = requestedSuite;
+    _trustedUsesHostPolicyV1 = requestedSuite == trustedAuthSuiteV2;
+    _trustedAuthCapabilitySha256 = expectedCapabilityHash;
+    final presentedPermissions = trustedPermissionsFromBits(
       (message['permissionBits'] as num?)?.toInt() ?? 0,
     );
+    final permissions = _trustedUsesHostPolicyV1
+        ? const {TrustedPermission.viewScreen}
+        : presentedPermissions;
+    if (_trustedUsesHostPolicyV1 &&
+        trustedPermissionBits(presentedPermissions) !=
+            trustedPermissionBits(permissions)) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.permissionsDenied,
+        '可信身份请求不得预先指定被控端权限',
+      );
+    }
     coordinator.beginSecuritySession(
       sessionId: _requireTrustedRouteSessionId(),
       peerRootFingerprint: controller.rootFingerprint,
@@ -5355,12 +5540,23 @@ class RemoteSessionController extends ChangeNotifier
       controller: controller,
       requestedPermissions: permissions,
     );
-    final authorizedPermissions = coordinator.authorizeSessionGrant(
-      sessionId: _requireTrustedRouteSessionId(),
-      grant: grant,
-      issuerRootPublicKey: coordinator.localPublicIdentity().rootPublicKey,
-      expectedSubjectFingerprint: controller.rootFingerprint,
-    );
+    final Set<TrustedPermission> authorizedPermissions;
+    if (_trustedUsesHostPolicyV1) {
+      coordinator.authenticateSessionCredential(
+        sessionId: _requireTrustedRouteSessionId(),
+        grant: grant,
+        issuerRootPublicKey: coordinator.localPublicIdentity().rootPublicKey,
+        expectedSubjectFingerprint: controller.rootFingerprint,
+      );
+      authorizedPermissions = permissions;
+    } else {
+      authorizedPermissions = coordinator.authorizeSessionGrant(
+        sessionId: _requireTrustedRouteSessionId(),
+        grant: grant,
+        issuerRootPublicKey: coordinator.localPublicIdentity().rootPublicKey,
+        expectedSubjectFingerprint: controller.rootFingerprint,
+      );
+    }
     final record = await coordinator.findTrustedController(
       controller.rootFingerprint,
     );
@@ -5428,14 +5624,27 @@ class RemoteSessionController extends ChangeNotifier
     _validateTrustedBindingPayload(payload, expectedKind: 'challenge');
     _trustedHostNonce = _fixedBytes(payload['hostNonce'], 16, 'hostNonce');
     _trustedRemoteIdentity = host;
-    final authorizedPermissions = coordinator.authorizeSessionGrant(
-      sessionId: _requireTrustedRouteSessionId(),
-      grant: record.grant,
-      issuerRootPublicKey: host.rootPublicKey,
-      expectedSubjectFingerprint: coordinator
-          .localPublicIdentity()
-          .rootFingerprint,
-    );
+    final Set<TrustedPermission> authorizedPermissions;
+    if (_trustedUsesHostPolicyV1) {
+      coordinator.authenticateSessionCredential(
+        sessionId: _requireTrustedRouteSessionId(),
+        grant: record.grant,
+        issuerRootPublicKey: host.rootPublicKey,
+        expectedSubjectFingerprint: coordinator
+            .localPublicIdentity()
+            .rootFingerprint,
+      );
+      authorizedPermissions = const {TrustedPermission.viewScreen};
+    } else {
+      authorizedPermissions = coordinator.authorizeSessionGrant(
+        sessionId: _requireTrustedRouteSessionId(),
+        grant: record.grant,
+        issuerRootPublicKey: host.rootPublicKey,
+        expectedSubjectFingerprint: coordinator
+            .localPublicIdentity()
+            .rootFingerprint,
+      );
+    }
     _trustedPermissions = Set.unmodifiable(authorizedPermissions);
     _trustedHostRecord = await coordinator.updatePeerAuthenticationIdentity(
       record: record,
@@ -5495,16 +5704,219 @@ class RemoteSessionController extends ChangeNotifier
           record: record,
           peerIdentity: controller,
         );
+    final expectedPhase = _trustedUsesHostPolicyV1
+        ? TrustedSecurityPhase.awaitingHostAuthorization
+        : TrustedSecurityPhase.awaitingWebRtcBinding;
     if (coordinator.securityPhase(_requireTrustedRouteSessionId()) !=
-        TrustedSecurityPhase.awaitingWebRtcBinding) {
+        expectedPhase) {
       throw const TrustedAuthenticationException(
         TrustedAuthenticationFailure.invalidSignature,
-        '可信认证未进入媒体绑定阶段',
+        '可信认证未进入被控端授权阶段',
       );
+    }
+    if (_trustedUsesHostPolicyV1) {
+      final authorization = await coordinator.createHostSessionAuthorization(
+        sessionId: _requireTrustedRouteSessionId(),
+        controllerRecord: _trustedControllerRecord!,
+        controllerNonce: _trustedControllerNonce!,
+        hostNonce: _trustedHostNonce!,
+      );
+      final granted = coordinator.applyHostSessionAuthorization(
+        sessionId: _requireTrustedRouteSessionId(),
+        authorization: authorization,
+        localIsHost: true,
+      );
+      _trustedPermissions = Set.unmodifiable(granted);
+      _trustedPolicyRevision = authorization.policyRevision;
+      _trustedAuthorizationSha256 = Uint8List.fromList(
+        sha256.convert(authorization.signingBytes).bytes,
+      );
+      final envelope = await coordinator.createRawEnvelope(
+        sessionId: _requireTrustedRouteSessionId(),
+        recipientRootFingerprint: controller.rootFingerprint,
+        payload: authorization.signingBytes,
+      );
+      _signaling.send({
+        'type': 'trusted-session-authorization',
+        'identity': coordinator.localPublicIdentity().toJson(),
+        'authorization': authorization.toJson(),
+        'envelope': envelope.toJson(),
+      });
+      _startTrustedAuthorizationAckTimeout();
+      _setState(RemoteSessionState.connecting, '已发送被控端权限，等待控制端签名确认');
+      return;
     }
     await _ensureClipboardDataChannel();
     await _ensureExplicitFileTransferDataChannels();
     await _authorizePeer();
+  }
+
+  Future<void> _handleTrustedSessionAuthorization(
+    Map<String, dynamic> message,
+  ) async {
+    if (role != RemoteRole.controller ||
+        !_trustedUsesHostPolicyV1 ||
+        _authenticationMode != RemoteAuthenticationMode.trustedDevice) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.unsupported,
+        '当前会话不接受被控端权限授权',
+      );
+    }
+    final coordinator = _requireTrustedCoordinator();
+    final host = _trustedIdentityFromMessage(message);
+    final record = _trustedHostRecord;
+    if (record == null ||
+        !constantTimeBytesEqual(
+          record.peerIdentity.rootFingerprint,
+          host.rootFingerprint,
+        )) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.identityChanged,
+        '会话授权来自未固定的被控设备',
+      );
+    }
+    final authorization = TrustedSessionAuthorization.fromJson(
+      _stringMap(message['authorization'], 'authorization'),
+    );
+    if (authorization.authSuiteVersion != _trustedAuthSuiteVersion ||
+        !constantTimeBytesEqual(
+          authorization.capabilitySha256,
+          _trustedAuthCapabilitySha256 ?? const [],
+        )) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '被控端权限使用了不同的可信认证协议',
+      );
+    }
+    final payload = await coordinator.verifyRawEnvelope(
+      envelope: SignedTrustedEnvelope.fromJson(
+        _stringMap(message['envelope'], 'envelope'),
+      ),
+      sender: host,
+    );
+    if (!constantTimeBytesEqual(payload, authorization.signingBytes)) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '被控端权限快照与签名内容不一致',
+      );
+    }
+    final granted = coordinator.applyHostSessionAuthorization(
+      sessionId: _requireTrustedRouteSessionId(),
+      authorization: authorization,
+      localIsHost: false,
+    );
+    _trustedPermissions = Set.unmodifiable(granted);
+    _trustedPolicyRevision = authorization.policyRevision;
+    _trustedAuthorizationSha256 = Uint8List.fromList(
+      sha256.convert(authorization.signingBytes).bytes,
+    );
+    final acknowledgement = coordinator.createHostSessionAuthorizationAck(
+      authorization,
+    );
+    final acknowledgementEnvelope = await coordinator.createRawEnvelope(
+      sessionId: _requireTrustedRouteSessionId(),
+      recipientRootFingerprint: host.rootFingerprint,
+      payload: acknowledgement.signingBytes,
+    );
+    _signaling.send({
+      'type': 'trusted-session-authorization-accepted',
+      'identity': coordinator.localPublicIdentity().toJson(),
+      'acknowledgement': acknowledgement.toJson(),
+      'envelope': acknowledgementEnvelope.toJson(),
+    });
+    _setState(RemoteSessionState.connecting, '已签名确认被控端权限，等待安全媒体连接');
+  }
+
+  Future<void> _handleTrustedSessionAuthorizationAccepted(
+    Map<String, dynamic> message,
+  ) async {
+    if (role != RemoteRole.host ||
+        !_trustedUsesHostPolicyV1 ||
+        _trustedAuthSuiteVersion != trustedAuthSuiteV2 ||
+        _authenticationMode != RemoteAuthenticationMode.trustedDevice) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.unsupported,
+        '当前会话不接受权限确认消息',
+      );
+    }
+    final coordinator = _requireTrustedCoordinator();
+    final controller = _trustedIdentityFromMessage(message);
+    final pinned = _trustedControllerRecord?.peerIdentity;
+    if (pinned == null ||
+        !constantTimeBytesEqual(
+          pinned.rootFingerprint,
+          controller.rootFingerprint,
+        )) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.identityChanged,
+        '权限确认来自未固定的控制设备',
+      );
+    }
+    final acknowledgement = TrustedSessionAuthorizationAck.fromJson(
+      _stringMap(message['acknowledgement'], 'acknowledgement'),
+    );
+    if (acknowledgement.authSuiteVersion != _trustedAuthSuiteVersion ||
+        !constantTimeBytesEqual(
+          acknowledgement.capabilitySha256,
+          _trustedAuthCapabilitySha256 ?? const [],
+        ) ||
+        !constantTimeBytesEqual(
+          acknowledgement.authorizationSha256,
+          _trustedAuthorizationSha256 ?? const [],
+        )) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '控制端确认的权限快照与本机会话不一致',
+      );
+    }
+    final verifiedPayload = await coordinator.verifyRawEnvelope(
+      envelope: SignedTrustedEnvelope.fromJson(
+        _stringMap(message['envelope'], 'envelope'),
+      ),
+      sender: controller,
+    );
+    if (!constantTimeBytesEqual(
+      verifiedPayload,
+      acknowledgement.signingBytes,
+    )) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '控制端权限确认签名无效',
+      );
+    }
+    final granted = coordinator.confirmHostSessionAuthorizationAck(
+      sessionId: _requireTrustedRouteSessionId(),
+      acknowledgement: acknowledgement,
+    );
+    _trustedPermissions = Set.unmodifiable(granted);
+    _trustedAuthorizationAckTimer?.cancel();
+    _trustedAuthorizationAckTimer = null;
+    await _ensureClipboardDataChannel();
+    await _ensureExplicitFileTransferDataChannels();
+    await _authorizePeer();
+  }
+
+  void _startTrustedAuthorizationAckTimeout() {
+    _trustedAuthorizationAckTimer?.cancel();
+    _trustedAuthorizationAckTimer = Timer(const Duration(seconds: 15), () {
+      unawaited(_expireTrustedAuthorizationAck());
+    });
+  }
+
+  Future<void> _expireTrustedAuthorizationAck() async {
+    final coordinator = _trustedDevices;
+    final sessionId = _trustedRouteSessionId;
+    if (_closing || coordinator == null || sessionId == null) return;
+    try {
+      if (coordinator.securityPhase(sessionId) !=
+          TrustedSecurityPhase.awaitingAuthorizationAck) {
+        return;
+      }
+    } catch (_) {
+      return;
+    }
+    await _closeSession(notifyPeer: true);
+    _fail('可信连接已安全终止：控制端未确认被控端权限');
   }
 
   Map<String, dynamic> _trustedBindingPayload(
@@ -5522,6 +5934,11 @@ class RemoteSessionController extends ChangeNotifier
       'controllerNonce': base64Encode(controllerNonce),
       'hostNonce': base64Encode(hostNonce),
       'permissionBits': trustedPermissionBits(_trustedPermissions),
+      'authSuiteVersion': _trustedAuthSuiteVersion,
+      'capabilitySha256': base64Encode(
+        _trustedAuthCapabilitySha256 ??
+            trustedAuthSuiteCapabilityHash(_trustedAuthSuiteVersion),
+      ),
       ...additionalFields,
     };
   }
@@ -5530,8 +5947,21 @@ class RemoteSessionController extends ChangeNotifier
     Map<String, dynamic> payload, {
     required String expectedKind,
   }) {
+    final receivedSuite =
+        (payload['authSuiteVersion'] as num?)?.toInt() ??
+        trustedAuthSuiteLegacy;
+    final receivedCapabilityHash =
+        payload['capabilitySha256'] == null &&
+            receivedSuite == trustedAuthSuiteLegacy
+        ? Uint8List(32)
+        : _fixedBytes(payload['capabilitySha256'], 32, 'capabilitySha256');
     if (payload['kind'] != expectedKind ||
         payload['routeSessionId'] != _requireTrustedRouteSessionId() ||
+        receivedSuite != _trustedAuthSuiteVersion ||
+        !constantTimeBytesEqual(
+          receivedCapabilityHash,
+          _trustedAuthCapabilitySha256 ?? const [],
+        ) ||
         !constantTimeBytesEqual(
           _fixedBytes(payload['controllerNonce'], 16, 'controllerNonce'),
           _trustedControllerNonce ?? const [],
@@ -5595,18 +6025,11 @@ class RemoteSessionController extends ChangeNotifier
   }
 
   void _applyTrustedPermissionGates() {
-    if (_authenticationMode != RemoteAuthenticationMode.trustedDevice) return;
-    final clipboardAllowed =
-        _trustedPermissions.contains(TrustedPermission.readClipboard) ||
-        _trustedPermissions.contains(TrustedPermission.writeClipboard);
-    if (!clipboardAllowed) {
-      _remoteSupportsTextClipboardV1 = false;
-      _remoteSupportsDestinationLeasedFilePasteV1 = false;
-    }
-    if (!_trustedPermissions.contains(TrustedPermission.transferFiles)) {
-      _remoteSupportsExplicitFileTransferV1 = false;
-      _remoteSupportsDestinationLeasedFilePasteV1 = false;
-    }
+    // Capability support and session authorization are independent facts.
+    // Never mutate negotiated peer capabilities when a host policy denies an
+    // operation; doing so misreports authorization as a version mismatch.
+    _updateClipboardStatus();
+    notifyListeners();
   }
 
   Future<void> _acceptTrustedOffer(Map<String, dynamic> message) async {
@@ -5839,6 +6262,9 @@ class RemoteSessionController extends ChangeNotifier
       offerSdp: offerSdp,
       answerSdp: answerSdp,
       expiresAt: expiresAt,
+      authSuiteVersion: _trustedAuthSuiteVersion,
+      authorizationSha256: _trustedAuthorizationSha256 ?? Uint8List(32),
+      capabilitySha256: _trustedAuthCapabilitySha256 ?? Uint8List(32),
     );
   }
 
@@ -5869,6 +6295,9 @@ class RemoteSessionController extends ChangeNotifier
       hostIdentity: host,
       offerSdp: offerSdp,
       answerSdp: answerSdp,
+      authSuiteVersion: _trustedAuthSuiteVersion,
+      authorizationSha256: _trustedAuthorizationSha256 ?? Uint8List(32),
+      capabilitySha256: _trustedAuthCapabilitySha256 ?? Uint8List(32),
     )) {
       throw const TrustedAuthenticationException(
         TrustedAuthenticationFailure.invalidSignature,
@@ -5941,14 +6370,27 @@ class RemoteSessionController extends ChangeNotifier
     final grant = TrustedDeviceGrant.fromJson(
       _stringMap(payload['grant'], 'grant'),
     );
-    final renewedPermissions = coordinator.authorizeSessionGrant(
-      sessionId: _requireTrustedRouteSessionId(),
-      grant: grant,
-      issuerRootPublicKey: host.rootPublicKey,
-      expectedSubjectFingerprint: coordinator
-          .localPublicIdentity()
-          .rootFingerprint,
-    );
+    final Set<TrustedPermission> renewedPermissions;
+    if (_trustedUsesHostPolicyV1) {
+      coordinator.authenticateSessionCredential(
+        sessionId: _requireTrustedRouteSessionId(),
+        grant: grant,
+        issuerRootPublicKey: host.rootPublicKey,
+        expectedSubjectFingerprint: coordinator
+            .localPublicIdentity()
+            .rootFingerprint,
+      );
+      renewedPermissions = _trustedPermissions;
+    } else {
+      renewedPermissions = coordinator.authorizeSessionGrant(
+        sessionId: _requireTrustedRouteSessionId(),
+        grant: grant,
+        issuerRootPublicKey: host.rootPublicKey,
+        expectedSubjectFingerprint: coordinator
+            .localPublicIdentity()
+            .rootFingerprint,
+      );
+    }
     _trustedHostRecord = await coordinator.acceptHostRenewal(
       record: _trustedHostRecord!,
       host: host,
@@ -7026,6 +7468,8 @@ class RemoteSessionController extends ChangeNotifier
         'TRUSTED_PROTOCOL_REQUIRED' => '对端不支持完整可信认证，已拒绝降级连接',
         'TRUSTED_TARGET_UNAVAILABLE' => '可信设备当前不在线或已有控制会话',
         'TRUSTED_MACHINE_CODE_INVALID' => '可信机器码格式无效',
+        'CAPABILITY_MANIFEST_TOO_LARGE' => '客户端能力清单超出信令服务限制，请更新两端软件',
+        'CAPABILITY_MANIFEST_INVALID' => '客户端能力清单格式无效，连接已安全终止',
         'Invalid room or role' when role == RemoteRole.host =>
           '信令服务版本过旧，请更新并重启 Java 控制平面',
         _ => '信令连接已断开',
@@ -7126,6 +7570,9 @@ class RemoteSessionController extends ChangeNotifier
     _remoteSupportsMultiDisplayStreamV1 = false;
     _remoteSupportsTrustedDeviceAuthentication = false;
     _remoteSupportsTransactionalTrustedPairing = false;
+    _remoteSupportsHostOwnedTrustedPolicy = false;
+    _remoteSupportsTrustedAuthSuiteV2 = false;
+    _localCapabilities = const {};
     _remoteClipboardSupportsApplied = false;
     _remoteClipboardMode = null;
     _queuedClipboardOffer = null;
@@ -7145,6 +7592,7 @@ class RemoteSessionController extends ChangeNotifier
     _hostInvitationState = HostInvitationState.unavailable;
     _supportsInvitationRotation = false;
     _supportsServerInvitationPush = false;
+    _supportsCompleteCapabilityManifest = false;
     _decoderOutputColorDiagnostics = null;
     _renderOutputColorDiagnostics = null;
     _receiverColorConversion = null;
@@ -7186,7 +7634,14 @@ class RemoteSessionController extends ChangeNotifier
     _trustedControllerNonce = null;
     _trustedHostNonce = null;
     _trustedPermissions = const {};
+    _trustedPolicyRevision = null;
     _trustedSessionAuthorized = false;
+    _trustedUsesHostPolicyV1 = false;
+    _trustedAuthSuiteVersion = trustedAuthSuiteLegacy;
+    _trustedAuthCapabilitySha256 = null;
+    _trustedAuthorizationSha256 = null;
+    _trustedAuthorizationAckTimer?.cancel();
+    _trustedAuthorizationAckTimer = null;
     _trustedPendingBinding = null;
     _trustedOfferSdp = null;
     _displaySwitch.reset();

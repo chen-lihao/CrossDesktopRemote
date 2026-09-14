@@ -17,15 +17,23 @@ typedef ExplicitFileTransferBinarySender = Future<void> Function(
 );
 typedef ExplicitFileTransferBufferedAmount = Future<int> Function();
 typedef ExplicitFileTransferPacingDelay = Duration Function();
+typedef ExplicitFileTransferIncomingAuthorizer = bool Function();
+
+bool _alwaysAllowIncomingTransfer() => true;
 
 class ExplicitFileTransferEngine extends ChangeNotifier {
-  ExplicitFileTransferEngine();
+  ExplicitFileTransferEngine({
+    ExplicitFileTransferIncomingAuthorizer? incomingTransferAllowed,
+  }) : _incomingTransferAllowed =
+           incomingTransferAllowed ?? _alwaysAllowIncomingTransfer;
 
   static const int _maxControlMessageBytes = 14 * 1024;
   static const int _highWaterBytes = explicitFileTransferWireMessageBytes * 4;
 
   final Map<String, _MutableTransferTask> _tasks = {};
   final Map<String, _IncomingManifestAssembly> _manifestAssemblies = {};
+  final Set<String> _deniedIncomingOffers = {};
+  final ExplicitFileTransferIncomingAuthorizer _incomingTransferAllowed;
   final StreamController<String> _notices = StreamController<String>.broadcast(
     sync: true,
   );
@@ -86,6 +94,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     _bufferedAmountCallback = null;
     _pacingDelayCallback = null;
     _fragmentsSinceYield = 0;
+    _deniedIncomingOffers.clear();
     _transportGeneration += 1;
     for (final task in _tasks.values) {
       if (reconnecting &&
@@ -323,7 +332,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
         case 'hello':
           await _handleHello(decoded);
         case 'offer-start':
-          _handleOfferStart(decoded);
+          await _handleOfferStart(decoded);
         case 'manifest':
           _handleManifest(decoded);
         case 'offer-end':
@@ -377,8 +386,21 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
     _notify();
   }
 
-  void _handleOfferStart(Map<String, dynamic> message) {
+  Future<void> _handleOfferStart(Map<String, dynamic> message) async {
     final id = _readTransferId(message);
+    if (!_incomingTransferAllowed()) {
+      if (_deniedIncomingOffers.length >= 64) {
+        throw const FormatException('过多未完成的未授权文件传输');
+      }
+      _deniedIncomingOffers.add(id);
+      await _sendControl({
+        'type': 'error',
+        'version': explicitFileTransferWireVersion,
+        'transferId': id,
+        'message': '被控端未授权当前方向的文件传输',
+      });
+      return;
+    }
     final entryCount = _readPositiveInt(
       message['entryCount'],
       allowZero: false,
@@ -398,6 +420,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
 
   void _handleManifest(Map<String, dynamic> message) {
     final id = _readTransferId(message);
+    if (_deniedIncomingOffers.contains(id)) return;
     final assembly = _manifestAssemblies[id];
     if (assembly == null) throw const FormatException('未知的文件清单');
     final sequence = _readPositiveInt(message['sequence'], allowZero: true);
@@ -424,6 +447,7 @@ class ExplicitFileTransferEngine extends ChangeNotifier {
 
   Future<void> _handleOfferEnd(Map<String, dynamic> message) async {
     final id = _readTransferId(message);
+    if (_deniedIncomingOffers.remove(id)) return;
     final assembly = _manifestAssemblies.remove(id);
     if (assembly == null || assembly.entries.length != assembly.entryCount) {
       throw const FormatException('文件清单不完整');

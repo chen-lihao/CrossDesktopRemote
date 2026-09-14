@@ -57,6 +57,57 @@ message TrustedSessionBinding {
   bytes controller_dtls_fingerprint_sha256 = 9;
   bytes host_dtls_fingerprint_sha256 = 10;
   uint64 expires_at_unix_ms = 11;
+  uint32 auth_suite_version = 12;
+  bytes authorization_sha256 = 13;
+  bytes capability_sha256 = 14;
+}
+
+// Stored only by the host. A trust credential proves device identity; this
+// policy independently controls what that identity may do on a future session.
+message HostAccessPolicy {
+  bytes controller_root_fingerprint = 1;
+  uint64 revision = 2;
+  bool enabled = 3;
+  repeated PermissionScope permissions = 4;
+  uint64 updated_at_unix_ms = 5;
+}
+
+// Short-lived host-signed authorization frozen for one authenticated session.
+// It is bound to both identities and both authentication nonces, then included
+// in TrustedSessionBinding through the exact permission set.
+message TrustedSessionAuthorization {
+  uint32 protocol_version = 1;
+  string session_id = 2;
+  bytes credential_id = 3;
+  uint64 policy_revision = 4;
+  repeated PermissionScope permissions = 5;
+  bytes controller_root_fingerprint = 6;
+  bytes host_root_fingerprint = 7;
+  bytes controller_nonce = 8;
+  bytes host_nonce = 9;
+  uint64 issued_at_unix_ms = 10;
+  uint64 expires_at_unix_ms = 11;
+  uint32 auth_suite_version = 12;
+  bytes capability_sha256 = 13;
+}
+
+// Controller-signed semantic acknowledgement. The host must verify this
+// receipt before capture or WebRTC offer creation; ordered transport delivery
+// alone is not authorization acceptance.
+message TrustedSessionAuthorizationAck {
+  uint32 protocol_version = 1;
+  string session_id = 2;
+  bytes authorization_sha256 = 3;
+  uint64 policy_revision = 4;
+  repeated PermissionScope permissions = 5;
+  bytes controller_root_fingerprint = 6;
+  bytes host_root_fingerprint = 7;
+  bytes controller_nonce = 8;
+  bytes host_nonce = 9;
+  uint64 issued_at_unix_ms = 10;
+  uint64 expires_at_unix_ms = 11;
+  uint32 auth_suite_version = 12;
+  bytes capability_sha256 = 13;
 }
 
 enum TrustAuditAction {

@@ -241,6 +241,144 @@ void main() {
     expect(await repository.readConnectionsPaused(), isFalse);
   });
 
+  test(
+    'stores host-owned directional access policy by monotonic revision',
+    () async {
+      final repository = await TrustedDeviceRepository.open(
+        databasePath: ':memory:',
+        encryptionKey: List<int>.filled(32, 27),
+      );
+      addTearDown(repository.close);
+      final fingerprint = Uint8List.fromList(List<int>.filled(32, 5));
+      final first = HostAccessPolicy(
+        controllerRootFingerprint: fingerprint,
+        revision: 1,
+        enabled: true,
+        permissions: const {
+          TrustedPermission.viewScreen,
+          TrustedPermission.uploadFilesToHost,
+        },
+        updatedAt: DateTime.utc(2026, 9, 14, 10),
+      );
+      final second = HostAccessPolicy(
+        controllerRootFingerprint: fingerprint,
+        revision: 2,
+        enabled: false,
+        permissions: const {
+          TrustedPermission.viewScreen,
+          TrustedPermission.downloadFilesFromHost,
+        },
+        updatedAt: DateTime.utc(2026, 9, 14, 11),
+      );
+
+      await repository.writeHostAccessPolicy(first);
+      await repository.writeHostAccessPolicy(second);
+      await repository.writeHostAccessPolicy(first);
+
+      final stored = await repository.readHostAccessPolicy(fingerprint);
+      expect(stored?.revision, 2);
+      expect(stored?.enabled, isFalse);
+      expect(stored?.permissions, {
+        TrustedPermission.viewScreen,
+        TrustedPermission.downloadFilesFromHost,
+      });
+    },
+  );
+
+  test('commits host policy with pairing and removes it on revoke', () async {
+    final repository = await TrustedDeviceRepository.open(
+      databasePath: ':memory:',
+      encryptionKey: List<int>.filled(32, 29),
+    );
+    addTearDown(repository.close);
+    final now = DateTime.utc(2026, 9, 14, 12);
+    final record = TrustedDeviceRecord(
+      peerName: 'Managed controller',
+      peerIdentity: _identity(),
+      grant: _grant(now, id: 24),
+      localIsIssuer: true,
+      createdAt: now,
+      lastConnectedAt: now,
+    );
+    await repository.stagePairing(
+      pairingSessionId: 'host-policy-pairing',
+      record: record,
+      expiresAt: now.add(const Duration(minutes: 5)),
+    );
+
+    await repository.commitPairing(
+      pairingSessionId: 'host-policy-pairing',
+      grantId: record.grant.grantId,
+      now: now.add(const Duration(seconds: 1)),
+      initialHostAccessPermissions: const {
+        TrustedPermission.viewScreen,
+        TrustedPermission.uploadFilesToHost,
+      },
+    );
+    final policy = await repository.readHostAccessPolicy(
+      record.peerIdentity.rootFingerprint,
+    );
+    expect(policy?.revision, 1);
+    expect(policy?.permissions, {
+      TrustedPermission.viewScreen,
+      TrustedPermission.uploadFilesToHost,
+    });
+
+    final replacement = HostAccessPolicy(
+      controllerRootFingerprint: record.peerIdentity.rootFingerprint,
+      revision: 2,
+      enabled: true,
+      permissions: const {
+        TrustedPermission.viewScreen,
+        TrustedPermission.downloadFilesFromHost,
+      },
+      updatedAt: now.add(const Duration(minutes: 1)),
+    );
+    expect(
+      await repository.replaceHostAccessPolicy(
+        replacement,
+        expectedRevision: 1,
+      ),
+      isTrue,
+    );
+    expect(
+      await repository.replaceHostAccessPolicy(
+        replacement,
+        expectedRevision: 1,
+      ),
+      isFalse,
+    );
+
+    await repository.revoke(record, now.add(const Duration(minutes: 2)));
+    expect(
+      await repository.readHostAccessPolicy(
+        record.peerIdentity.rootFingerprint,
+      ),
+      isNull,
+    );
+  });
+
+  test('normalizes legacy file permission only at the policy boundary', () {
+    final normalized = normalizeHostAccessPermissions(const {
+      TrustedPermission.viewScreen,
+      TrustedPermission.transferFiles,
+    });
+
+    expect(normalized, isNot(contains(TrustedPermission.transferFiles)));
+    expect(normalized, contains(TrustedPermission.uploadFilesToHost));
+    expect(normalized, contains(TrustedPermission.downloadFilesFromHost));
+    expect(
+      legacyCompatiblePermissions(normalized),
+      contains(TrustedPermission.transferFiles),
+    );
+    expect(
+      () => trustedPermissionsFromBitsStrict(
+        1 << TrustedPermission.values.length,
+      ),
+      throwsFormatException,
+    );
+  });
+
   test('publishes active-session invalidations for pause and revoke', () async {
     final repository = await TrustedDeviceRepository.open(
       databasePath: ':memory:',

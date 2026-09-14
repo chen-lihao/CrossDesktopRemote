@@ -7,6 +7,7 @@ import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -34,6 +35,7 @@ class SignalingWebSocketIntegrationTests {
 		var ready = hostMessages.next();
 		assertThat(ready).contains("\"type\":\"ready\"");
 		assertThat(ready).contains("\"invitation-rotation\"");
+		assertThat(ready).contains("\"capability-manifest-v1\"");
 		var initialCode = roomCode(ready);
 
 		var leaseId = jsonString(ready, "invitationLeaseId");
@@ -62,6 +64,11 @@ class SignalingWebSocketIntegrationTests {
 
 		host.sendText("{\"type\":\"offer\",\"sdp\":\"prototype-sdp\"}", true).join();
 		assertThat(controllerMessages.next()).isEqualTo("{\"type\":\"offer\",\"sdp\":\"prototype-sdp\"}");
+		controller.sendText("{\"type\":\"trusted-session-authorization-accepted\","
+				+ "\"acknowledgement\":{\"policyRevision\":7}}", true).join();
+		assertThat(hostMessages.next()).isEqualTo(
+				"{\"type\":\"trusted-session-authorization-accepted\","
+						+ "\"acknowledgement\":{\"policyRevision\":7}}");
 
 		host.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
 		controller.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
@@ -94,6 +101,136 @@ class SignalingWebSocketIntegrationTests {
 				.contains("text-clipboard-v1");
 		host.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
 		controller.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+	}
+
+	@Test
+	void relaysTheCompleteWindowsTrustedCapabilityManifest() throws Exception {
+		var hostMessages = new RecordingListener();
+		var controllerMessages = new RecordingListener();
+		var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+		var capabilities = List.of(
+				"display-switch-transaction-v1",
+				"active-content-geometry-v2",
+				"active-content-geometry-v3",
+				"texture-crop-rendering-v1",
+				"text-clipboard-v1",
+				"explicit-file-transfer-v1",
+				"destination-leased-file-paste-v1",
+				"atomic-shortcut-v1",
+				"scoped-input-reset-v1",
+				"video-policy-v2",
+				"device-identity-v1",
+				"trusted-device-auth-v1",
+				"signed-webrtc-binding-v1",
+				"trust-lease-renewal-v1",
+				"trusted-pairing-transaction-v1",
+				"decoupled-trust-policy-v1",
+				"host-session-authorization-v1",
+				"directional-file-permissions-v1",
+				"trusted-auth-suite-v2");
+
+		var host = connectHost(client, hostMessages);
+		var room = roomCode(hostMessages.next());
+		var capabilityQuery = String.join("&capability=", capabilities);
+		var controller = client.newWebSocketBuilder()
+				.connectTimeout(Duration.ofSeconds(5))
+				.buildAsync(URI.create("ws://127.0.0.1:" + port
+						+ "/ws/signaling?room=" + room
+						+ "&role=controller&platform=windows"
+						+ "&capabilities=" + capabilities.get(0)
+						+ "&capability=" + capabilityQuery), controllerMessages)
+				.join();
+
+		assertThat(controllerMessages.next()).contains("\"type\":\"ready\"");
+		var joined = hostMessages.next();
+		assertThat(joined).contains("\"type\":\"peer-joined\"");
+		for (var capability : capabilities) {
+			assertThat(joined).contains(capability);
+		}
+		host.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+		controller.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+	}
+
+	@Test
+	void trustedRoutingKeepsBothCompleteCapabilityManifests() throws Exception {
+		var hostMessages = new RecordingListener();
+		var controllerMessages = new RecordingListener();
+		var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+		var machineCode = "CDR2-ABCD-EFGH-JKMN-PQRS";
+		var trustedCapabilities = List.of(
+				"device-identity-v1",
+				"trusted-device-auth-v1",
+				"signed-webrtc-binding-v1",
+				"trust-lease-renewal-v1",
+				"trusted-pairing-transaction-v1",
+				"decoupled-trust-policy-v1",
+				"host-session-authorization-v1",
+				"directional-file-permissions-v1",
+				"trusted-auth-suite-v2");
+		var hostCapabilities = new java.util.ArrayList<>(trustedCapabilities);
+		hostCapabilities.addAll(List.of(
+				"text-clipboard-v1",
+				"explicit-file-transfer-v1",
+				"destination-leased-file-paste-v1",
+				"atomic-shortcut-v1",
+				"scoped-input-reset-v1",
+				"video-policy-v2"));
+		var controllerCapabilities = new java.util.ArrayList<>(hostCapabilities);
+		controllerCapabilities.addAll(List.of(
+				"display-switch-transaction-v1",
+				"active-content-geometry-v2",
+				"active-content-geometry-v3",
+				"texture-crop-rendering-v1"));
+
+		var host = client.newWebSocketBuilder()
+				.connectTimeout(Duration.ofSeconds(5))
+				.buildAsync(URI.create("ws://127.0.0.1:" + port
+						+ "/ws/signaling?role=host&trustedMachineCode=" + machineCode
+						+ capabilityQuery(hostCapabilities)), hostMessages)
+				.join();
+		assertThat(hostMessages.next()).contains("\"type\":\"ready\"");
+		var controller = client.newWebSocketBuilder()
+				.connectTimeout(Duration.ofSeconds(5))
+				.buildAsync(URI.create("ws://127.0.0.1:" + port
+						+ "/ws/signaling?role=controller&trustedTarget=" + machineCode
+						+ capabilityQuery(controllerCapabilities)), controllerMessages)
+				.join();
+
+		assertThat(controllerMessages.next())
+				.contains("\"type\":\"ready\"")
+				.contains("\"authenticationMode\":\"trusted\"");
+		var hostJoined = hostMessages.next();
+		var controllerJoined = controllerMessages.next();
+		for (var capability : controllerCapabilities) {
+			assertThat(hostJoined).contains(capability);
+		}
+		for (var capability : hostCapabilities) {
+			assertThat(controllerJoined).contains(capability);
+		}
+		controller.sendText("{\"type\":\"trusted-auth-start\",\"authSuiteVersion\":2}", true).join();
+		assertThat(hostMessages.next()).isEqualTo(
+				"{\"type\":\"trusted-auth-start\",\"authSuiteVersion\":2}");
+		controller.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+		host.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+	}
+
+	@Test
+	void rejectsAnOversizedCapabilityManifestWithoutPartialNegotiation() throws Exception {
+		var messages = new RecordingListener();
+		var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+		var query = new StringBuilder("ws://127.0.0.1:")
+				.append(port)
+				.append("/ws/signaling?room=123456&role=controller");
+		for (var index = 0; index <= 64; index++) {
+			query.append("&capability=feature-").append(index);
+		}
+
+		client.newWebSocketBuilder()
+				.connectTimeout(Duration.ofSeconds(5))
+				.buildAsync(URI.create(query.toString()), messages)
+				.join();
+
+		assertThat(messages.nextClose()).contains("CAPABILITY_MANIFEST_TOO_LARGE");
 	}
 
 	@Test
@@ -161,6 +298,10 @@ class SignalingWebSocketIntegrationTests {
 				.connectTimeout(Duration.ofSeconds(5))
 				.buildAsync(URI.create("ws://127.0.0.1:" + port + "/ws/signaling?role=host&protocol=2"), listener)
 				.join();
+	}
+
+	private String capabilityQuery(List<String> capabilities) {
+		return "&capability=" + String.join("&capability=", capabilities);
 	}
 
 	private String roomCode(String message) {

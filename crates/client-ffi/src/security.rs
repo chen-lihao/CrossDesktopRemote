@@ -4,12 +4,15 @@ use prost::Message;
 use protocol::v1::{
     DeviceIdentityPublic as ProtoDeviceIdentity, PermissionScope,
     SignedPeerEnvelope as ProtoSignedPeerEnvelope, TrustGrant as ProtoTrustGrant,
+    TrustedSessionAuthorization as ProtoTrustedSessionAuthorization,
+    TrustedSessionAuthorizationAck as ProtoTrustedSessionAuthorizationAck,
     TrustedSessionBinding as ProtoTrustedSessionBinding,
 };
 use security_core::{
     AuthenticationKeyCertificate, PermissionSet, ROOT_FINGERPRINT_BYTES, SecurityError,
     SessionPermission, SignedPeerEnvelope, TrustGrant, TrustedSecurityEngine,
-    TrustedSessionBinding, TrustedSessionMode, machine_code_v2, sas_code, validate_device_identity,
+    TrustedSessionAuthorization, TrustedSessionAuthorizationAck, TrustedSessionBinding,
+    TrustedSessionMode, machine_code_v2, sas_code, validate_device_identity,
     verify_p256_signature_der,
 };
 
@@ -332,6 +335,142 @@ pub unsafe extern "C" fn cdr_security_engine_authorize_grant(
 }
 
 /// # Safety
+/// Encoded grant, key and subject pointers must be valid for their stated
+/// lengths. The grant is validated only as a device credential.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cdr_security_engine_authenticate_credential(
+    engine: *mut CdrSecurityEngine,
+    grant_protobuf: *const u8,
+    grant_protobuf_len: usize,
+    issuer_root_public_key: *const u8,
+    issuer_root_public_key_len: usize,
+    expected_subject_fingerprint: *const u8,
+    expected_subject_fingerprint_len: usize,
+    now_unix_ms: u64,
+) -> i32 {
+    let Some(engine) = (unsafe { engine.as_mut() }) else {
+        return CDR_ERROR_NULL_POINTER;
+    };
+    let Ok(grant_proto) =
+        (unsafe { decode_message::<ProtoTrustGrant>(grant_protobuf, grant_protobuf_len) })
+    else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    let Ok(grant) = trust_grant_from_proto(grant_proto) else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    let Ok(issuer_key) =
+        (unsafe { read_non_empty(issuer_root_public_key, issuer_root_public_key_len) })
+    else {
+        return CDR_ERROR_INVALID_ARGUMENT;
+    };
+    let Ok(expected_subject) = (unsafe {
+        read_fixed::<ROOT_FINGERPRINT_BYTES>(
+            expected_subject_fingerprint,
+            expected_subject_fingerprint_len,
+        )
+    }) else {
+        return CDR_ERROR_INVALID_ARGUMENT;
+    };
+    map_security_result(engine.core.authenticate_credential(
+        &grant,
+        issuer_key,
+        &expected_subject,
+        now_unix_ms,
+    ))
+}
+
+/// # Safety
+/// Encoded authorization and engine pointers must be valid. `local_is_host`
+/// must be 0 or 1 and the output permission pointer must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cdr_security_engine_apply_host_authorization(
+    engine: *mut CdrSecurityEngine,
+    authorization_protobuf: *const u8,
+    authorization_protobuf_len: usize,
+    now_unix_ms: u64,
+    local_is_host: u8,
+    out_permission_bits: *mut u64,
+) -> i32 {
+    let Some(engine) = (unsafe { engine.as_mut() }) else {
+        return CDR_ERROR_NULL_POINTER;
+    };
+    let Some(out_permission_bits) = (unsafe { out_permission_bits.as_mut() }) else {
+        return CDR_ERROR_NULL_POINTER;
+    };
+    if local_is_host > 1 {
+        return CDR_ERROR_INVALID_ARGUMENT;
+    }
+    let Ok(proto) = (unsafe {
+        decode_message::<ProtoTrustedSessionAuthorization>(
+            authorization_protobuf,
+            authorization_protobuf_len,
+        )
+    }) else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    let Ok(authorization) = trusted_authorization_from_proto(proto) else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    let result = if local_is_host != 0 {
+        engine
+            .core
+            .install_host_authorization(&authorization, now_unix_ms)
+    } else {
+        engine
+            .core
+            .accept_host_authorization(&authorization, now_unix_ms)
+    };
+    match result {
+        Ok(permissions) => {
+            *out_permission_bits = permissions.bits();
+            CDR_OK
+        }
+        Err(error) => map_security_error(error),
+    }
+}
+
+/// # Safety
+/// Encoded acknowledgement and engine pointers must be valid. The output
+/// permission pointer must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cdr_security_engine_confirm_host_authorization_ack(
+    engine: *mut CdrSecurityEngine,
+    acknowledgement_protobuf: *const u8,
+    acknowledgement_protobuf_len: usize,
+    now_unix_ms: u64,
+    out_permission_bits: *mut u64,
+) -> i32 {
+    let Some(engine) = (unsafe { engine.as_mut() }) else {
+        return CDR_ERROR_NULL_POINTER;
+    };
+    let Some(out_permission_bits) = (unsafe { out_permission_bits.as_mut() }) else {
+        return CDR_ERROR_NULL_POINTER;
+    };
+    let Ok(proto) = (unsafe {
+        decode_message::<ProtoTrustedSessionAuthorizationAck>(
+            acknowledgement_protobuf,
+            acknowledgement_protobuf_len,
+        )
+    }) else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    let Ok(acknowledgement) = trusted_authorization_ack_from_proto(proto) else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    match engine
+        .core
+        .confirm_host_authorization_ack(&acknowledgement, now_unix_ms)
+    {
+        Ok(permissions) => {
+            *out_permission_bits = permissions.bits();
+            CDR_OK
+        }
+        Err(error) => map_security_error(error),
+    }
+}
+
+/// # Safety
 /// The engine and all input pointers must be valid for their stated lengths.
 /// Authentication keys must be uncompressed SEC1 P-256 public keys.
 #[unsafe(no_mangle)]
@@ -628,6 +767,11 @@ fn trust_grant_from_proto(grant: ProtoTrustGrant) -> Result<TrustGrant, ()> {
 fn trusted_binding_from_proto(
     binding: ProtoTrustedSessionBinding,
 ) -> Result<TrustedSessionBinding, ()> {
+    let auth_suite_version = if binding.auth_suite_version == 0 {
+        security_core::TRUSTED_AUTH_SUITE_LEGACY
+    } else {
+        binding.auth_suite_version
+    };
     Ok(TrustedSessionBinding {
         session_id: binding.session_id,
         controller_nonce: fixed_vec(binding.controller_nonce)?,
@@ -640,11 +784,62 @@ fn trusted_binding_from_proto(
         controller_dtls_fingerprint_sha256: fixed_vec(binding.controller_dtls_fingerprint_sha256)?,
         host_dtls_fingerprint_sha256: fixed_vec(binding.host_dtls_fingerprint_sha256)?,
         expires_at_unix_ms: binding.expires_at_unix_ms,
+        auth_suite_version,
+        authorization_sha256: fixed_or_zero(binding.authorization_sha256)?,
+        capability_sha256: fixed_or_zero(binding.capability_sha256)?,
+    })
+}
+
+fn trusted_authorization_from_proto(
+    authorization: ProtoTrustedSessionAuthorization,
+) -> Result<TrustedSessionAuthorization, ()> {
+    Ok(TrustedSessionAuthorization {
+        protocol_version: authorization.protocol_version,
+        session_id: authorization.session_id,
+        credential_id: fixed_vec(authorization.credential_id)?,
+        policy_revision: authorization.policy_revision,
+        permissions: permissions_from_proto(&authorization.permissions)?,
+        controller_root_fingerprint: fixed_vec(authorization.controller_root_fingerprint)?,
+        host_root_fingerprint: fixed_vec(authorization.host_root_fingerprint)?,
+        controller_nonce: fixed_vec(authorization.controller_nonce)?,
+        host_nonce: fixed_vec(authorization.host_nonce)?,
+        issued_at_unix_ms: authorization.issued_at_unix_ms,
+        expires_at_unix_ms: authorization.expires_at_unix_ms,
+        auth_suite_version: authorization.auth_suite_version,
+        capability_sha256: fixed_vec(authorization.capability_sha256)?,
+    })
+}
+
+fn trusted_authorization_ack_from_proto(
+    acknowledgement: ProtoTrustedSessionAuthorizationAck,
+) -> Result<TrustedSessionAuthorizationAck, ()> {
+    Ok(TrustedSessionAuthorizationAck {
+        protocol_version: acknowledgement.protocol_version,
+        session_id: acknowledgement.session_id,
+        authorization_sha256: fixed_vec(acknowledgement.authorization_sha256)?,
+        policy_revision: acknowledgement.policy_revision,
+        permissions: permissions_from_proto(&acknowledgement.permissions)?,
+        controller_root_fingerprint: fixed_vec(acknowledgement.controller_root_fingerprint)?,
+        host_root_fingerprint: fixed_vec(acknowledgement.host_root_fingerprint)?,
+        controller_nonce: fixed_vec(acknowledgement.controller_nonce)?,
+        host_nonce: fixed_vec(acknowledgement.host_nonce)?,
+        issued_at_unix_ms: acknowledgement.issued_at_unix_ms,
+        expires_at_unix_ms: acknowledgement.expires_at_unix_ms,
+        auth_suite_version: acknowledgement.auth_suite_version,
+        capability_sha256: fixed_vec(acknowledgement.capability_sha256)?,
     })
 }
 
 fn fixed_vec<const N: usize>(value: Vec<u8>) -> Result<[u8; N], ()> {
     value.try_into().map_err(|_| ())
+}
+
+fn fixed_or_zero<const N: usize>(value: Vec<u8>) -> Result<[u8; N], ()> {
+    if value.is_empty() {
+        Ok([0; N])
+    } else {
+        fixed_vec(value)
+    }
 }
 
 fn permissions_from_proto(values: &[i32]) -> Result<PermissionSet, ()> {
@@ -658,6 +853,8 @@ fn permissions_from_proto(values: &[i32]) -> Result<PermissionSet, ()> {
             PermissionScope::TransferFile => SessionPermission::TransferFiles,
             PermissionScope::CaptureScreenshot => SessionPermission::CaptureScreenshot,
             PermissionScope::RecordSession => SessionPermission::RecordSession,
+            PermissionScope::UploadFileToHost => SessionPermission::UploadFilesToHost,
+            PermissionScope::DownloadFileFromHost => SessionPermission::DownloadFilesFromHost,
             PermissionScope::Unspecified => return Err(()),
         };
         result = result.grant(permission);
