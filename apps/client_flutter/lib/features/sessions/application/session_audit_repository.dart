@@ -1,10 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
+import 'package:cross_desktop_remote/core/security/platform_secret_store.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart';
 
@@ -150,9 +149,14 @@ class SessionAuditRepository {
   static Future<SessionAuditRepository> open({
     String? databasePath,
     List<int>? encryptionKey,
+    PlatformSecretStore? secretStore,
   }) async {
     final path = databasePath ?? await _defaultDatabasePath();
-    final key = encryptionKey ?? await _loadOrCreateKey();
+    final key =
+        encryptionKey ??
+        await (secretStore ?? MethodChannelPlatformSecretStore()).loadOrCreate(
+          _secureKeyName,
+        );
     final database = sqlite3.open(path);
     final repository = SessionAuditRepository._(
       database,
@@ -171,16 +175,6 @@ class SessionAuditRepository {
       auditDirectory.createSync(recursive: true);
     }
     return '${auditDirectory.path}${Platform.pathSeparator}$_databaseName';
-  }
-
-  static Future<List<int>> _loadOrCreateKey() async {
-    const storage = FlutterSecureStorage();
-    final stored = await storage.read(key: _secureKeyName);
-    if (stored != null) return base64Url.decode(stored);
-    final random = Random.secure();
-    final key = List<int>.generate(32, (_) => random.nextInt(256));
-    await storage.write(key: _secureKeyName, value: base64UrlEncode(key));
-    return key;
   }
 
   void _initialize() {

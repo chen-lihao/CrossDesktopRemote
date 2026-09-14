@@ -61,6 +61,8 @@ name = "client-ffi"
 version = "0.1.0"
 dependencies = [
  "p256",
+ "prost",
+ "protocol",
  "security-core",
  "session-core",
  "transfer-core",

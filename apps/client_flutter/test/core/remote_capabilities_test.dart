@@ -135,12 +135,22 @@ void main() {
           trustedDeviceAuthV1Capability,
           signedWebRtcBindingV1Capability,
           trustLeaseRenewalV1Capability,
+          trustedPairingTransactionV1Capability,
         ]),
       );
       expect(supportsTrustedDeviceAuthentication(capabilities), isTrue);
+      expect(supportsTransactionalTrustedPairing(capabilities), isTrue);
       expect(
         supportsTrustedDeviceAuthentication(const [
           trustedDeviceAuthV1Capability,
+        ]),
+        isFalse,
+      );
+      expect(
+        supportsTransactionalTrustedPairing(const [
+          deviceIdentityV1Capability,
+          trustedDeviceAuthV1Capability,
+          signedWebRtcBindingV1Capability,
         ]),
         isFalse,
       );

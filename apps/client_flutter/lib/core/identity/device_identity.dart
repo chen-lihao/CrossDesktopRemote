@@ -3,14 +3,18 @@ import 'dart:math';
 import 'package:cross_desktop_remote/core/identity/device_key_platform_adapter.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 enum DeviceIdentitySecurityState {
   unavailable,
   readyHardwareBacked,
   readySoftwareBacked,
+  migrationRequired,
+  keychainLocked,
   keyUnavailable,
   identityChanged,
+  transientFailure,
 }
 
 @immutable
@@ -28,6 +32,8 @@ class DeviceIdentity {
     this.authenticationExpiresAt,
     this.hardwareBacked = false,
     this.securityState = DeviceIdentitySecurityState.unavailable,
+    this.diagnosticCode,
+    this.diagnosticMessage,
   });
 
   final String deviceId;
@@ -42,6 +48,8 @@ class DeviceIdentity {
   final DateTime? authenticationExpiresAt;
   final bool hardwareBacked;
   final DeviceIdentitySecurityState securityState;
+  final String? diagnosticCode;
+  final String? diagnosticMessage;
 
   bool get trustedAuthenticationAvailable =>
       rootPublicKey != null &&
@@ -50,6 +58,20 @@ class DeviceIdentity {
       authenticationCertificate != null &&
       hardwareBacked &&
       securityState == DeviceIdentitySecurityState.readyHardwareBacked;
+
+  bool get requiresMigration =>
+      securityState == DeviceIdentitySecurityState.migrationRequired;
+
+  bool get canRetryProtectedIdentity => {
+    DeviceIdentitySecurityState.keychainLocked,
+    DeviceIdentitySecurityState.keyUnavailable,
+    DeviceIdentitySecurityState.transientFailure,
+  }.contains(securityState);
+
+  bool get canResetProtectedIdentity => {
+    DeviceIdentitySecurityState.keyUnavailable,
+    DeviceIdentitySecurityState.identityChanged,
+  }.contains(securityState);
 }
 
 abstract interface class DeviceIdentityStore {
@@ -62,6 +84,8 @@ abstract interface class DeviceRootBindingStore {
   Future<String?> readRootFingerprint();
 
   Future<void> writeRootFingerprint(String fingerprint);
+
+  Future<void> clearRootFingerprint();
 }
 
 class SharedPreferencesDeviceRootBindingStore
@@ -88,6 +112,11 @@ class SharedPreferencesDeviceRootBindingStore
   @override
   Future<void> writeRootFingerprint(String fingerprint) async {
     await _store?.setString(_rootFingerprintKey, fingerprint.toLowerCase());
+  }
+
+  @override
+  Future<void> clearRootFingerprint() async {
+    await _store?.remove(_rootFingerprintKey);
   }
 }
 
@@ -143,6 +172,8 @@ class DeviceIdentityController extends ChangeNotifier {
   bool get loaded => _identity != null;
   String get deviceId => _identity?.deviceId ?? '';
   String get machineCode => _identity?.machineCode ?? '';
+  bool get protectedIdentityRecoverySupported =>
+      _keyPlatform.supportsIdentityRecovery;
 
   Future<DeviceIdentity> loadOrCreate() async {
     if (_identity case final existing?) return existing;
@@ -184,36 +215,73 @@ class DeviceIdentityController extends ChangeNotifier {
       if (!_constantTimeEqual(current.rootFingerprint!, fingerprint)) {
         throw const FormatException('Protected root identity changed');
       }
-      _identity = DeviceIdentity(
-        deviceId: current.deviceId,
-        machineCode: _formatMachineCodeV2(fingerprint),
-        legacyDeviceId: current.legacyDeviceId,
-        legacyMachineCode: current.legacyMachineCode,
-        rootPublicKey: protected.rootPublicKey,
-        rootFingerprint: fingerprint,
-        authenticationPublicKey: protected.authenticationPublicKey,
-        authenticationCertificate: protected.authenticationCertificate,
-        authenticationNotBefore: protected.authenticationNotBefore,
-        authenticationExpiresAt: protected.authenticationExpiresAt,
-        hardwareBacked: protected.hardwareBacked,
-        securityState: protected.hardwareBacked
-            ? DeviceIdentitySecurityState.readyHardwareBacked
-            : DeviceIdentitySecurityState.readySoftwareBacked,
+      _identity = _identityFromProtected(
+        current: current,
+        protected: protected,
+        fingerprint: fingerprint,
       );
       notifyListeners();
       return _identity!;
-    } catch (_) {
+    } catch (error) {
       _identity = DeviceIdentity(
         deviceId: current.deviceId,
         machineCode: current.machineCode,
         legacyDeviceId: current.legacyDeviceId,
         legacyMachineCode: current.legacyMachineCode,
         rootFingerprint: current.rootFingerprint,
-        securityState: DeviceIdentitySecurityState.keyUnavailable,
+        securityState: _securityStateForError(error),
+        diagnosticCode: _diagnosticCodeForError(error),
+        diagnosticMessage: _diagnosticMessageForError(error),
       );
       notifyListeners();
       return _identity!;
     }
+  }
+
+  Future<DeviceIdentity> retryProtectedIdentity() async {
+    final current = await loadOrCreate();
+    final reloaded = await _loadProtectedIdentity(
+      deviceId: current.deviceId,
+      legacyMachineCode: current.legacyMachineCode,
+      boundFingerprint: await _readBoundFingerprint(),
+    );
+    _identity = reloaded;
+    notifyListeners();
+    return reloaded;
+  }
+
+  Future<DeviceIdentity> upgradeToHardwareIdentity() =>
+      _replaceProtectedIdentity(_keyPlatform.upgradeToHardwareIdentity);
+
+  Future<DeviceIdentity> resetProtectedIdentity() =>
+      _replaceProtectedIdentity(_keyPlatform.resetIdentity);
+
+  Future<DeviceIdentity> _replaceProtectedIdentity(
+    Future<PlatformDeviceKeyIdentity> Function() operation,
+  ) async {
+    final current = await loadOrCreate();
+    final protected = await operation();
+    _validateP256PublicKey(protected.rootPublicKey, 'rootPublicKey');
+    _validateP256PublicKey(
+      protected.authenticationPublicKey,
+      'authenticationPublicKey',
+    );
+    if (!protected.hardwareBacked ||
+        protected.securityState !=
+            PlatformDeviceKeySecurityState.readyHardwareProtected) {
+      throw StateError('平台未返回可用的硬件保护设备身份');
+    }
+    final fingerprint = Uint8List.fromList(
+      sha256.convert(protected.rootPublicKey).bytes,
+    );
+    await _rootBindingStore.writeRootFingerprint(_hex(fingerprint));
+    _identity = _identityFromProtected(
+      current: current,
+      protected: protected,
+      fingerprint: fingerprint,
+    );
+    notifyListeners();
+    return _identity!;
   }
 
   Future<DeviceIdentity> _loadProtectedIdentity({
@@ -251,9 +319,7 @@ class DeviceIdentityController extends ChangeNotifier {
       if (boundFingerprint == null) {
         await _rootBindingStore.writeRootFingerprint(_hex(fingerprint));
       }
-      final securityState = protected.hardwareBacked
-          ? DeviceIdentitySecurityState.readyHardwareBacked
-          : DeviceIdentitySecurityState.readySoftwareBacked;
+      final securityState = _securityStateForProtected(protected);
       return DeviceIdentity(
         // Preserve the installation ID used by the connection-code and LAN
         // discovery paths. Trusted routing uses machineCode explicitly.
@@ -269,13 +335,17 @@ class DeviceIdentityController extends ChangeNotifier {
         authenticationExpiresAt: protected.authenticationExpiresAt,
         hardwareBacked: protected.hardwareBacked,
         securityState: securityState,
+        diagnosticCode: protected.diagnosticCode,
+        diagnosticMessage: protected.diagnosticMessage,
       );
-    } catch (_) {
+    } catch (error) {
       return _fallbackIdentity(
         deviceId: deviceId,
         legacyMachineCode: legacyMachineCode,
         boundFingerprint: boundFingerprint,
-        securityState: DeviceIdentitySecurityState.keyUnavailable,
+        securityState: _securityStateForError(error),
+        diagnosticCode: _diagnosticCodeForError(error),
+        diagnosticMessage: _diagnosticMessageForError(error),
       );
     }
   }
@@ -285,6 +355,8 @@ class DeviceIdentityController extends ChangeNotifier {
     required String legacyMachineCode,
     required Uint8List? boundFingerprint,
     required DeviceIdentitySecurityState securityState,
+    String? diagnosticCode,
+    String? diagnosticMessage,
   }) {
     return DeviceIdentity(
       deviceId: deviceId,
@@ -295,7 +367,74 @@ class DeviceIdentityController extends ChangeNotifier {
       legacyMachineCode: legacyMachineCode,
       rootFingerprint: boundFingerprint,
       securityState: securityState,
+      diagnosticCode: diagnosticCode,
+      diagnosticMessage: diagnosticMessage,
     );
+  }
+
+  DeviceIdentity _identityFromProtected({
+    required DeviceIdentity current,
+    required PlatformDeviceKeyIdentity protected,
+    required Uint8List fingerprint,
+  }) {
+    return DeviceIdentity(
+      deviceId: current.deviceId,
+      machineCode: _formatMachineCodeV2(fingerprint),
+      legacyDeviceId: current.legacyDeviceId,
+      legacyMachineCode: current.legacyMachineCode,
+      rootPublicKey: protected.rootPublicKey,
+      rootFingerprint: fingerprint,
+      authenticationPublicKey: protected.authenticationPublicKey,
+      authenticationCertificate: protected.authenticationCertificate,
+      authenticationNotBefore: protected.authenticationNotBefore,
+      authenticationExpiresAt: protected.authenticationExpiresAt,
+      hardwareBacked: protected.hardwareBacked,
+      securityState: _securityStateForProtected(protected),
+      diagnosticCode: protected.diagnosticCode,
+      diagnosticMessage: protected.diagnosticMessage,
+    );
+  }
+
+  static DeviceIdentitySecurityState _securityStateForProtected(
+    PlatformDeviceKeyIdentity protected,
+  ) => switch (protected.securityState) {
+    PlatformDeviceKeySecurityState.readyHardwareProtected =>
+      DeviceIdentitySecurityState.readyHardwareBacked,
+    PlatformDeviceKeySecurityState.readyOsProtected =>
+      DeviceIdentitySecurityState.readySoftwareBacked,
+    PlatformDeviceKeySecurityState.migrationRequired =>
+      DeviceIdentitySecurityState.migrationRequired,
+  };
+
+  static DeviceIdentitySecurityState _securityStateForError(Object error) {
+    return switch (_diagnosticCodeForError(error)) {
+      'legacy_keychain_identity_detected' =>
+        DeviceIdentitySecurityState.migrationRequired,
+      'keychain_locked' => DeviceIdentitySecurityState.keychainLocked,
+      'root_identity_changed' || 'identity_manifest_signature_invalid' =>
+        DeviceIdentitySecurityState.identityChanged,
+      'secure_enclave_unavailable' ||
+      'trusted_identity_disabled' ||
+      'missing_application_identifier' =>
+        DeviceIdentitySecurityState.unavailable,
+      'secure_enclave_creation_failed' ||
+      'secure_enclave_self_test_failed' ||
+      'identity_storage_failure' =>
+        DeviceIdentitySecurityState.transientFailure,
+      _ => DeviceIdentitySecurityState.keyUnavailable,
+    };
+  }
+
+  static String? _diagnosticCodeForError(Object error) {
+    if (error is! PlatformException) return null;
+    final details = error.details;
+    if (details is Map) return details['diagnosticCode'] as String?;
+    return error.code;
+  }
+
+  static String? _diagnosticMessageForError(Object error) {
+    if (error is PlatformException) return error.message;
+    return error.toString();
   }
 
   Future<Uint8List?> _readBoundFingerprint() async {

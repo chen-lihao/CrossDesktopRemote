@@ -17,6 +17,7 @@ const deviceIdentityV1Capability = 'device-identity-v1';
 const trustedDeviceAuthV1Capability = 'trusted-device-auth-v1';
 const signedWebRtcBindingV1Capability = 'signed-webrtc-binding-v1';
 const trustLeaseRenewalV1Capability = 'trust-lease-renewal-v1';
+const trustedPairingTransactionV1Capability = 'trusted-pairing-transaction-v1';
 const iosActiveContentGeometryV3Enabled = bool.fromEnvironment(
   'CDR_IOS_ACTIVE_CONTENT_GEOMETRY_V3',
   defaultValue: true,
@@ -75,6 +76,7 @@ List<String> buildRemoteClientCapabilities({
       trustedDeviceAuthV1Capability,
       signedWebRtcBindingV1Capability,
       trustLeaseRenewalV1Capability,
+      trustedPairingTransactionV1Capability,
     ]);
   }
   return capabilities;
@@ -84,6 +86,10 @@ bool supportsTrustedDeviceAuthentication(Iterable<String> capabilities) =>
     capabilities.contains(deviceIdentityV1Capability) &&
     capabilities.contains(trustedDeviceAuthV1Capability) &&
     capabilities.contains(signedWebRtcBindingV1Capability);
+
+bool supportsTransactionalTrustedPairing(Iterable<String> capabilities) =>
+    supportsTrustedDeviceAuthentication(capabilities) &&
+    capabilities.contains(trustedPairingTransactionV1Capability);
 
 bool supportsActiveContentGeometry(Iterable<String> capabilities) {
   return activeContentGeometryVersion(capabilities) > 0;

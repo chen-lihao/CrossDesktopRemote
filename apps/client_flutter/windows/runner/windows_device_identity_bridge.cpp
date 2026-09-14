@@ -25,6 +25,8 @@ constexpr wchar_t kRootKeyName[] = L"CrossDesktopRemote.DeviceRoot.v1";
 constexpr wchar_t kAuthenticationKeyPrefix[] =
     L"CrossDesktopRemote.Authentication.v2.";
 constexpr wchar_t kRegistryPath[] = L"Software\\CrossDesktopRemote\\Identity";
+constexpr wchar_t kSecretsRegistryPath[] =
+    L"Software\\CrossDesktopRemote\\ProtectedSecrets";
 constexpr wchar_t kRootFingerprintValue[] = L"RootFingerprintV2";
 constexpr wchar_t kAuthenticationKeyIdValue[] = L"AuthenticationKeyIdV2";
 constexpr wchar_t kNotBeforeValue[] = L"AuthenticationNotBeforeUnixMs";
@@ -128,25 +130,33 @@ ProtectedKey LoadOrCreateKey(const wchar_t* key_name) {
     return key;
   }
 
-  for (const auto& candidate :
-       std::array<std::pair<const wchar_t*, bool>, 2>{{
-           {MS_PLATFORM_CRYPTO_PROVIDER, true},
-           {MS_KEY_STORAGE_PROVIDER, false},
-       }}) {
-    NcryptHandle provider;
-    if (!OpenProvider(candidate.first, &provider)) continue;
-    NcryptHandle created;
-    const auto status = NCryptCreatePersistedKey(
-        provider.get(), created.put(), NCRYPT_ECDSA_P256_ALGORITHM, key_name, 0,
-        0);
-    if (status != ERROR_SUCCESS) continue;
-    if (NCryptFinalizeKey(created.get(), 0) != ERROR_SUCCESS) continue;
-    key.provider = std::move(provider);
-    key.key = std::move(created);
-    key.hardware_backed = candidate.second;
-    return key;
+  NcryptHandle provider;
+  if (!OpenProvider(MS_PLATFORM_CRYPTO_PROVIDER, &provider)) {
+    throw std::runtime_error("TPM platform crypto provider is unavailable");
   }
-  throw std::runtime_error("Unable to create a Windows protected P-256 key");
+  NcryptHandle created;
+  CheckSecurityStatus(
+      NCryptCreatePersistedKey(provider.get(), created.put(),
+                               NCRYPT_ECDSA_P256_ALGORITHM, key_name, 0, 0),
+      "NCryptCreatePersistedKey(TPM)");
+  CheckSecurityStatus(NCryptFinalizeKey(created.get(), 0),
+                      "NCryptFinalizeKey(TPM)");
+  key.provider = std::move(provider);
+  key.key = std::move(created);
+  key.hardware_backed = true;
+  return key;
+}
+
+void DeleteKeyIfPresent(const wchar_t* provider_name,
+                        const wchar_t* key_name) {
+  NcryptHandle provider;
+  if (!OpenProvider(provider_name, &provider)) return;
+  NcryptHandle key;
+  if (NCryptOpenKey(provider.get(), key.put(), key_name, 0, 0) !=
+      ERROR_SUCCESS) {
+    return;
+  }
+  CheckSecurityStatus(NCryptDeleteKey(key.release(), 0), "NCryptDeleteKey");
 }
 
 std::vector<uint8_t> ExportPublicKey(NCRYPT_KEY_HANDLE key) {
@@ -406,6 +416,15 @@ void WriteRegistryString(const wchar_t* name, const std::wstring& value) {
   }
 }
 
+void DeleteIdentityRegistryValue(const wchar_t* name) {
+  const auto status =
+      RegDeleteKeyValueW(HKEY_CURRENT_USER, kRegistryPath, name);
+  if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND &&
+      status != ERROR_PATH_NOT_FOUND) {
+    throw std::runtime_error("Unable to clear device identity metadata");
+  }
+}
+
 std::wstring HexWide(const std::vector<uint8_t>& value) {
   constexpr wchar_t kHex[] = L"0123456789abcdef";
   std::wstring output;
@@ -498,7 +517,30 @@ EncodableMap BuildIdentity(bool force_rotation) {
       EncodableValue(Base64Encode(certificate));
   value[EncodableValue("hardwareBacked")] =
       EncodableValue(root.hardware_backed && authentication.hardware_backed);
+  const bool hardware_backed =
+      root.hardware_backed && authentication.hardware_backed;
+  value[EncodableValue("protection")] = EncodableValue(
+      hardware_backed ? "secureHardware" : "osProtected");
+  value[EncodableValue("securityState")] = EncodableValue(
+      hardware_backed ? "readyHardwareProtected" : "migrationRequired");
   return value;
+}
+
+EncodableMap ResetHardwareIdentity() {
+  const auto authentication_key_id =
+      ReadRegistryString(kAuthenticationKeyIdValue);
+  if (!authentication_key_id.empty()) {
+    const auto name = AuthenticationKeyName(authentication_key_id);
+    DeleteKeyIfPresent(MS_PLATFORM_CRYPTO_PROVIDER, name.c_str());
+    DeleteKeyIfPresent(MS_KEY_STORAGE_PROVIDER, name.c_str());
+  }
+  DeleteKeyIfPresent(MS_PLATFORM_CRYPTO_PROVIDER, kRootKeyName);
+  DeleteKeyIfPresent(MS_KEY_STORAGE_PROVIDER, kRootKeyName);
+  DeleteIdentityRegistryValue(kRootFingerprintValue);
+  DeleteIdentityRegistryValue(kAuthenticationKeyIdValue);
+  DeleteIdentityRegistryValue(kNotBeforeValue);
+  DeleteIdentityRegistryValue(kExpiresAtValue);
+  return BuildIdentity(false);
 }
 
 const EncodableMap& Arguments(const flutter::MethodCall<EncodableValue>& call) {
@@ -513,6 +555,139 @@ std::string StringArgument(const EncodableMap& arguments, const char* name) {
   const auto* value = std::get_if<std::string>(&entry->second);
   if (value == nullptr) throw std::runtime_error("Invalid string argument");
   return *value;
+}
+
+int64_t IntArgument(const EncodableMap& arguments, const char* name) {
+  const auto entry = arguments.find(EncodableValue(name));
+  if (entry == arguments.end()) throw std::runtime_error("Missing argument");
+  if (const auto* value = std::get_if<int64_t>(&entry->second)) return *value;
+  if (const auto* value = std::get_if<int32_t>(&entry->second)) return *value;
+  throw std::runtime_error("Invalid integer argument");
+}
+
+std::wstring ValidSecretName(const std::string& value) {
+  if (value.empty() || value.size() > 128) {
+    throw std::runtime_error("Invalid protected secret name");
+  }
+  for (const unsigned char byte : value) {
+    const bool valid = (byte >= 'a' && byte <= 'z') ||
+                       (byte >= '0' && byte <= '9') || byte == '.' ||
+                       byte == '_' || byte == '-';
+    if (!valid) throw std::runtime_error("Invalid protected secret name");
+  }
+  if (!((value.front() >= 'a' && value.front() <= 'z') ||
+        (value.front() >= '0' && value.front() <= '9'))) {
+    throw std::runtime_error("Invalid protected secret name");
+  }
+  return std::wstring(value.begin(), value.end());
+}
+
+std::vector<uint8_t> ReadProtectedSecretBlob(const std::wstring& name) {
+  DWORD type = 0;
+  DWORD size = 0;
+  const auto sized = RegGetValueW(HKEY_CURRENT_USER, kSecretsRegistryPath,
+                                  name.c_str(), RRF_RT_REG_BINARY, &type,
+                                  nullptr, &size);
+  if (sized == ERROR_FILE_NOT_FOUND || sized == ERROR_PATH_NOT_FOUND) return {};
+  if (sized != ERROR_SUCCESS || size == 0 || size > 4096) {
+    throw std::runtime_error("Unable to read protected secret metadata");
+  }
+  std::vector<uint8_t> value(size);
+  if (RegGetValueW(HKEY_CURRENT_USER, kSecretsRegistryPath, name.c_str(),
+                   RRF_RT_REG_BINARY, &type, value.data(), &size) !=
+      ERROR_SUCCESS) {
+    throw std::runtime_error("Unable to read protected secret metadata");
+  }
+  value.resize(size);
+  return value;
+}
+
+void WriteProtectedSecretBlob(const std::wstring& name,
+                              const std::vector<uint8_t>& value) {
+  HKEY key = nullptr;
+  const auto opened = RegCreateKeyExW(
+      HKEY_CURRENT_USER, kSecretsRegistryPath, 0, nullptr,
+      REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key, nullptr);
+  if (opened != ERROR_SUCCESS) {
+    throw std::runtime_error("Unable to open protected secret metadata");
+  }
+  const auto written = RegSetValueExW(
+      key, name.c_str(), 0, REG_BINARY, value.data(),
+      static_cast<DWORD>(value.size()));
+  RegCloseKey(key);
+  if (written != ERROR_SUCCESS) {
+    throw std::runtime_error("Unable to persist protected secret metadata");
+  }
+}
+
+std::vector<uint8_t> ProtectForCurrentUser(
+    const std::vector<uint8_t>& plaintext) {
+  DATA_BLOB input{static_cast<DWORD>(plaintext.size()),
+                  const_cast<BYTE*>(plaintext.data())};
+  const std::string entropy_text = "CrossDesktopRemote/LocalSecret/v1";
+  DATA_BLOB entropy{
+      static_cast<DWORD>(entropy_text.size()),
+      reinterpret_cast<BYTE*>(const_cast<char*>(entropy_text.data()))};
+  DATA_BLOB output{};
+  if (!CryptProtectData(&input, L"CrossDesktopRemote local secret", &entropy,
+                        nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &output)) {
+    throw std::runtime_error("DPAPI failed to protect local secret");
+  }
+  std::vector<uint8_t> value(output.pbData, output.pbData + output.cbData);
+  LocalFree(output.pbData);
+  return value;
+}
+
+std::vector<uint8_t> UnprotectForCurrentUser(
+    const std::vector<uint8_t>& ciphertext) {
+  DATA_BLOB input{static_cast<DWORD>(ciphertext.size()),
+                  const_cast<BYTE*>(ciphertext.data())};
+  const std::string entropy_text = "CrossDesktopRemote/LocalSecret/v1";
+  DATA_BLOB entropy{
+      static_cast<DWORD>(entropy_text.size()),
+      reinterpret_cast<BYTE*>(const_cast<char*>(entropy_text.data()))};
+  DATA_BLOB output{};
+  if (!CryptUnprotectData(&input, nullptr, &entropy, nullptr, nullptr,
+                          CRYPTPROTECT_UI_FORBIDDEN, &output)) {
+    throw std::runtime_error("DPAPI failed to unprotect local secret");
+  }
+  std::vector<uint8_t> value(output.pbData, output.pbData + output.cbData);
+  SecureZeroMemory(output.pbData, output.cbData);
+  LocalFree(output.pbData);
+  return value;
+}
+
+std::string LoadOrCreateSecret(const EncodableMap& arguments) {
+  const auto name = ValidSecretName(StringArgument(arguments, "name"));
+  const auto length = IntArgument(arguments, "length");
+  if (length < 16 || length > 64) {
+    throw std::runtime_error("Invalid protected secret length");
+  }
+  const auto stored = ReadProtectedSecretBlob(name);
+  if (!stored.empty()) {
+    const auto value = UnprotectForCurrentUser(stored);
+    if (value.size() != static_cast<size_t>(length)) {
+      throw std::runtime_error("Protected secret has an unexpected length");
+    }
+    return Base64Encode(value);
+  }
+  std::vector<uint8_t> value(static_cast<size_t>(length));
+  CheckSecurityStatus(
+      BCryptGenRandom(nullptr, value.data(), static_cast<ULONG>(value.size()),
+                      BCRYPT_USE_SYSTEM_PREFERRED_RNG),
+      "BCryptGenRandom(secret)");
+  WriteProtectedSecretBlob(name, ProtectForCurrentUser(value));
+  return Base64Encode(value);
+}
+
+void DeleteSecret(const EncodableMap& arguments) {
+  const auto name = ValidSecretName(StringArgument(arguments, "name"));
+  const auto status =
+      RegDeleteKeyValueW(HKEY_CURRENT_USER, kSecretsRegistryPath, name.c_str());
+  if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND &&
+      status != ERROR_PATH_NOT_FOUND) {
+    throw std::runtime_error("Unable to delete protected secret");
+  }
 }
 
 bool Verify(const std::vector<uint8_t>& public_key,
@@ -570,7 +745,21 @@ WindowsDeviceIdentityBridge::WindowsDeviceIdentityBridge(
             result->Success(EncodableValue(BuildIdentity(true)));
             return;
           }
+          if (call.method_name() == "upgradeToHardwareIdentity" ||
+              call.method_name() == "resetIdentity") {
+            result->Success(EncodableValue(ResetHardwareIdentity()));
+            return;
+          }
           const auto& arguments = Arguments(call);
+          if (call.method_name() == "loadOrCreateSecret") {
+            result->Success(EncodableValue(LoadOrCreateSecret(arguments)));
+            return;
+          }
+          if (call.method_name() == "deleteSecret") {
+            DeleteSecret(arguments);
+            result->Success();
+            return;
+          }
           if (call.method_name() == "signWithRoot" ||
               call.method_name() == "signWithAuthenticationKey") {
             const auto message =

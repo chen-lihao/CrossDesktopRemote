@@ -37,6 +37,7 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			"trusted-auth-response",
 			"trusted-offer",
 			"trusted-answer",
+			"trusted-binding-ack",
 			"trusted-renewal");
 	private static final String ROOM_ATTRIBUTE = "crossdesktop.room";
 	private static final String ROLE_ATTRIBUTE = "crossdesktop.role";

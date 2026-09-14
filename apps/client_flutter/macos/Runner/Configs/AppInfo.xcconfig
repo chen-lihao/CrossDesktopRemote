@@ -10,5 +10,15 @@ PRODUCT_NAME = cross_desktop_remote
 // The application's bundle identifier
 PRODUCT_BUNDLE_IDENTIFIER = com.crossdesktopremote.crossDesktopRemote
 
+// Ad-hoc builds remain usable through the dynamic connection-code path, but
+// must not advertise trusted-device authentication. A developer-owned file
+// included below can opt into stable Apple Development signing.
+CODE_SIGN_IDENTITY = -
+CDR_TRUSTED_IDENTITY_MODE = disabled
+CDR_ENTITLEMENTS_disabled = $(CDR_BASE_ENTITLEMENTS)
+CDR_ENTITLEMENTS_hardware = $(CDR_HARDWARE_ENTITLEMENTS)
+CODE_SIGN_ENTITLEMENTS = $(CDR_ENTITLEMENTS_$(CDR_TRUSTED_IDENTITY_MODE))
+#include? "DeveloperSigning.xcconfig"
+
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 com.crossdesktopremote. All rights reserved.

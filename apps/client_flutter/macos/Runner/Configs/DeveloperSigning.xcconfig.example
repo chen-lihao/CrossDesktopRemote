@@ -1,0 +1,10 @@
+// Copy this file to DeveloperSigning.xcconfig and select the same Personal
+// Team in Xcode. The local file is intentionally ignored by Git.
+DEVELOPMENT_TEAM = YOUR_PERSONAL_TEAM_ID
+CODE_SIGN_STYLE = Automatic
+CODE_SIGN_IDENTITY = Apple Development
+PRODUCT_BUNDLE_IDENTIFIER = com.chenlihao.crossdesktopremote.dev
+CDR_TRUSTED_IDENTITY_MODE = hardware
+
+// hardware selects the dedicated Keychain Sharing entitlement through
+// AppInfo.xcconfig. Do not copy keychain access groups between Team IDs.

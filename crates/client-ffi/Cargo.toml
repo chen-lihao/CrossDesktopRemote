@@ -9,6 +9,8 @@ name = "crossdesktop_core"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
+prost = "0.14.4"
+protocol = { path = "../protocol" }
 security-core = { path = "../security-core" }
 session-core = { path = "../session-core" }
 transfer-core = { path = "../transfer-core" }

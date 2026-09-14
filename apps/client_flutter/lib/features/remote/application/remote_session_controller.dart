@@ -19,6 +19,8 @@ import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/core/signaling/remote_capabilities.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_coordinator.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_models.dart';
+import 'package:cross_desktop_remote/core/security/trusted_security_engine.dart';
+import 'package:cross_desktop_remote/core/security/trusted_webrtc_binding.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_display_switch_coordinator.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_display_switch_protocol.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_frame_geometry_coordinator.dart';
@@ -175,6 +177,7 @@ class RemoteSessionController extends ChangeNotifier
   static const int _appleSessionCaptureLongEdge = 1920;
   static const int _windowsSessionCaptureLongEdge = 2560;
   static const int _sessionCaptureFrameRate = 60;
+  static const _trustedWebRtcBinding = TrustedWebRtcBindingCodec();
 
   RemoteSessionController({
     required this.role,
@@ -222,6 +225,9 @@ class RemoteSessionController extends ChangeNotifier
     );
     _fileTransfer.addListener(_handleFileTransferChanged);
     _fileTransferNoticeSubscription = _fileTransfer.notices.listen(_emitNotice);
+    _trustedAuthorizationInvalidationSubscription = _trustedDevices
+        ?.invalidations
+        .listen(_handleTrustedAuthorizationInvalidation);
     unawaited(
       _fileTransferPlatform.cleanupOrphanedClipboardReceiveDirectories(),
     );
@@ -300,6 +306,8 @@ class RemoteSessionController extends ChangeNotifier
   StreamSubscription<ClipboardSnapshot>? _clipboardSubscription;
   StreamSubscription<String>? _filePasteIntentSubscription;
   StreamSubscription<String>? _fileTransferNoticeSubscription;
+  StreamSubscription<TrustedAuthorizationInvalidation>?
+  _trustedAuthorizationInvalidationSubscription;
   Timer? _displayRefreshTimer;
   Timer? _inputPermissionPollTimer;
   Timer? _qualityRequestTimer;
@@ -312,6 +320,7 @@ class RemoteSessionController extends ChangeNotifier
   bool _initialized = false;
   bool _closing = false;
   bool _connectionEstablished = false;
+  bool _trustedInvalidationInProgress = false;
   bool _authorizingPeer = false;
   bool _checkingInputPermission = false;
   bool _inputConfirmed = false;
@@ -364,6 +373,7 @@ class RemoteSessionController extends ChangeNotifier
   bool _remoteSupportsAtomicShortcutV1 = false;
   bool _remoteSupportsScopedInputResetV1 = false;
   bool _remoteSupportsTrustedDeviceAuthentication = false;
+  bool _remoteSupportsTransactionalTrustedPairing = false;
   bool _remoteClipboardSupportsApplied = false;
   bool _explicitFileTransferTransportAttached = false;
   Completer<void>? _invitationRotationCompleter;
@@ -380,6 +390,8 @@ class RemoteSessionController extends ChangeNotifier
   Uint8List? _trustedHostNonce;
   Set<TrustedPermission> _trustedPermissions = const {};
   bool _trustedSessionAuthorized = false;
+  TrustedSessionBinding? _trustedPendingBinding;
+  String? _trustedOfferSdp;
   TrustedPairingSnapshot? _trustedPairing;
   String? _pairingSessionId;
   TrustedPeerIdentity? _pairingPeerIdentity;
@@ -387,8 +399,10 @@ class RemoteSessionController extends ChangeNotifier
   Uint8List? _pairingPeerNonce;
   Uint8List? _pairingPeerCommitment;
   Uint8List? _pairingRemoteConfirmation;
+  TrustedDeviceGrant? _pairingGrant;
   Set<TrustedPermission> _pairingPermissions = const {};
   bool _pairingLocalConfirmed = false;
+  bool _pairingFinalizing = false;
   bool _pairingAutomaticRenewal = true;
   bool _pairingInputSuspended = false;
   Timer? _pairingTimer;
@@ -592,6 +606,7 @@ class RemoteSessionController extends ChangeNotifier
       _authenticationMode == RemoteAuthenticationMode.connectionCode &&
       state == RemoteSessionState.streaming &&
       _remoteSupportsTrustedDeviceAuthentication &&
+      _remoteSupportsTransactionalTrustedPairing &&
       _trustedDevices?.supported == true &&
       _trustedPairing == null;
   String? get remoteHostPlatform => _remoteHostPlatform;
@@ -1222,6 +1237,49 @@ class RemoteSessionController extends ChangeNotifier
     final message = role == RemoteRole.host ? '已停止接收远程连接' : '远程会话已断开';
     _setState(RemoteSessionState.disconnected, message);
     _emitNotice(message);
+  }
+
+  void _handleTrustedAuthorizationInvalidation(
+    TrustedAuthorizationInvalidation invalidation,
+  ) {
+    if (_authenticationMode != RemoteAuthenticationMode.trustedDevice ||
+        _trustedInvalidationInProgress) {
+      return;
+    }
+    final record = role == RemoteRole.host
+        ? _trustedControllerRecord
+        : _trustedHostRecord;
+    final peerFingerprint =
+        _trustedRemoteIdentity?.rootFingerprint ??
+        record?.peerIdentity.rootFingerprint;
+    final grantId = role == RemoteRole.host
+        ? (_trustedPresentedGrant?.grantId ?? record?.grant.grantId)
+        : record?.grant.grantId;
+    if (!invalidation.affects(
+      peerFingerprint: peerFingerprint,
+      grantId: grantId,
+    )) {
+      return;
+    }
+    _trustedInvalidationInProgress = true;
+    unawaited(_terminateInvalidatedTrustedSession(invalidation.reason));
+  }
+
+  Future<void> _terminateInvalidatedTrustedSession(
+    TrustedAuthorizationInvalidationReason reason,
+  ) async {
+    try {
+      await _closeSession(notifyPeer: true);
+      final message = switch (reason) {
+        TrustedAuthorizationInvalidationReason.allConnectionsPaused =>
+          '可信连接已暂停，本次会话已安全终止',
+        TrustedAuthorizationInvalidationReason.grantRevoked =>
+          '可信授权已撤销，本次会话已安全终止',
+      };
+      _fail(message);
+    } finally {
+      _trustedInvalidationInProgress = false;
+    }
   }
 
   void clearConnectionAttemptFeedback() {
@@ -2945,6 +3003,10 @@ class RemoteSessionController extends ChangeNotifier
         _pairingLocalConfirmed) {
       return;
     }
+    _requireTrustedCoordinator().confirmPairingSecuritySession(
+      _requirePairingSessionId(),
+      true,
+    );
     _pairingLocalConfirmed = true;
     _updateTrustedPairing(
       phase: TrustedPairingPhase.waitingForConfirmation,
@@ -2990,10 +3052,7 @@ class RemoteSessionController extends ChangeNotifier
     _updateTrustedPairing(automaticRenewal: value);
   }
 
-  void setTrustedPairingPermission(
-    TrustedPermission permission,
-    bool enabled,
-  ) {
+  void setTrustedPairingPermission(TrustedPermission permission, bool enabled) {
     if (role != RemoteRole.host ||
         permission == TrustedPermission.viewScreen ||
         _pairingLocalConfirmed ||
@@ -3049,7 +3108,8 @@ class RemoteSessionController extends ChangeNotifier
   ) async {
     if (_authenticationMode != RemoteAuthenticationMode.connectionCode ||
         _trustedDevices?.supported != true ||
-        !_remoteSupportsTrustedDeviceAuthentication) {
+        !_remoteSupportsTrustedDeviceAuthentication ||
+        !_remoteSupportsTransactionalTrustedPairing) {
       return;
     }
     switch (message['type']) {
@@ -3065,6 +3125,10 @@ class RemoteSessionController extends ChangeNotifier
         await _handleTrustPairConfirmation(message);
       case 'trust-pair-grant':
         await _handleTrustPairGrant(message);
+      case 'trust-pair-grant-accepted':
+        await _handleTrustPairGrantAccepted(message);
+      case 'trust-pair-committed':
+        await _handleTrustPairCommitted(message);
       case 'trust-pair-cancel':
         if (message['pairingSessionId'] == _pairingSessionId) {
           _failTrustedPairing('对端已取消可信认证');
@@ -3102,6 +3166,12 @@ class RemoteSessionController extends ChangeNotifier
     _pairingPeerCommitment = peerCommitment;
     _pairingLocalNonce = securityRandomBytes(16);
     _pairingPermissions = Set.unmodifiable(permissions);
+    coordinator.beginSecuritySession(
+      sessionId: pairingSessionId,
+      peerRootFingerprint: peer.rootFingerprint,
+      requestedPermissions: _pairingPermissions,
+      mode: TrustedSecuritySessionMode.pairing,
+    );
     _pairingInputSuspended = true;
     await _releaseHostInputState();
     _setTrustedPairing(
@@ -3150,6 +3220,12 @@ class RemoteSessionController extends ChangeNotifier
       message['nonceCommitment'],
       32,
       'nonceCommitment',
+    );
+    _requireTrustedCoordinator().beginSecuritySession(
+      sessionId: _requirePairingSessionId(),
+      peerRootFingerprint: peer.rootFingerprint,
+      requestedPermissions: _pairingPermissions,
+      mode: TrustedSecuritySessionMode.pairing,
     );
     _updateTrustedPairing(
       peerName: _trustedPeerName(message),
@@ -3249,39 +3325,49 @@ class RemoteSessionController extends ChangeNotifier
     if (role != RemoteRole.host ||
         !_pairingLocalConfirmed ||
         _pairingRemoteConfirmation == null ||
-        _pairingPeerIdentity == null) {
+        _pairingPeerIdentity == null ||
+        _pairingFinalizing ||
+        _pairingGrant != null) {
       return;
     }
+    _pairingFinalizing = true;
     final coordinator = _requireTrustedCoordinator();
-    final grant = await coordinator.issueGrant(
-      subject: _pairingPeerIdentity!,
-      permissions: _pairingPermissions,
-      automaticRenewal: _pairingAutomaticRenewal,
-    );
-    await coordinator.trustController(
-      peerName: _trustedPairing?.peerName ?? '可信控制设备',
-      controller: _pairingPeerIdentity!,
-      grant: grant,
-    );
-    final hostSignature = await coordinator.identity.signWithRoot(
-      _trustedPairingConfirmation(),
-    );
-    _sendControl({
-      'type': 'trust-pair-grant',
-      'version': remoteDisplaySwitchWireVersion,
-      'pairingSessionId': _requirePairingSessionId(),
-      'peerName': Platform.localHostname,
-      'identity': coordinator.localPublicIdentity().toJson(),
-      'grant': grant.toJson(),
-      'signature': base64Encode(hostSignature),
-    });
-    _pairingTimer?.cancel();
-    _pairingInputSuspended = false;
-    _updateTrustedPairing(
-      phase: TrustedPairingPhase.completed,
-      remoteConfirmed: true,
-      message: '可信关系已建立，可在后续连接中免输连接码',
-    );
+    try {
+      final grant = await coordinator.issueGrant(
+        subject: _pairingPeerIdentity!,
+        permissions: _pairingPermissions,
+        automaticRenewal: _pairingAutomaticRenewal,
+      );
+      coordinator.validatePairingGrant(
+        sessionId: _requirePairingSessionId(),
+        grant: grant,
+        issuerRootPublicKey: coordinator.localPublicIdentity().rootPublicKey,
+      );
+      await coordinator.stagePairing(
+        pairingSessionId: _requirePairingSessionId(),
+        peerName: _trustedPairing?.peerName ?? '可信控制设备',
+        peer: _pairingPeerIdentity!,
+        grant: grant,
+        localIsIssuer: true,
+      );
+      _pairingGrant = grant;
+      final hostSignature = await coordinator.identity.signWithRoot(
+        _trustedPairingConfirmation(),
+      );
+      _sendControl({
+        'type': 'trust-pair-grant',
+        'version': remoteDisplaySwitchWireVersion,
+        'pairingSessionId': _requirePairingSessionId(),
+        'peerName': Platform.localHostname,
+        'identity': coordinator.localPublicIdentity().toJson(),
+        'grant': grant.toJson(),
+        'signature': base64Encode(hostSignature),
+      });
+      _updateTrustedPairing(message: '等待控制端验证并接受可信授权');
+    } catch (_) {
+      _pairingFinalizing = false;
+      rethrow;
+    }
   }
 
   Future<void> _handleTrustPairGrant(Map<String, dynamic> message) async {
@@ -3317,10 +3403,158 @@ class RemoteSessionController extends ChangeNotifier
     final grant = TrustedDeviceGrant.fromJson(
       _stringMap(message['grant'], 'grant'),
     );
-    await coordinator.trustHost(
-      peerName: _trustedPeerName(message),
-      host: host,
+    final existingGrant = _pairingGrant;
+    final sameGrant =
+        existingGrant != null &&
+        constantTimeBytesEqual(
+          existingGrant.signingBytes,
+          grant.signingBytes,
+        ) &&
+        constantTimeBytesEqual(existingGrant.signature, grant.signature);
+    if (_trustedPairing?.phase == TrustedPairingPhase.completed && sameGrant) {
+      return;
+    }
+    coordinator.validatePairingGrant(
+      sessionId: _requirePairingSessionId(),
       grant: grant,
+      issuerRootPublicKey: host.rootPublicKey,
+    );
+    if (existingGrant != null && !sameGrant) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.identityChanged,
+        '配对事务中的可信授权发生变化',
+      );
+    }
+    if (existingGrant == null) {
+      await coordinator.stagePairing(
+        pairingSessionId: _requirePairingSessionId(),
+        peerName: _trustedPeerName(message),
+        peer: host,
+        grant: grant,
+        localIsIssuer: false,
+      );
+      _pairingGrant = grant;
+    }
+    final acceptedSignature = await coordinator.identity.signWithRoot(
+      trustedPairingReceiptBytes(
+        sessionId: _requirePairingSessionId(),
+        grant: grant,
+        stage: TrustedPairingReceiptStage.accepted,
+      ),
+    );
+    _sendControl({
+      'type': 'trust-pair-grant-accepted',
+      'version': remoteDisplaySwitchWireVersion,
+      'pairingSessionId': _requirePairingSessionId(),
+      'grantId': base64Encode(grant.grantId),
+      'signature': base64Encode(acceptedSignature),
+    });
+    _updateTrustedPairing(remoteConfirmed: true, message: '可信授权已验证，等待被控端提交确认');
+  }
+
+  Future<void> _handleTrustPairGrantAccepted(
+    Map<String, dynamic> message,
+  ) async {
+    if (role != RemoteRole.host ||
+        _validPairingSessionId(message) != _pairingSessionId ||
+        _pairingPeerIdentity == null ||
+        _pairingGrant == null) {
+      return;
+    }
+    final grant = _pairingGrant!;
+    final grantId = _fixedBytes(message['grantId'], 16, 'grantId');
+    if (!constantTimeBytesEqual(grantId, grant.grantId)) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.identityChanged,
+        '控制端接受了不同的可信授权',
+      );
+    }
+    final signature = _boundedSignature(message['signature'], 'signature');
+    final coordinator = _requireTrustedCoordinator();
+    final verified = await coordinator.verifyRootSignature(
+      peer: _pairingPeerIdentity!,
+      message: trustedPairingReceiptBytes(
+        sessionId: _requirePairingSessionId(),
+        grant: grant,
+        stage: TrustedPairingReceiptStage.accepted,
+      ),
+      signature: signature,
+    );
+    if (!verified) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '控制端可信授权接受回执无效',
+      );
+    }
+    final alreadyCompleted =
+        _trustedPairing?.phase == TrustedPairingPhase.completed;
+    if (!alreadyCompleted) {
+      coordinator.completePairingSecuritySession(_requirePairingSessionId());
+      await coordinator.commitPairing(
+        pairingSessionId: _requirePairingSessionId(),
+        grantId: grant.grantId,
+      );
+    }
+    final committedSignature = await coordinator.identity.signWithRoot(
+      trustedPairingReceiptBytes(
+        sessionId: _requirePairingSessionId(),
+        grant: grant,
+        stage: TrustedPairingReceiptStage.committed,
+      ),
+    );
+    _sendControl({
+      'type': 'trust-pair-committed',
+      'version': remoteDisplaySwitchWireVersion,
+      'pairingSessionId': _requirePairingSessionId(),
+      'grantId': base64Encode(grant.grantId),
+      'signature': base64Encode(committedSignature),
+    });
+    _pairingTimer?.cancel();
+    _pairingInputSuspended = false;
+    _updateTrustedPairing(
+      phase: TrustedPairingPhase.completed,
+      remoteConfirmed: true,
+      message: '可信关系已建立，可在后续连接中免输连接码',
+    );
+  }
+
+  Future<void> _handleTrustPairCommitted(Map<String, dynamic> message) async {
+    if (role != RemoteRole.controller ||
+        _validPairingSessionId(message) != _pairingSessionId ||
+        _pairingPeerIdentity == null ||
+        _pairingGrant == null ||
+        _trustedPairing?.phase == TrustedPairingPhase.completed) {
+      return;
+    }
+    final grant = _pairingGrant!;
+    final grantId = _fixedBytes(message['grantId'], 16, 'grantId');
+    if (!constantTimeBytesEqual(grantId, grant.grantId)) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.identityChanged,
+        '被控端提交了不同的可信授权',
+      );
+    }
+    final signature = _boundedSignature(message['signature'], 'signature');
+    final coordinator = _requireTrustedCoordinator();
+    final verified = await coordinator.verifyRootSignature(
+      peer: _pairingPeerIdentity!,
+      message: trustedPairingReceiptBytes(
+        sessionId: _requirePairingSessionId(),
+        grant: grant,
+        stage: TrustedPairingReceiptStage.committed,
+      ),
+      signature: signature,
+    );
+    if (!verified) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '被控端可信授权提交回执无效',
+      );
+    }
+    coordinator.completePairingSecuritySession(_requirePairingSessionId());
+    await coordinator.commitPairing(
+      pairingSessionId: _requirePairingSessionId(),
+      grantId: grant.grantId,
     );
     _pairingTimer?.cancel();
     _updateTrustedPairing(
@@ -3409,6 +3643,14 @@ class RemoteSessionController extends ChangeNotifier
   void _armTrustedPairingTimeout() {
     _pairingTimer?.cancel();
     _pairingTimer = Timer(const Duration(minutes: 2), () {
+      final pairingSessionId = _pairingSessionId;
+      if (pairingSessionId != null) {
+        _sendControl({
+          'type': 'trust-pair-cancel',
+          'version': remoteDisplaySwitchWireVersion,
+          'pairingSessionId': pairingSessionId,
+        });
+      }
       _failTrustedPairing('可信认证确认超时，请重新发起');
     });
   }
@@ -3416,6 +3658,16 @@ class RemoteSessionController extends ChangeNotifier
   void _failTrustedPairing(String message) {
     _pairingTimer?.cancel();
     _pairingInputSuspended = false;
+    final pairingSessionId = _pairingSessionId;
+    if (pairingSessionId != null) {
+      unawaited(
+        _trustedDevices?.discardPendingPairing(
+              pairingSessionId,
+              grantId: _pairingGrant?.grantId,
+            ) ??
+            Future<void>.value(),
+      );
+    }
     final current = _trustedPairing;
     if (current == null) return;
     _setTrustedPairing(
@@ -3467,6 +3719,17 @@ class RemoteSessionController extends ChangeNotifier
   }
 
   void _resetTrustedPairing({bool notify = true}) {
+    final pairingSessionId = _pairingSessionId;
+    if (pairingSessionId != null) {
+      _trustedDevices?.endSession(pairingSessionId);
+      unawaited(
+        _trustedDevices?.discardPendingPairing(
+              pairingSessionId,
+              grantId: _pairingGrant?.grantId,
+            ) ??
+            Future<void>.value(),
+      );
+    }
     _pairingTimer?.cancel();
     _pairingTimer = null;
     _trustedPairing = null;
@@ -3476,8 +3739,10 @@ class RemoteSessionController extends ChangeNotifier
     _pairingPeerNonce = null;
     _pairingPeerCommitment = null;
     _pairingRemoteConfirmation = null;
+    _pairingGrant = null;
     _pairingPermissions = const {};
     _pairingLocalConfirmed = false;
+    _pairingFinalizing = false;
     _pairingAutomaticRenewal = true;
     _pairingInputSuspended = false;
     if (notify) notifyListeners();
@@ -3504,10 +3769,12 @@ class RemoteSessionController extends ChangeNotifier
       }
     } on FormatException {
       if (trustedPairingMessage) {
+        _sendTrustedPairingCancellation();
         _failTrustedPairing('可信认证消息格式无效，已取消本次操作');
       }
     } catch (error) {
       if (trustedPairingMessage) {
+        _sendTrustedPairingCancellation();
         _failTrustedPairing('可信认证失败：$error');
         _emitNotice('可信认证失败：$error', level: RemoteNoticeLevel.error);
         return;
@@ -3519,6 +3786,16 @@ class RemoteSessionController extends ChangeNotifier
         notifyListeners();
       }
     }
+  }
+
+  void _sendTrustedPairingCancellation() {
+    final pairingSessionId = _pairingSessionId;
+    if (pairingSessionId == null) return;
+    _sendControl({
+      'type': 'trust-pair-cancel',
+      'version': remoteDisplaySwitchWireVersion,
+      'pairingSessionId': pairingSessionId,
+    });
   }
 
   Future<void> _handleHostControlMessage(Map<String, dynamic> message) {
@@ -4871,6 +5148,8 @@ class RemoteSessionController extends ChangeNotifier
         );
         _remoteSupportsTrustedDeviceAuthentication =
             supportsTrustedDeviceAuthentication(peerCapabilities);
+        _remoteSupportsTransactionalTrustedPairing =
+            supportsTransactionalTrustedPairing(peerCapabilities);
         if (trustedRoute &&
             (!_remoteSupportsTrustedDeviceAuthentication ||
                 _trustedDevices?.supported != true ||
@@ -4941,7 +5220,7 @@ class RemoteSessionController extends ChangeNotifier
         await _acceptAnswer(message);
       case 'candidate':
         if (_authenticationMode == RemoteAuthenticationMode.trustedDevice &&
-            !_trustedSessionAuthorized) {
+            !_trustedTransportProofReady) {
           return;
         }
         await _acceptCandidate(message);
@@ -4955,6 +5234,8 @@ class RemoteSessionController extends ChangeNotifier
         await _acceptTrustedOffer(message);
       case 'trusted-answer':
         await _acceptTrustedAnswer(message);
+      case 'trusted-binding-ack':
+        await _acceptTrustedBindingAck(message);
       case 'trusted-renewal':
         await _handleTrustedRenewal(message);
       case 'hangup':
@@ -5024,6 +5305,12 @@ class RemoteSessionController extends ChangeNotifier
     _trustedHostRecord = record;
     _trustedPermissions = Set.unmodifiable(record.grant.permissions);
     _trustedControllerNonce = securityRandomBytes(16);
+    coordinator.beginSecuritySession(
+      sessionId: routeSessionId,
+      peerRootFingerprint: record.peerIdentity.rootFingerprint,
+      requestedPermissions: _trustedPermissions,
+      mode: TrustedSecuritySessionMode.trustedAuthentication,
+    );
     _signaling.send({
       'type': 'trusted-auth-start',
       'routeSessionId': routeSessionId,
@@ -5057,10 +5344,22 @@ class RemoteSessionController extends ChangeNotifier
     final permissions = trustedPermissionsFromBits(
       (message['permissionBits'] as num?)?.toInt() ?? 0,
     );
+    coordinator.beginSecuritySession(
+      sessionId: _requireTrustedRouteSessionId(),
+      peerRootFingerprint: controller.rootFingerprint,
+      requestedPermissions: permissions,
+      mode: TrustedSecuritySessionMode.trustedAuthentication,
+    );
     await coordinator.validatePresentedGrant(
       grant: grant,
       controller: controller,
       requestedPermissions: permissions,
+    );
+    final authorizedPermissions = coordinator.authorizeSessionGrant(
+      sessionId: _requireTrustedRouteSessionId(),
+      grant: grant,
+      issuerRootPublicKey: coordinator.localPublicIdentity().rootPublicKey,
+      expectedSubjectFingerprint: controller.rootFingerprint,
     );
     final record = await coordinator.findTrustedController(
       controller.rootFingerprint,
@@ -5076,7 +5375,15 @@ class RemoteSessionController extends ChangeNotifier
     _trustedRemoteIdentity = controller;
     _trustedControllerNonce = controllerNonce;
     _trustedHostNonce = securityRandomBytes(16);
-    _trustedPermissions = Set.unmodifiable(permissions);
+    _trustedPermissions = Set.unmodifiable(authorizedPermissions);
+    final localIdentity = coordinator.localPublicIdentity();
+    coordinator.configureWebRtcSecurityContext(
+      sessionId: _requireTrustedRouteSessionId(),
+      controllerNonce: _trustedControllerNonce!,
+      hostNonce: _trustedHostNonce!,
+      controllerIdentity: controller,
+      hostIdentity: localIdentity,
+    );
     final envelope = await coordinator.createEnvelope(
       sessionId: _requireTrustedRouteSessionId(),
       recipientRootFingerprint: controller.rootFingerprint,
@@ -5084,7 +5391,7 @@ class RemoteSessionController extends ChangeNotifier
     );
     _signaling.send({
       'type': 'trusted-auth-challenge',
-      'identity': coordinator.localPublicIdentity().toJson(),
+      'identity': localIdentity.toJson(),
       'envelope': envelope.toJson(),
     });
     _setState(RemoteSessionState.connecting, '已确认本地授权，等待控制端证明身份');
@@ -5121,9 +5428,25 @@ class RemoteSessionController extends ChangeNotifier
     _validateTrustedBindingPayload(payload, expectedKind: 'challenge');
     _trustedHostNonce = _fixedBytes(payload['hostNonce'], 16, 'hostNonce');
     _trustedRemoteIdentity = host;
+    final authorizedPermissions = coordinator.authorizeSessionGrant(
+      sessionId: _requireTrustedRouteSessionId(),
+      grant: record.grant,
+      issuerRootPublicKey: host.rootPublicKey,
+      expectedSubjectFingerprint: coordinator
+          .localPublicIdentity()
+          .rootFingerprint,
+    );
+    _trustedPermissions = Set.unmodifiable(authorizedPermissions);
     _trustedHostRecord = await coordinator.updatePeerAuthenticationIdentity(
       record: record,
       peerIdentity: host,
+    );
+    coordinator.configureWebRtcSecurityContext(
+      sessionId: _requireTrustedRouteSessionId(),
+      controllerNonce: _trustedControllerNonce!,
+      hostNonce: _trustedHostNonce!,
+      controllerIdentity: coordinator.localPublicIdentity(),
+      hostIdentity: host,
     );
     final response = await coordinator.createEnvelope(
       sessionId: _requireTrustedRouteSessionId(),
@@ -5135,9 +5458,7 @@ class RemoteSessionController extends ChangeNotifier
       'identity': coordinator.localPublicIdentity().toJson(),
       'envelope': response.toJson(),
     });
-    _trustedSessionAuthorized = true;
-    _applyTrustedPermissionGates();
-    _setState(RemoteSessionState.connecting, '可信设备认证成功，等待签名视频会话');
+    _setState(RemoteSessionState.connecting, '身份证明已通过，等待 WebRTC 安全绑定');
   }
 
   Future<void> _handleTrustedAuthResponse(Map<String, dynamic> message) async {
@@ -5174,9 +5495,13 @@ class RemoteSessionController extends ChangeNotifier
           record: record,
           peerIdentity: controller,
         );
-    _trustedSessionAuthorized = true;
-    _applyTrustedPermissionGates();
-    await _publishTrustedGrantIfNeeded();
+    if (coordinator.securityPhase(_requireTrustedRouteSessionId()) !=
+        TrustedSecurityPhase.awaitingWebRtcBinding) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '可信认证未进入媒体绑定阶段',
+      );
+    }
     await _ensureClipboardDataChannel();
     await _ensureExplicitFileTransferDataChannels();
     await _authorizePeer();
@@ -5285,7 +5610,7 @@ class RemoteSessionController extends ChangeNotifier
   }
 
   Future<void> _acceptTrustedOffer(Map<String, dynamic> message) async {
-    if (role != RemoteRole.controller || !_trustedSessionAuthorized) {
+    if (role != RemoteRole.controller || !_trustedTransportProofReady) {
       throw const TrustedAuthenticationException(
         TrustedAuthenticationFailure.permissionsDenied,
         '可信会话尚未完成双向认证',
@@ -5328,23 +5653,30 @@ class RemoteSessionController extends ChangeNotifier
     if (answerSdp == null || answerSdp.isEmpty) {
       throw StateError('WebRTC 未生成有效 Answer');
     }
-    final envelope = await coordinator.createEnvelope(
+    _trustedOfferSdp = sdp;
+    final binding = _buildTrustedSessionBinding(
+      offerSdp: sdp,
+      answerSdp: answerSdp,
+      expiresAt: DateTime.now().toUtc().add(const Duration(seconds: 45)),
+    );
+    _trustedPendingBinding = binding;
+    final envelope = await coordinator.createRawEnvelope(
       sessionId: _requireTrustedRouteSessionId(),
       recipientRootFingerprint: remote.rootFingerprint,
-      payload: _trustedBindingPayload(
-        'webrtc-answer',
-        additionalFields: {'sdp': answerSdp},
-      ),
+      payload: binding.signingBytes,
     );
     _signaling.send({
       'type': 'trusted-answer',
       'identity': coordinator.localPublicIdentity().toJson(),
+      'sdp': answerSdp,
+      'binding': binding.toJson(),
       'envelope': envelope.toJson(),
     });
+    _setState(RemoteSessionState.connecting, '已回复签名媒体绑定，等待被控端确认');
   }
 
   Future<void> _acceptTrustedAnswer(Map<String, dynamic> message) async {
-    if (role != RemoteRole.host || !_trustedSessionAuthorized) {
+    if (role != RemoteRole.host || !_trustedTransportProofReady) {
       throw const TrustedAuthenticationException(
         TrustedAuthenticationFailure.permissionsDenied,
         '可信会话尚未完成双向认证',
@@ -5363,16 +5695,29 @@ class RemoteSessionController extends ChangeNotifier
         '可信控制设备身份与本地授权身份不一致',
       );
     }
-    final payload = await coordinator.verifyEnvelope(
+    final sdp = message['sdp'];
+    if (sdp is! String || sdp.isEmpty) {
+      throw const FormatException('Invalid signed WebRTC answer');
+    }
+    final binding = TrustedSessionBinding.fromJson(
+      _stringMap(message['binding'], 'binding'),
+    );
+    _validateTrustedSessionBinding(
+      binding,
+      offerSdp: _trustedOfferSdp,
+      answerSdp: sdp,
+    );
+    final verifiedPayload = await coordinator.verifyRawEnvelope(
       envelope: SignedTrustedEnvelope.fromJson(
         _stringMap(message['envelope'], 'envelope'),
       ),
       sender: remote,
     );
-    _validateTrustedBindingPayload(payload, expectedKind: 'webrtc-answer');
-    final sdp = payload['sdp'];
-    if (sdp is! String || sdp.isEmpty) {
-      throw const FormatException('Invalid signed WebRTC answer');
+    if (!constantTimeBytesEqual(verifiedPayload, binding.signingBytes)) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '签名 Answer 与 WebRTC 绑定内容不一致',
+      );
     }
     final peerConnection = _peerConnection;
     if (peerConnection == null) throw StateError('WebRTC 尚未初始化');
@@ -5381,6 +5726,155 @@ class RemoteSessionController extends ChangeNotifier
     );
     _remoteDescriptionSet = true;
     await _flushPendingCandidates();
+    final granted = coordinator.bindWebRtcSession(
+      sessionId: _requireTrustedRouteSessionId(),
+      binding: binding,
+    );
+    _trustedPermissions = Set.unmodifiable(granted);
+    _trustedPendingBinding = binding;
+    _trustedSessionAuthorized = true;
+    _applyTrustedPermissionGates();
+    final acknowledgement = await coordinator.createRawEnvelope(
+      sessionId: _requireTrustedRouteSessionId(),
+      recipientRootFingerprint: remote.rootFingerprint,
+      payload: binding.signingBytes,
+    );
+    _signaling.send({
+      'type': 'trusted-binding-ack',
+      'identity': coordinator.localPublicIdentity().toJson(),
+      'binding': binding.toJson(),
+      'envelope': acknowledgement.toJson(),
+    });
+    await _publishTrustedGrantIfNeeded();
+    _setState(RemoteSessionState.connecting, '可信媒体绑定已确认，等待视频建立');
+  }
+
+  Future<void> _acceptTrustedBindingAck(Map<String, dynamic> message) async {
+    if (role != RemoteRole.controller || !_trustedTransportProofReady) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.permissionsDenied,
+        '当前会话不接受媒体绑定确认',
+      );
+    }
+    final coordinator = _requireTrustedCoordinator();
+    final host = _trustedIdentityFromMessage(message);
+    final pinned = _trustedHostRecord?.peerIdentity;
+    if (pinned == null ||
+        !constantTimeBytesEqual(pinned.rootFingerprint, host.rootFingerprint)) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.identityChanged,
+        '媒体绑定确认来自未固定的设备',
+      );
+    }
+    final binding = TrustedSessionBinding.fromJson(
+      _stringMap(message['binding'], 'binding'),
+    );
+    final pending = _trustedPendingBinding;
+    if (pending == null ||
+        !constantTimeBytesEqual(pending.signingBytes, binding.signingBytes)) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '被控端确认的媒体绑定与本地会话不一致',
+      );
+    }
+    final verifiedPayload = await coordinator.verifyRawEnvelope(
+      envelope: SignedTrustedEnvelope.fromJson(
+        _stringMap(message['envelope'], 'envelope'),
+      ),
+      sender: host,
+    );
+    if (!constantTimeBytesEqual(verifiedPayload, binding.signingBytes)) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '媒体绑定确认签名无效',
+      );
+    }
+    final granted = coordinator.bindWebRtcSession(
+      sessionId: _requireTrustedRouteSessionId(),
+      binding: binding,
+    );
+    _trustedPermissions = Set.unmodifiable(granted);
+    _trustedSessionAuthorized = true;
+    _applyTrustedPermissionGates();
+    _setState(RemoteSessionState.connecting, '可信设备和 WebRTC 媒体绑定已完成');
+  }
+
+  bool get _trustedTransportProofReady {
+    if (_authenticationMode != RemoteAuthenticationMode.trustedDevice) {
+      return true;
+    }
+    final coordinator = _trustedDevices;
+    final sessionId = _trustedRouteSessionId;
+    if (coordinator == null || sessionId == null) return false;
+    try {
+      final phase = coordinator.securityPhase(sessionId);
+      return phase == TrustedSecurityPhase.awaitingWebRtcBinding ||
+          phase == TrustedSecurityPhase.authorized;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  TrustedSessionBinding _buildTrustedSessionBinding({
+    required String offerSdp,
+    required String answerSdp,
+    required DateTime expiresAt,
+  }) {
+    final local = _requireTrustedCoordinator().localPublicIdentity();
+    final remote = _trustedRemoteIdentity;
+    final controllerNonce = _trustedControllerNonce;
+    final hostNonce = _trustedHostNonce;
+    if (remote == null || controllerNonce == null || hostNonce == null) {
+      throw StateError('可信媒体绑定上下文不完整');
+    }
+    final controller = role == RemoteRole.controller ? local : remote;
+    final host = role == RemoteRole.host ? local : remote;
+    return _trustedWebRtcBinding.build(
+      sessionId: _requireTrustedRouteSessionId(),
+      controllerNonce: controllerNonce,
+      hostNonce: hostNonce,
+      requestedPermissions: _trustedPermissions,
+      controllerIdentity: controller,
+      hostIdentity: host,
+      offerSdp: offerSdp,
+      answerSdp: answerSdp,
+      expiresAt: expiresAt,
+    );
+  }
+
+  void _validateTrustedSessionBinding(
+    TrustedSessionBinding binding, {
+    required String? offerSdp,
+    required String answerSdp,
+  }) {
+    if (offerSdp == null || offerSdp.isEmpty) {
+      throw StateError('本地缺少已签名的 WebRTC Offer');
+    }
+    final local = _requireTrustedCoordinator().localPublicIdentity();
+    final remote = _trustedRemoteIdentity;
+    final controllerNonce = _trustedControllerNonce;
+    final hostNonce = _trustedHostNonce;
+    if (remote == null || controllerNonce == null || hostNonce == null) {
+      throw StateError('可信媒体绑定上下文不完整');
+    }
+    final controller = role == RemoteRole.controller ? local : remote;
+    final host = role == RemoteRole.host ? local : remote;
+    if (!_trustedWebRtcBinding.matchesTranscript(
+      binding,
+      sessionId: _requireTrustedRouteSessionId(),
+      controllerNonce: controllerNonce,
+      hostNonce: hostNonce,
+      requestedPermissions: _trustedPermissions,
+      controllerIdentity: controller,
+      hostIdentity: host,
+      offerSdp: offerSdp,
+      answerSdp: answerSdp,
+    )) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        'WebRTC Offer/Answer、DTLS 指纹或授权上下文被篡改',
+      );
+    }
   }
 
   Future<void> _publishTrustedGrantIfNeeded() async {
@@ -5447,12 +5941,20 @@ class RemoteSessionController extends ChangeNotifier
     final grant = TrustedDeviceGrant.fromJson(
       _stringMap(payload['grant'], 'grant'),
     );
+    final renewedPermissions = coordinator.authorizeSessionGrant(
+      sessionId: _requireTrustedRouteSessionId(),
+      grant: grant,
+      issuerRootPublicKey: host.rootPublicKey,
+      expectedSubjectFingerprint: coordinator
+          .localPublicIdentity()
+          .rootFingerprint,
+    );
     _trustedHostRecord = await coordinator.acceptHostRenewal(
       record: _trustedHostRecord!,
       host: host,
       grant: grant,
     );
-    _trustedPermissions = Set.unmodifiable(grant.permissions);
+    _trustedPermissions = Set.unmodifiable(renewedPermissions);
     _applyTrustedPermissionGates();
   }
 
@@ -5521,10 +6023,12 @@ class RemoteSessionController extends ChangeNotifier
       final trusted =
           _authenticationMode == RemoteAuthenticationMode.trustedDevice;
       if (trusted && !_trustedSessionAuthorized) {
-        throw const TrustedAuthenticationException(
-          TrustedAuthenticationFailure.permissionsDenied,
-          '可信设备认证尚未完成',
-        );
+        if (!_trustedTransportProofReady) {
+          throw const TrustedAuthenticationException(
+            TrustedAuthenticationFailure.permissionsDenied,
+            '可信设备身份证明尚未完成',
+          );
+        }
       }
       _setState(
         RemoteSessionState.connecting,
@@ -5541,6 +6045,7 @@ class RemoteSessionController extends ChangeNotifier
           throw StateError('可信视频会话缺少远端身份或有效 Offer');
         }
         final coordinator = _requireTrustedCoordinator();
+        _trustedOfferSdp = sdp;
         final envelope = await coordinator.createEnvelope(
           sessionId: _requireTrustedRouteSessionId(),
           recipientRootFingerprint: remote.rootFingerprint,
@@ -6620,6 +7125,7 @@ class RemoteSessionController extends ChangeNotifier
     _remoteSupportsVideoPolicyV2 = false;
     _remoteSupportsMultiDisplayStreamV1 = false;
     _remoteSupportsTrustedDeviceAuthentication = false;
+    _remoteSupportsTransactionalTrustedPairing = false;
     _remoteClipboardSupportsApplied = false;
     _remoteClipboardMode = null;
     _queuedClipboardOffer = null;
@@ -6681,6 +7187,8 @@ class RemoteSessionController extends ChangeNotifier
     _trustedHostNonce = null;
     _trustedPermissions = const {};
     _trustedSessionAuthorized = false;
+    _trustedPendingBinding = null;
+    _trustedOfferSdp = null;
     _displaySwitch.reset();
     _geometryObservationToken += 1;
     _inputSequence = 0;
@@ -6758,6 +7266,8 @@ class RemoteSessionController extends ChangeNotifier
   }
 
   Future<void> _disposeResources() async {
+    await _trustedAuthorizationInvalidationSubscription?.cancel();
+    _trustedAuthorizationInvalidationSubscription = null;
     await _hostWindowLifecycleSubscription?.cancel();
     _hostWindowLifecycleSubscription = null;
     await _clipboardSubscription?.cancel();

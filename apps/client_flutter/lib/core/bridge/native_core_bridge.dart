@@ -24,7 +24,7 @@ final class NativeCoreBridge implements CoreBridge {
           );
 
   factory NativeCoreBridge.open({String? libraryPath}) {
-    return NativeCoreBridge._(_openLibrary(libraryPath));
+    return NativeCoreBridge._(openLibrary(libraryPath: libraryPath));
   }
 
   final _ReadUint32Dart _readAbiVersion;
@@ -40,7 +40,7 @@ final class NativeCoreBridge implements CoreBridge {
     );
   }
 
-  static DynamicLibrary _openLibrary(String? libraryPath) {
+  static DynamicLibrary openLibrary({String? libraryPath}) {
     if (libraryPath != null && libraryPath.isNotEmpty) {
       return DynamicLibrary.open(libraryPath);
     }
@@ -48,6 +48,14 @@ final class NativeCoreBridge implements CoreBridge {
       return DynamicLibrary.process();
     }
     if (Platform.isMacOS) {
+      final executable = File(Platform.resolvedExecutable);
+      final bundledLibrary = File(
+        '${executable.parent.parent.path}/Frameworks/'
+        'libcrossdesktop_core.dylib',
+      );
+      if (bundledLibrary.existsSync()) {
+        return DynamicLibrary.open(bundledLibrary.path);
+      }
       return DynamicLibrary.open('libcrossdesktop_core.dylib');
     }
     if (Platform.isWindows) {

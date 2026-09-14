@@ -1,12 +1,23 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
+import 'package:cross_desktop_remote/core/security/platform_secret_store.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_models.dart';
 import 'package:cryptography/cryptography.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart';
+
+enum TrustedPairingTransactionState { pending, committed }
+
+class TrustedPairingCommitResult {
+  const TrustedPairingCommitResult({
+    required this.record,
+    required this.committedNow,
+  });
+
+  final TrustedDeviceRecord record;
+  final bool committedNow;
+}
 
 class TrustedDeviceRepository {
   TrustedDeviceRepository._(this._database, this._cipher);
@@ -20,9 +31,14 @@ class TrustedDeviceRepository {
   static Future<TrustedDeviceRepository> open({
     String? databasePath,
     List<int>? encryptionKey,
+    PlatformSecretStore? secretStore,
   }) async {
     final path = databasePath ?? await _defaultDatabasePath();
-    final key = encryptionKey ?? await _loadOrCreateKey();
+    final key =
+        encryptionKey ??
+        await (secretStore ?? MethodChannelPlatformSecretStore()).loadOrCreate(
+          _secureKeyName,
+        );
     final database = path == ':memory:'
         ? sqlite3.openInMemory()
         : sqlite3.open(path);
@@ -41,16 +57,6 @@ class TrustedDeviceRepository {
     );
     if (!directory.existsSync()) directory.createSync(recursive: true);
     return '${directory.path}${Platform.pathSeparator}$_databaseName';
-  }
-
-  static Future<List<int>> _loadOrCreateKey() async {
-    const storage = FlutterSecureStorage();
-    final stored = await storage.read(key: _secureKeyName);
-    if (stored != null) return base64Url.decode(stored);
-    final random = Random.secure();
-    final key = List<int>.generate(32, (_) => random.nextInt(256));
-    await storage.write(key: _secureKeyName, value: base64UrlEncode(key));
-    return key;
   }
 
   void _initialize() {
@@ -88,6 +94,16 @@ class TrustedDeviceRepository {
         encrypted_payload TEXT NOT NULL
       )
     ''');
+    _database.execute('''
+      CREATE TABLE IF NOT EXISTS trusted_pairing_transactions (
+        pairing_session_id TEXT NOT NULL,
+        grant_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        encrypted_payload TEXT NOT NULL,
+        PRIMARY KEY(pairing_session_id, grant_id)
+      )
+    ''');
     _database.execute(
       'CREATE INDEX IF NOT EXISTS trusted_devices_expiry_idx '
       'ON trusted_devices(revoked_at, soft_expires_at, last_connected_at DESC)',
@@ -96,9 +112,181 @@ class TrustedDeviceRepository {
       'CREATE INDEX IF NOT EXISTS trust_audit_time_idx '
       'ON trust_audit(occurred_at DESC)',
     );
+    _database.execute(
+      'CREATE INDEX IF NOT EXISTS trusted_pairing_expiry_idx '
+      'ON trusted_pairing_transactions(expires_at)',
+    );
+  }
+
+  Future<void> stagePairing({
+    required String pairingSessionId,
+    required TrustedDeviceRecord record,
+    required DateTime expiresAt,
+  }) async {
+    final sessionBytes = utf8.encode(pairingSessionId);
+    record.grant.validateStructure();
+    if (sessionBytes.isEmpty ||
+        sessionBytes.length > trustedMaximumSessionIdBytes ||
+        !expiresAt.toUtc().isAfter(record.createdAt.toUtc())) {
+      throw const FormatException('Invalid pairing transaction');
+    }
+    final grantId = base64UrlEncode(record.grant.grantId);
+    final existing = await _readPairing(
+      pairingSessionId: pairingSessionId,
+      grantId: grantId,
+    );
+    if (existing != null) {
+      if (jsonEncode(existing.record.toJson()) != jsonEncode(record.toJson())) {
+        throw StateError('Pairing transaction is immutable');
+      }
+      return;
+    }
+    final encrypted = await _cipher.encrypt(
+      record.toJson(),
+      aad: _pairingAad(pairingSessionId, grantId),
+    );
+    _database.execute(
+      '''
+      INSERT INTO trusted_pairing_transactions(
+        pairing_session_id, grant_id, state, expires_at, encrypted_payload
+      ) VALUES(?, ?, ?, ?, ?)
+      ''',
+      [
+        pairingSessionId,
+        grantId,
+        TrustedPairingTransactionState.pending.name,
+        expiresAt.toUtc().millisecondsSinceEpoch,
+        encrypted,
+      ],
+    );
+  }
+
+  Future<TrustedPairingCommitResult> commitPairing({
+    required String pairingSessionId,
+    required List<int> grantId,
+    required DateTime now,
+  }) async {
+    if (grantId.length != 16) {
+      throw const FormatException('Invalid pairing grant id');
+    }
+    final encodedGrantId = base64UrlEncode(grantId);
+    final transaction = await _readPairing(
+      pairingSessionId: pairingSessionId,
+      grantId: encodedGrantId,
+    );
+    if (transaction == null) {
+      throw StateError('Pairing transaction does not exist');
+    }
+    if (!now.toUtc().isBefore(transaction.expiresAt)) {
+      await discardPairing(
+        pairingSessionId: pairingSessionId,
+        grantId: grantId,
+      );
+      throw StateError('Pairing transaction expired');
+    }
+    if (transaction.state == TrustedPairingTransactionState.committed) {
+      return TrustedPairingCommitResult(
+        record: transaction.record,
+        committedNow: false,
+      );
+    }
+    final encryptedRecord = await _encryptRecord(transaction.record);
+    _database.execute('BEGIN IMMEDIATE');
+    try {
+      _upsertEncryptedRecord(encryptedRecord);
+      _database.execute(
+        '''
+        UPDATE trusted_pairing_transactions
+        SET state = ?
+        WHERE pairing_session_id = ? AND grant_id = ? AND state = ?
+        ''',
+        [
+          TrustedPairingTransactionState.committed.name,
+          pairingSessionId,
+          encodedGrantId,
+          TrustedPairingTransactionState.pending.name,
+        ],
+      );
+      _database.execute('COMMIT');
+    } catch (_) {
+      _database.execute('ROLLBACK');
+      rethrow;
+    }
+    return TrustedPairingCommitResult(
+      record: transaction.record,
+      committedNow: true,
+    );
+  }
+
+  Future<void> discardPairing({
+    required String pairingSessionId,
+    List<int>? grantId,
+  }) async {
+    if (grantId == null) {
+      _database.execute(
+        'DELETE FROM trusted_pairing_transactions '
+        'WHERE pairing_session_id = ? AND state = ?',
+        [pairingSessionId, TrustedPairingTransactionState.pending.name],
+      );
+      return;
+    }
+    _database.execute(
+      'DELETE FROM trusted_pairing_transactions '
+      'WHERE pairing_session_id = ? AND grant_id = ? AND state = ?',
+      [
+        pairingSessionId,
+        base64UrlEncode(grantId),
+        TrustedPairingTransactionState.pending.name,
+      ],
+    );
+  }
+
+  Future<void> prunePairingTransactions(DateTime now) async {
+    _database.execute(
+      'DELETE FROM trusted_pairing_transactions WHERE expires_at <= ?',
+      [now.toUtc().millisecondsSinceEpoch],
+    );
+  }
+
+  Future<_StoredPairingTransaction?> _readPairing({
+    required String pairingSessionId,
+    required String grantId,
+  }) async {
+    final rows = _database.select(
+      '''
+      SELECT state, expires_at, encrypted_payload
+      FROM trusted_pairing_transactions
+      WHERE pairing_session_id = ? AND grant_id = ?
+      LIMIT 1
+      ''',
+      [pairingSessionId, grantId],
+    );
+    if (rows.isEmpty) return null;
+    final row = rows.first;
+    return _StoredPairingTransaction(
+      state: TrustedPairingTransactionState.values.byName(
+        row['state'] as String,
+      ),
+      expiresAt: DateTime.fromMillisecondsSinceEpoch(
+        row['expires_at'] as int,
+        isUtc: true,
+      ),
+      record: TrustedDeviceRecord.fromJson(
+        await _cipher.decrypt(
+          row['encrypted_payload'] as String,
+          aad: _pairingAad(pairingSessionId, grantId),
+        ),
+      ),
+    );
   }
 
   Future<void> upsert(TrustedDeviceRecord record) async {
+    _upsertEncryptedRecord(await _encryptRecord(record));
+  }
+
+  Future<_EncryptedTrustedDeviceRecord> _encryptRecord(
+    TrustedDeviceRecord record,
+  ) async {
     final peerFingerprint = base64UrlEncode(
       record.peerIdentity.rootFingerprint,
     );
@@ -107,6 +295,16 @@ class TrustedDeviceRepository {
       record.toJson(),
       aad: _rowAad(peerFingerprint, localIsIssuer),
     );
+    return _EncryptedTrustedDeviceRecord(
+      record: record,
+      peerFingerprint: peerFingerprint,
+      localIsIssuer: localIsIssuer,
+      encryptedPayload: encrypted,
+    );
+  }
+
+  void _upsertEncryptedRecord(_EncryptedTrustedDeviceRecord value) {
+    final record = value.record;
     _database.execute(
       '''
       INSERT INTO trusted_devices(
@@ -122,14 +320,14 @@ class TrustedDeviceRepository {
         encrypted_payload=excluded.encrypted_payload
       ''',
       [
-        peerFingerprint,
-        localIsIssuer,
+        value.peerFingerprint,
+        value.localIsIssuer,
         record.peerIdentity.machineCode,
         record.grant.softExpiresAt.millisecondsSinceEpoch,
         record.grant.hardExpiresAt.millisecondsSinceEpoch,
         record.lastConnectedAt.millisecondsSinceEpoch,
         record.revokedAt?.millisecondsSinceEpoch,
-        encrypted,
+        value.encryptedPayload,
       ],
     );
   }
@@ -324,6 +522,38 @@ class TrustedDeviceRepository {
 
   static List<int> _settingAad(String key) =>
       utf8.encode('CrossDesktopRemote/TrustSettingRow/v1\n$key');
+
+  static List<int> _pairingAad(String pairingSessionId, String grantId) =>
+      utf8.encode(
+        'CrossDesktopRemote/TrustedPairingRow/v1\n'
+        '$pairingSessionId\n$grantId',
+      );
+}
+
+class _StoredPairingTransaction {
+  const _StoredPairingTransaction({
+    required this.state,
+    required this.expiresAt,
+    required this.record,
+  });
+
+  final TrustedPairingTransactionState state;
+  final DateTime expiresAt;
+  final TrustedDeviceRecord record;
+}
+
+class _EncryptedTrustedDeviceRecord {
+  const _EncryptedTrustedDeviceRecord({
+    required this.record,
+    required this.peerFingerprint,
+    required this.localIsIssuer,
+    required this.encryptedPayload,
+  });
+
+  final TrustedDeviceRecord record;
+  final String peerFingerprint;
+  final int localIsIssuer;
+  final String encryptedPayload;
 }
 
 class _TrustedDeviceCipher {

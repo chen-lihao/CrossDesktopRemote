@@ -6,17 +6,9 @@ import Security
 final class AppleDeviceIdentityBridge {
   private static let channelName =
     "com.crossdesktopremote.cross_desktop_remote/device_identity"
-  private static let rootTag =
-    "com.crossdesktopremote.device-identity.root.v1".data(using: .utf8)!
-  private static let authenticationTagPrefix =
-    "com.crossdesktopremote.device-identity.authentication.v2."
-  private static let authenticationMetadataKey =
-    "crossdesktop.device-identity.authentication.metadata.v2"
-  private static let rootFingerprintKey =
-    "crossdesktop.device-identity.root-fingerprint.v2"
-  private static let authenticationLifetime: TimeInterval = 30 * 24 * 60 * 60
-  private static let authenticationRotationWindow: TimeInterval = 7 * 24 * 60 * 60
 
+  private let identity = AppleProtectedIdentityProvider()
+  private let secrets = AppleApplicationSecretStore()
   private var channel: FlutterMethodChannel?
 
   init(binaryMessenger: FlutterBinaryMessenger) {
@@ -34,69 +26,108 @@ final class AppleDeviceIdentityBridge {
     do {
       switch call.method {
       case "loadOrCreateIdentity":
-        result(try identity(forceAuthenticationRotation: false))
+        result(try identity.load(forceAuthenticationRotation: false))
       case "rotateAuthenticationKey":
-        result(try identity(forceAuthenticationRotation: true))
+        result(try identity.load(forceAuthenticationRotation: true))
+      case "upgradeToHardwareIdentity":
+        result(try identity.replaceLegacyIdentity())
+      case "resetIdentity":
+        result(try identity.resetIdentity())
       case "signWithRoot":
-        result(try sign(arguments: call.arguments, tag: Self.rootTag))
+        result(try identity.signWithRoot(arguments: call.arguments))
       case "signWithAuthenticationKey":
-        result(try sign(arguments: call.arguments, tag: try currentAuthenticationTag()))
+        result(try identity.signWithAuthenticationKey(arguments: call.arguments))
       case "verifyP256Signature":
-        result(try verify(arguments: call.arguments))
+        result(try identity.verify(arguments: call.arguments))
+      case "loadOrCreateSecret":
+        result(try secrets.loadOrCreate(arguments: call.arguments))
+      case "deleteSecret":
+        try secrets.delete(arguments: call.arguments)
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }
     } catch {
+      let protectedError = AppleProtectedStorageError.from(error)
       result(
         FlutterError(
-          code: "device_identity_failed",
-          message: error.localizedDescription,
-          details: nil
+          code: "protected_storage_failed",
+          message: protectedError.localizedDescription,
+          details: protectedError.details
         )
       )
     }
   }
+}
 
-  private func identity(forceAuthenticationRotation: Bool) throws -> [String: Any] {
+/// Secure Enclave keys are persistent Keychain objects in the application's
+/// default access group. No explicit access group is used, so the identity is
+/// bound to the stable Team ID + bundle identifier selected by Xcode.
+private final class AppleProtectedIdentityProvider {
+  private static let rootTag =
+    Data("com.crossdesktopremote.device-identity.root.v3".utf8)
+  private static let authenticationTagPrefix =
+    "com.crossdesktopremote.device-identity.authentication.v3."
+  private static let metadataKey =
+    "crossdesktop.device-identity.authentication.metadata.v3"
+  private static let rootFingerprintKey =
+    "crossdesktop.device-identity.root-fingerprint.v3"
+  private static let legacyRootTag =
+    Data("com.crossdesktopremote.device-identity.root.v1".utf8)
+  private static let legacyMetadataKey =
+    "crossdesktop.device-identity.authentication.metadata.v2"
+  private static let legacyFingerprintKey =
+    "crossdesktop.device-identity.root-fingerprint.v2"
+  private static let lifetime: TimeInterval = 30 * 24 * 60 * 60
+  private static let rotationWindow: TimeInterval = 7 * 24 * 60 * 60
+
+  func load(forceAuthenticationRotation: Bool) throws -> [String: Any] {
+    try requireHardwareIdentityMode()
     let root = try loadRootKey()
+    guard isHardwareBacked(root) else {
+      throw AppleProtectedStorageError.migrationRequired
+    }
     let rootPublic = try publicKeyData(root)
     let fingerprint = Data(SHA256.hash(data: rootPublic))
     let encodedFingerprint = fingerprint.base64EncodedString()
     if let bound = UserDefaults.standard.string(forKey: Self.rootFingerprintKey) {
       guard bound == encodedFingerprint else {
-        throw DeviceIdentityError.rootIdentityChanged
+        throw AppleProtectedStorageError.rootIdentityChanged
       }
     } else {
       UserDefaults.standard.set(encodedFingerprint, forKey: Self.rootFingerprintKey)
     }
+
     let now = Date()
     var metadata = authenticationMetadata()
     var authentication: SecKey?
     if let metadata {
       authentication = try loadKey(tag: authenticationTag(keyId: metadata.keyId))
+      if let authentication, !isHardwareBacked(authentication) {
+        throw AppleProtectedStorageError.migrationRequired
+      }
     }
     let shouldRotate =
-      forceAuthenticationRotation ||
-      authentication == nil ||
-      metadata == nil ||
-      metadata!.expiresAt <= now.timeIntervalSince1970 + Self.authenticationRotationWindow
+      forceAuthenticationRotation || authentication == nil || metadata == nil
+      || metadata!.expiresAt <= now.timeIntervalSince1970 + Self.rotationWindow
     if shouldRotate {
+      let previous = metadata?.keyId
       let keyId = UUID().uuidString.lowercased()
-      let tag = authenticationTag(keyId: keyId)
-      let created = try loadOrCreateKey(tag: tag, preferHardware: true)
-      let notBefore = now.timeIntervalSince1970
-      let expiresAt = notBefore + Self.authenticationLifetime
+      let created = try createHardwareKey(tag: authenticationTag(keyId: keyId))
       let next = AuthenticationMetadata(
         keyId: keyId,
-        notBefore: notBefore,
-        expiresAt: expiresAt
+        notBefore: now.timeIntervalSince1970,
+        expiresAt: now.timeIntervalSince1970 + Self.lifetime
       )
-      UserDefaults.standard.set(next.dictionary, forKey: Self.authenticationMetadataKey)
+      UserDefaults.standard.set(next.dictionary, forKey: Self.metadataKey)
       metadata = next
       authentication = created
+      if let previous, previous != keyId {
+        try deleteKeyIfPresent(tag: authenticationTag(keyId: previous))
+      }
     }
     guard let metadata, let authentication else {
-      throw DeviceIdentityError.keyMissing
+      throw AppleProtectedStorageError.keyMissing
     }
     let authenticationPublic = try publicKeyData(authentication)
     let certificateBody = authenticationCertificateBody(
@@ -105,33 +136,59 @@ final class AppleDeviceIdentityBridge {
       notBeforeUnixMs: UInt64(metadata.notBefore * 1000),
       expiresAtUnixMs: UInt64(metadata.expiresAt * 1000)
     )
-    let certificate = try createSignature(key: root, message: certificateBody)
-
+    let certificate = try signature(key: root, message: certificateBody)
     return [
-      "rootKeyHandle": "apple-keychain:root:v1",
+      "rootKeyHandle": "apple-secure-enclave:root:v3",
       "rootPublicKey": rootPublic.base64EncodedString(),
-      "authenticationKeyHandle": "apple-keychain:authentication:\(metadata.keyId)",
+      "authenticationKeyHandle":
+        "apple-secure-enclave:authentication:v3:\(metadata.keyId)",
       "authenticationPublicKey": authenticationPublic.base64EncodedString(),
       "authenticationNotBeforeUnixMs": UInt64(metadata.notBefore * 1000),
       "authenticationExpiresAtUnixMs": UInt64(metadata.expiresAt * 1000),
       "authenticationCertificate": certificate.base64EncodedString(),
-      "hardwareBacked": isHardwareBacked(root) && isHardwareBacked(authentication)
+      "hardwareBacked": true,
+      "protection": "secureHardware",
+      "securityState": "readyHardwareProtected",
     ]
   }
 
-  private func sign(arguments: Any?, tag: Data) throws -> String {
-    guard
-      let values = arguments as? [String: Any],
-      let encoded = values["message"] as? String,
-      let message = Data(base64Encoded: encoded)
-    else {
-      throw DeviceIdentityError.invalidArguments
-    }
-    return try createSignature(key: requiredKey(tag: tag), message: message)
-      .base64EncodedString()
+  func replaceLegacyIdentity() throws -> [String: Any] {
+    try requireHardwareIdentityMode()
+    try deleteLegacyIdentityIfPresent()
+    return try resetIdentity()
   }
 
-  private func verify(arguments: Any?) throws -> Bool {
+  func resetIdentity() throws -> [String: Any] {
+    try requireHardwareIdentityMode()
+    if let metadata = authenticationMetadata() {
+      try deleteKeyIfPresent(tag: authenticationTag(keyId: metadata.keyId))
+    }
+    try deleteKeyIfPresent(tag: Self.rootTag)
+    UserDefaults.standard.removeObject(forKey: Self.metadataKey)
+    UserDefaults.standard.removeObject(forKey: Self.rootFingerprintKey)
+    return try load(forceAuthenticationRotation: false)
+  }
+
+  func signWithRoot(arguments: Any?) throws -> String {
+    try requireHardwareIdentityMode()
+    return try signature(
+      key: requiredKey(tag: Self.rootTag),
+      message: message(arguments)
+    ).base64EncodedString()
+  }
+
+  func signWithAuthenticationKey(arguments: Any?) throws -> String {
+    try requireHardwareIdentityMode()
+    guard let metadata = authenticationMetadata() else {
+      throw AppleProtectedStorageError.keyMissing
+    }
+    return try signature(
+      key: requiredKey(tag: authenticationTag(keyId: metadata.keyId)),
+      message: message(arguments)
+    ).base64EncodedString()
+  }
+
+  func verify(arguments: Any?) throws -> Bool {
     guard
       let values = arguments as? [String: Any],
       let publicKeyValue = values["publicKey"] as? String,
@@ -139,94 +196,201 @@ final class AppleDeviceIdentityBridge {
       let signatureValue = values["signature"] as? String,
       let publicKeyData = Data(base64Encoded: publicKeyValue),
       let message = Data(base64Encoded: messageValue),
-      let signature = Data(base64Encoded: signatureValue)
+      let signatureData = Data(base64Encoded: signatureValue)
     else {
-      throw DeviceIdentityError.invalidArguments
+      throw AppleProtectedStorageError.invalidArguments
+    }
+    do {
+      let publicKey = try P256.Signing.PublicKey(x963Representation: publicKeyData)
+      let signature = try P256.Signing.ECDSASignature(
+        derRepresentation: signatureData
+      )
+      return publicKey.isValidSignature(signature, for: message)
+    } catch {
+      throw AppleProtectedStorageError.invalidSignature
+    }
+  }
+
+  private func loadRootKey() throws -> SecKey {
+    if let existing = try loadKey(tag: Self.rootTag) { return existing }
+    if UserDefaults.standard.string(forKey: Self.rootFingerprintKey) != nil {
+      throw AppleProtectedStorageError.keyMissing
+    }
+    if legacyIdentityExists() {
+      throw AppleProtectedStorageError.migrationRequired
+    }
+    return try createHardwareKey(tag: Self.rootTag)
+  }
+
+  private func legacyIdentityExists() -> Bool {
+    if UserDefaults.standard.object(forKey: Self.legacyFingerprintKey) != nil {
+      return true
+    }
+    do { return try loadKey(tag: Self.legacyRootTag) != nil } catch { return true }
+  }
+
+  private func deleteLegacyIdentityIfPresent() throws {
+    if
+      let value = UserDefaults.standard.dictionary(forKey: Self.legacyMetadataKey),
+      let keyId = value["keyId"] as? String
+    {
+      let tag = Data(
+        "com.crossdesktopremote.device-identity.authentication.v2.\(keyId)".utf8
+      )
+      try deleteKeyIfPresent(tag: tag)
+    }
+    try deleteKeyIfPresent(tag: Self.legacyRootTag)
+    UserDefaults.standard.removeObject(forKey: Self.legacyMetadataKey)
+    UserDefaults.standard.removeObject(forKey: Self.legacyFingerprintKey)
+  }
+
+  private func loadKey(tag: Data) throws -> SecKey? {
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching([
+      kSecClass: kSecClassKey,
+      kSecAttrApplicationTag: tag,
+      kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+      kSecReturnRef: true,
+      kSecUseDataProtectionKeychain: true,
+    ] as CFDictionary, &item)
+    if status == errSecItemNotFound { return nil }
+    guard status == errSecSuccess, let key = item else {
+      throw AppleProtectedStorageError.security(status)
+    }
+    return (key as! SecKey)
+  }
+
+  private func requiredKey(tag: Data) throws -> SecKey {
+    guard let key = try loadKey(tag: tag) else {
+      throw AppleProtectedStorageError.keyMissing
+    }
+    guard isHardwareBacked(key) else {
+      throw AppleProtectedStorageError.migrationRequired
+    }
+    return key
+  }
+
+  private func createHardwareKey(tag: Data) throws -> SecKey {
+    var accessError: Unmanaged<CFError>?
+    guard let access = SecAccessControlCreateWithFlags(
+      nil,
+      kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+      .privateKeyUsage,
+      &accessError
+    ) else {
+      throw AppleProtectedStorageError.from(
+        accessError?.takeRetainedValue()
+          ?? AppleProtectedStorageError.keyCreationFailed
+      )
     }
     let attributes: [CFString: Any] = [
       kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
-      kSecAttrKeyClass: kSecAttrKeyClassPublic,
-      kSecAttrKeySizeInBits: 256
+      kSecAttrKeySizeInBits: 256,
+      kSecAttrTokenID: kSecAttrTokenIDSecureEnclave,
+      kSecUseDataProtectionKeychain: true,
+      kSecPrivateKeyAttrs: [
+        kSecAttrIsPermanent: true,
+        kSecAttrApplicationTag: tag,
+        kSecAttrAccessControl: access,
+      ],
     ]
     var error: Unmanaged<CFError>?
-    guard let key = SecKeyCreateWithData(
-      publicKeyData as CFData,
-      attributes as CFDictionary,
+    guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
+      throw AppleProtectedStorageError.from(
+        error?.takeRetainedValue() ?? AppleProtectedStorageError.keyCreationFailed
+      )
+    }
+    guard isHardwareBacked(key) else {
+      try deleteKeyIfPresent(tag: tag)
+      throw AppleProtectedStorageError.secureEnclaveUnavailable
+    }
+    let challenge = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
+    let signed = try signature(key: key, message: challenge)
+    guard try verifySignature(key: key, message: challenge, signature: signed) else {
+      try deleteKeyIfPresent(tag: tag)
+      throw AppleProtectedStorageError.keySelfTestFailed
+    }
+    return key
+  }
+
+  private func deleteKeyIfPresent(tag: Data) throws {
+    let status = SecItemDelete([
+      kSecClass: kSecClassKey,
+      kSecAttrApplicationTag: tag,
+      kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+      kSecUseDataProtectionKeychain: true,
+    ] as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      throw AppleProtectedStorageError.security(status)
+    }
+  }
+
+  private func publicKeyData(_ privateKey: SecKey) throws -> Data {
+    guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
+      throw AppleProtectedStorageError.publicKeyUnavailable
+    }
+    var error: Unmanaged<CFError>?
+    guard let value = SecKeyCopyExternalRepresentation(publicKey, &error) else {
+      throw AppleProtectedStorageError.from(
+        error?.takeRetainedValue()
+          ?? AppleProtectedStorageError.publicKeyUnavailable
+      )
+    }
+    return value as Data
+  }
+
+  private func signature(key: SecKey, message: Data) throws -> Data {
+    var error: Unmanaged<CFError>?
+    guard let value = SecKeyCreateSignature(
+      key,
+      .ecdsaSignatureMessageX962SHA256,
+      message as CFData,
       &error
     ) else {
-      throw error?.takeRetainedValue() ?? DeviceIdentityError.invalidPublicKey
+      throw AppleProtectedStorageError.from(
+        error?.takeRetainedValue() ?? AppleProtectedStorageError.signatureFailed
+      )
     }
-    return SecKeyVerifySignature(
-      key,
+    return value as Data
+  }
+
+  private func verifySignature(
+    key: SecKey,
+    message: Data,
+    signature: Data
+  ) throws -> Bool {
+    guard let publicKey = SecKeyCopyPublicKey(key) else {
+      throw AppleProtectedStorageError.publicKeyUnavailable
+    }
+    var error: Unmanaged<CFError>?
+    let valid = SecKeyVerifySignature(
+      publicKey,
       .ecdsaSignatureMessageX962SHA256,
       message as CFData,
       signature as CFData,
       &error
     )
+    if !valid, let error = error?.takeRetainedValue() {
+      throw AppleProtectedStorageError.from(error)
+    }
+    return valid
   }
 
-  private func loadOrCreateKey(tag: Data, preferHardware: Bool) throws -> SecKey {
-    if let existing = try loadKey(tag: tag) {
-      return existing
+  private func isHardwareBacked(_ key: SecKey) -> Bool {
+    guard let attributes = SecKeyCopyAttributes(key) as? [CFString: Any] else {
+      return false
     }
-    if preferHardware, let key = try? createKey(tag: tag, secureEnclave: true) {
-      return key
-    }
-    return try createKey(tag: tag, secureEnclave: false)
-  }
-
-  private func loadRootKey() throws -> SecKey {
-    if let existing = try loadKey(tag: Self.rootTag) {
-      return existing
-    }
-    // A persisted binding without its private key means the protected identity
-    // was lost. Never create a replacement under the same installation and
-    // silently inherit existing trust grants.
-    if UserDefaults.standard.string(forKey: Self.rootFingerprintKey) != nil {
-      throw DeviceIdentityError.keyMissing
-    }
-    return try loadOrCreateKey(tag: Self.rootTag, preferHardware: true)
-  }
-
-  private func requiredKey(tag: Data) throws -> SecKey {
-    guard let key = try loadKey(tag: tag) else {
-      throw DeviceIdentityError.keyMissing
-    }
-    return key
-  }
-
-  private func loadKey(tag: Data) throws -> SecKey? {
-    let query: [CFString: Any] = [
-      kSecClass: kSecClassKey,
-      kSecAttrApplicationTag: tag,
-      kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
-      kSecReturnRef: true
-    ]
-    var item: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &item)
-    if status == errSecItemNotFound { return nil }
-    guard status == errSecSuccess else { throw DeviceIdentityError.keyLookupFailed(status) }
-    return item as! SecKey?
-  }
-
-  private func authenticationTag(keyId: String) -> Data {
-    Data("\(Self.authenticationTagPrefix)\(keyId)".utf8)
-  }
-
-  private func currentAuthenticationTag() throws -> Data {
-    guard let metadata = authenticationMetadata() else {
-      throw DeviceIdentityError.keyMissing
-    }
-    return authenticationTag(keyId: metadata.keyId)
+    return attributes[kSecAttrTokenID] as? String
+      == (kSecAttrTokenIDSecureEnclave as String)
   }
 
   private func authenticationMetadata() -> AuthenticationMetadata? {
     guard
-      let value = UserDefaults.standard.dictionary(forKey: Self.authenticationMetadataKey),
+      let value = UserDefaults.standard.dictionary(forKey: Self.metadataKey),
       let keyId = value["keyId"] as? String,
       let notBefore = value["notBefore"] as? Double,
       let expiresAt = value["expiresAt"] as? Double,
-      !keyId.isEmpty,
+      UUID(uuidString: keyId) != nil,
       expiresAt > notBefore
     else { return nil }
     return AuthenticationMetadata(
@@ -236,72 +400,20 @@ final class AppleDeviceIdentityBridge {
     )
   }
 
-  private func createKey(tag: Data, secureEnclave: Bool) throws -> SecKey {
-    var privateAttributes: [CFString: Any] = [
-      kSecAttrIsPermanent: true,
-      kSecAttrApplicationTag: tag,
-      kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-    ]
-    if secureEnclave {
-      var accessError: Unmanaged<CFError>?
-      guard let access = SecAccessControlCreateWithFlags(
-        nil,
-        kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-        .privateKeyUsage,
-        &accessError
-      ) else {
-        throw accessError?.takeRetainedValue() ?? DeviceIdentityError.keyCreationFailed
-      }
-      privateAttributes[kSecAttrAccessControl] = access
-      privateAttributes.removeValue(forKey: kSecAttrAccessible)
-    }
-    var attributes: [CFString: Any] = [
-      kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
-      kSecAttrKeySizeInBits: 256,
-      kSecPrivateKeyAttrs: privateAttributes
-    ]
-    if secureEnclave {
-      attributes[kSecAttrTokenID] = kSecAttrTokenIDSecureEnclave
-    }
-    var error: Unmanaged<CFError>?
-    guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &error)
+  private func authenticationTag(keyId: String) -> Data {
+    Data("\(Self.authenticationTagPrefix)\(keyId)".utf8)
+  }
+
+  private func message(_ arguments: Any?) throws -> Data {
+    guard
+      let values = arguments as? [String: Any],
+      let encoded = values["message"] as? String,
+      let message = Data(base64Encoded: encoded),
+      message.count <= 32 * 1024
     else {
-      throw error?.takeRetainedValue() ?? DeviceIdentityError.keyCreationFailed
+      throw AppleProtectedStorageError.invalidArguments
     }
-    return key
-  }
-
-  private func publicKeyData(_ privateKey: SecKey) throws -> Data {
-    guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
-      throw DeviceIdentityError.publicKeyUnavailable
-    }
-    var error: Unmanaged<CFError>?
-    guard let value = SecKeyCopyExternalRepresentation(publicKey, &error)
-    else {
-      throw error?.takeRetainedValue() ?? DeviceIdentityError.publicKeyUnavailable
-    }
-    return value as Data
-  }
-
-  private func createSignature(key: SecKey, message: Data) throws -> Data {
-    var error: Unmanaged<CFError>?
-    guard let signature = SecKeyCreateSignature(
-      key,
-      .ecdsaSignatureMessageX962SHA256,
-      message as CFData,
-      &error
-    ) else {
-      throw error?.takeRetainedValue() ?? DeviceIdentityError.signatureFailed
-    }
-    return signature as Data
-  }
-
-  private func isHardwareBacked(_ key: SecKey) -> Bool {
-    guard let attributes = SecKeyCopyAttributes(key) as? [CFString: Any] else {
-      return false
-    }
-    return attributes[kSecAttrTokenID] as? String ==
-      (kSecAttrTokenIDSecureEnclave as String)
+    return message
   }
 
   private func authenticationCertificateBody(
@@ -329,8 +441,104 @@ final class AppleDeviceIdentityBridge {
   }
 
   private func appendUInt64(_ value: UInt64, to output: inout Data) {
-    var bigEndian = value.bigEndian
-    withUnsafeBytes(of: &bigEndian) { output.append(contentsOf: $0) }
+    var value = value.bigEndian
+    withUnsafeBytes(of: &value) { output.append(contentsOf: $0) }
+  }
+}
+
+private final class AppleApplicationSecretStore {
+  private static let service = "com.crossdesktopremote.local-secrets.v1"
+
+  func loadOrCreate(arguments: Any?) throws -> String {
+    try requireHardwareIdentityMode()
+    let request = try secretRequest(arguments)
+    if let existing = try read(name: request.name) {
+      guard existing.count == request.length else {
+        throw AppleProtectedStorageError.secretLengthMismatch
+      }
+      return existing.base64EncodedString()
+    }
+    var value = Data(count: request.length)
+    let status = value.withUnsafeMutableBytes { bytes in
+      SecRandomCopyBytes(kSecRandomDefault, request.length, bytes.baseAddress!)
+    }
+    guard status == errSecSuccess else {
+      throw AppleProtectedStorageError.security(status)
+    }
+    let addStatus = SecItemAdd([
+      kSecClass: kSecClassGenericPassword,
+      kSecAttrService: Self.service,
+      kSecAttrAccount: request.name,
+      kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+      kSecAttrSynchronizable: false,
+      kSecUseDataProtectionKeychain: true,
+      kSecValueData: value,
+    ] as CFDictionary, nil)
+    if addStatus == errSecDuplicateItem,
+      let raced = try read(name: request.name), raced.count == request.length
+    {
+      return raced.base64EncodedString()
+    }
+    guard addStatus == errSecSuccess else {
+      throw AppleProtectedStorageError.security(addStatus)
+    }
+    return value.base64EncodedString()
+  }
+
+  func delete(arguments: Any?) throws {
+    try requireHardwareIdentityMode()
+    let name = try secretName(arguments)
+    let status = SecItemDelete(baseQuery(name: name) as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      throw AppleProtectedStorageError.security(status)
+    }
+  }
+
+  private func read(name: String) throws -> Data? {
+    var query = baseQuery(name: name)
+    query[kSecReturnData] = true
+    query[kSecMatchLimit] = kSecMatchLimitOne
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    if status == errSecItemNotFound { return nil }
+    guard status == errSecSuccess, let value = item as? Data else {
+      throw AppleProtectedStorageError.security(status)
+    }
+    return value
+  }
+
+  private func baseQuery(name: String) -> [CFString: Any] {
+    [
+      kSecClass: kSecClassGenericPassword,
+      kSecAttrService: Self.service,
+      kSecAttrAccount: name,
+      kSecAttrSynchronizable: false,
+      kSecUseDataProtectionKeychain: true,
+    ]
+  }
+
+  private func secretRequest(_ arguments: Any?) throws -> (name: String, length: Int) {
+    guard
+      let values = arguments as? [String: Any],
+      let length = values["length"] as? Int,
+      length >= 16,
+      length <= 64
+    else {
+      throw AppleProtectedStorageError.invalidArguments
+    }
+    return (try secretName(arguments), length)
+  }
+
+  private func secretName(_ arguments: Any?) throws -> String {
+    guard
+      let values = arguments as? [String: Any],
+      let name = values["name"] as? String,
+      name.range(of: "^[a-z0-9][a-z0-9._-]{0,127}$", options: .regularExpression)
+        != nil
+    else {
+      throw AppleProtectedStorageError.invalidArguments
+    }
+    return name
   }
 }
 
@@ -344,34 +552,111 @@ private struct AuthenticationMetadata {
   }
 }
 
-private enum DeviceIdentityError: LocalizedError {
+private func requireHardwareIdentityMode() throws {
+  let mode = Bundle.main.object(forInfoDictionaryKey: "CDRTrustedIdentityMode")
+    as? String
+  guard mode == "hardware" else {
+    throw AppleProtectedStorageError.identityDisabled
+  }
+}
+
+private enum AppleProtectedStorageError: LocalizedError {
   case invalidArguments
-  case invalidPublicKey
-  case keyLookupFailed(OSStatus)
-  case keyMissing
+  case identityDisabled
+  case missingEntitlement
+  case keychainLocked
+  case migrationRequired
   case rootIdentityChanged
+  case secureEnclaveUnavailable
+  case keyMissing
   case keyCreationFailed
+  case keySelfTestFailed
   case publicKeyUnavailable
   case signatureFailed
+  case invalidSignature
+  case secretLengthMismatch
+  case keychainFailure(OSStatus)
+  case nativeFailure(String)
+
+  static func security(_ status: OSStatus) -> AppleProtectedStorageError {
+    switch status {
+    case errSecMissingEntitlement: return .missingEntitlement
+    case errSecInteractionNotAllowed: return .keychainLocked
+    default: return .keychainFailure(status)
+    }
+  }
+
+  static func from(_ error: Error) -> AppleProtectedStorageError {
+    if let protected = error as? AppleProtectedStorageError { return protected }
+    let nsError = error as NSError
+    if nsError.domain == NSOSStatusErrorDomain {
+      return security(OSStatus(nsError.code))
+    }
+    return .nativeFailure(error.localizedDescription)
+  }
+
+  var diagnosticCode: String {
+    switch self {
+    case .invalidArguments: return "invalid_arguments"
+    case .identityDisabled: return "trusted_identity_disabled"
+    case .missingEntitlement: return "missing_application_identifier"
+    case .keychainLocked: return "keychain_locked"
+    case .migrationRequired: return "legacy_keychain_identity_detected"
+    case .rootIdentityChanged: return "root_identity_changed"
+    case .secureEnclaveUnavailable: return "secure_enclave_unavailable"
+    case .keyMissing: return "key_missing"
+    case .keyCreationFailed: return "secure_enclave_creation_failed"
+    case .keySelfTestFailed: return "secure_enclave_self_test_failed"
+    case .publicKeyUnavailable: return "public_key_unavailable"
+    case .signatureFailed: return "signature_failed"
+    case .invalidSignature: return "invalid_signature"
+    case .secretLengthMismatch: return "platform_secret_length_mismatch"
+    case .keychainFailure: return "keychain_failure"
+    case .nativeFailure: return "native_identity_failure"
+    }
+  }
+
+  var details: [String: Any] {
+    var value: [String: Any] = ["diagnosticCode": diagnosticCode]
+    if case .keychainFailure(let status) = self { value["osStatus"] = status }
+    if case .missingEntitlement = self { value["osStatus"] = errSecMissingEntitlement }
+    return value
+  }
 
   var errorDescription: String? {
     switch self {
     case .invalidArguments:
-      return "Invalid device identity arguments"
-    case .invalidPublicKey:
-      return "Invalid P-256 public key"
-    case .keyLookupFailed(let status):
-      return "Unable to access protected device key (OSStatus \(status))"
-    case .keyMissing:
-      return "Protected device key is missing"
+      return "Invalid protected storage arguments"
+    case .identityDisabled:
+      return "Trusted identity is disabled for this unsigned build"
+    case .missingEntitlement:
+      return "The signed app has no provisioning-authorized Keychain access group"
+    case .keychainLocked:
+      return "The protected system key store is locked"
+    case .migrationRequired:
+      return "The previous device identity requires explicit replacement"
     case .rootIdentityChanged:
-      return "Protected root identity no longer matches this installation"
+      return "The protected root identity changed"
+    case .secureEnclaveUnavailable:
+      return "Secure Enclave is unavailable"
+    case .keyMissing:
+      return "The protected device key is missing"
     case .keyCreationFailed:
-      return "Unable to create protected device key"
+      return "Unable to create a Secure Enclave key"
+    case .keySelfTestFailed:
+      return "Secure Enclave signing self-test failed"
     case .publicKeyUnavailable:
-      return "Unable to export device public key"
+      return "Unable to read the public device key"
     case .signatureFailed:
-      return "Unable to sign device authentication message"
+      return "Unable to sign the authentication message"
+    case .invalidSignature:
+      return "Invalid P-256 signature"
+    case .secretLengthMismatch:
+      return "The stored local secret has an unexpected length"
+    case .keychainFailure(let status):
+      return "Protected system key store failed (OSStatus \(status))"
+    case .nativeFailure(let message):
+      return message
     }
   }
 }

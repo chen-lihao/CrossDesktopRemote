@@ -55,5 +55,37 @@ target_link_libraries(${BINARY_NAME} PRIVATE "ncrypt.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "advapi32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
+# Build and bundle the authoritative Rust security/transfer core. Flutter loads
+# this DLL through Dart FFI; keeping it next to the runner also makes the same
+# artifact available to Debug, Profile, and Release installations.
+find_program(CROSSDESKTOP_CARGO_EXECUTABLE
+  NAMES cargo cargo.exe
+  HINTS "$ENV{USERPROFILE}/.cargo/bin")
+if(NOT CROSSDESKTOP_CARGO_EXECUTABLE)
+  message(FATAL_ERROR
+    "cargo is required to build the CrossDesktopRemote Rust core")
+endif()
+set(CROSSDESKTOP_REPO_ROOT "${CMAKE_SOURCE_DIR}/../../..")
+set(CROSSDESKTOP_RUST_RELEASE_ARG
+  "$<$<NOT:$<CONFIG:Debug>>:--release>")
+set(CROSSDESKTOP_RUST_PROFILE_DIR
+  "$<IF:$<CONFIG:Debug>,debug,release>")
+add_custom_target(crossdesktop_rust_core ALL
+  COMMAND "${CROSSDESKTOP_CARGO_EXECUTABLE}" build
+    --manifest-path "${CROSSDESKTOP_REPO_ROOT}/Cargo.toml"
+    -p client-ffi
+    ${CROSSDESKTOP_RUST_RELEASE_ARG}
+  WORKING_DIRECTORY "${CROSSDESKTOP_REPO_ROOT}"
+  COMMENT "Building CrossDesktopRemote Rust core"
+  COMMAND_EXPAND_LISTS
+  VERBATIM)
+add_dependencies(${BINARY_NAME} crossdesktop_rust_core)
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${CROSSDESKTOP_REPO_ROOT}/target/${CROSSDESKTOP_RUST_PROFILE_DIR}/crossdesktop_core.dll"
+    "$<TARGET_FILE_DIR:${BINARY_NAME}>/crossdesktop_core.dll"
+  COMMENT "Bundling CrossDesktopRemote Rust core"
+  VERBATIM)
+
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)

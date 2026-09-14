@@ -177,10 +177,15 @@ class TrustedDeviceGrant {
   final bool automaticRenewal;
   final Uint8List signature;
 
-  bool isUsableAt(DateTime now) =>
-      !now.isBefore(issuedAt) &&
-      now.isBefore(softExpiresAt) &&
-      now.isBefore(hardExpiresAt);
+  bool isUsableAt(
+    DateTime now, {
+    Duration maximumClockSkew = trustedMaximumClockSkew,
+  }) {
+    final utcNow = now.toUtc();
+    return !issuedAt.isAfter(utcNow.add(maximumClockSkew)) &&
+        utcNow.isBefore(softExpiresAt) &&
+        utcNow.isBefore(hardExpiresAt);
+  }
 
   bool shouldRenewAt(DateTime now) =>
       automaticRenewal &&
@@ -384,6 +389,133 @@ class TrustedAuditRecord {
 }
 
 @immutable
+class TrustedSessionBinding {
+  const TrustedSessionBinding({
+    required this.sessionId,
+    required this.controllerNonce,
+    required this.hostNonce,
+    required this.requestedPermissions,
+    required this.controllerEphemeralPublicKey,
+    required this.hostEphemeralPublicKey,
+    required this.offerSha256,
+    required this.answerSha256,
+    required this.controllerDtlsFingerprintSha256,
+    required this.hostDtlsFingerprintSha256,
+    required this.expiresAt,
+  });
+
+  factory TrustedSessionBinding.fromJson(Map<String, dynamic> value) =>
+      TrustedSessionBinding(
+        sessionId: value['sessionId'] as String,
+        controllerNonce: base64Decode(value['controllerNonce'] as String),
+        hostNonce: base64Decode(value['hostNonce'] as String),
+        requestedPermissions: trustedPermissionsFromBits(
+          (value['permissionBits'] as num).toInt(),
+        ),
+        controllerEphemeralPublicKey: base64Decode(
+          value['controllerEphemeralPublicKey'] as String,
+        ),
+        hostEphemeralPublicKey: base64Decode(
+          value['hostEphemeralPublicKey'] as String,
+        ),
+        offerSha256: base64Decode(value['offerSha256'] as String),
+        answerSha256: base64Decode(value['answerSha256'] as String),
+        controllerDtlsFingerprintSha256: base64Decode(
+          value['controllerDtlsFingerprintSha256'] as String,
+        ),
+        hostDtlsFingerprintSha256: base64Decode(
+          value['hostDtlsFingerprintSha256'] as String,
+        ),
+        expiresAt: DateTime.fromMillisecondsSinceEpoch(
+          (value['expiresAtUnixMs'] as num).toInt(),
+          isUtc: true,
+        ),
+      );
+
+  final String sessionId;
+  final Uint8List controllerNonce;
+  final Uint8List hostNonce;
+  final Set<TrustedPermission> requestedPermissions;
+  final Uint8List controllerEphemeralPublicKey;
+  final Uint8List hostEphemeralPublicKey;
+  final Uint8List offerSha256;
+  final Uint8List answerSha256;
+  final Uint8List controllerDtlsFingerprintSha256;
+  final Uint8List hostDtlsFingerprintSha256;
+  final DateTime expiresAt;
+
+  Uint8List get signingBytes => securityCanonicalBytes((out) {
+    out.bytes(utf8.encode('CrossDesktopRemote/TrustedSessionBinding/v1'));
+    out.bytes(utf8.encode(sessionId));
+    out.bytes(controllerNonce);
+    out.bytes(hostNonce);
+    out.uint64(trustedPermissionBits(requestedPermissions));
+    out.bytes(controllerEphemeralPublicKey);
+    out.bytes(hostEphemeralPublicKey);
+    out.bytes(offerSha256);
+    out.bytes(answerSha256);
+    out.bytes(controllerDtlsFingerprintSha256);
+    out.bytes(hostDtlsFingerprintSha256);
+    out.uint64(expiresAt.millisecondsSinceEpoch);
+  });
+
+  Map<String, dynamic> toJson() => {
+    'sessionId': sessionId,
+    'controllerNonce': base64Encode(controllerNonce),
+    'hostNonce': base64Encode(hostNonce),
+    'permissionBits': trustedPermissionBits(requestedPermissions),
+    'controllerEphemeralPublicKey': base64Encode(controllerEphemeralPublicKey),
+    'hostEphemeralPublicKey': base64Encode(hostEphemeralPublicKey),
+    'offerSha256': base64Encode(offerSha256),
+    'answerSha256': base64Encode(answerSha256),
+    'controllerDtlsFingerprintSha256': base64Encode(
+      controllerDtlsFingerprintSha256,
+    ),
+    'hostDtlsFingerprintSha256': base64Encode(hostDtlsFingerprintSha256),
+    'expiresAtUnixMs': expiresAt.millisecondsSinceEpoch,
+  };
+
+  void validateStructure() {
+    final sessionBytes = utf8.encode(sessionId);
+    if (sessionBytes.isEmpty ||
+        sessionBytes.length > trustedMaximumSessionIdBytes ||
+        requestedPermissions.isEmpty ||
+        !requestedPermissions.contains(TrustedPermission.viewScreen) ||
+        !expiresAt.isAfter(
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+        )) {
+      throw const FormatException('Invalid trusted WebRTC binding');
+    }
+    _requireLength(controllerNonce, 16, 'controllerNonce');
+    _requireLength(hostNonce, 16, 'hostNonce');
+    if (_allZero(controllerNonce) ||
+        _allZero(hostNonce) ||
+        constantTimeBytesEqual(controllerNonce, hostNonce)) {
+      throw const FormatException('Invalid trusted WebRTC nonces');
+    }
+    _requireP256PublicKey(
+      controllerEphemeralPublicKey,
+      'controllerEphemeralPublicKey',
+    );
+    _requireP256PublicKey(hostEphemeralPublicKey, 'hostEphemeralPublicKey');
+    _requireLength(offerSha256, 32, 'offerSha256');
+    _requireLength(answerSha256, 32, 'answerSha256');
+    _requireLength(
+      controllerDtlsFingerprintSha256,
+      32,
+      'controllerDtlsFingerprintSha256',
+    );
+    _requireLength(hostDtlsFingerprintSha256, 32, 'hostDtlsFingerprintSha256');
+    if (_allZero(offerSha256) ||
+        _allZero(answerSha256) ||
+        _allZero(controllerDtlsFingerprintSha256) ||
+        _allZero(hostDtlsFingerprintSha256)) {
+      throw const FormatException('Invalid trusted WebRTC transcript hashes');
+    }
+  }
+}
+
+@immutable
 class SignedTrustedEnvelope {
   const SignedTrustedEnvelope({
     required this.sessionId,
@@ -559,6 +691,32 @@ Uint8List trustedPairingConfirmationBytes({
   out.uint64(trustedPermissionBits(permissions));
 });
 
+enum TrustedPairingReceiptStage { accepted, committed }
+
+Uint8List trustedPairingReceiptBytes({
+  required String sessionId,
+  required TrustedDeviceGrant grant,
+  required TrustedPairingReceiptStage stage,
+}) {
+  final sessionBytes = utf8.encode(sessionId);
+  if (sessionBytes.isEmpty ||
+      sessionBytes.length > trustedMaximumSessionIdBytes) {
+    throw const FormatException('Invalid pairing session');
+  }
+  grant.validateStructure();
+  final signedGrantHash = sha256.convert([
+    ...grant.signingBytes,
+    ...grant.signature,
+  ]).bytes;
+  return securityCanonicalBytes((out) {
+    out.bytes(utf8.encode('CrossDesktopRemote/PairingReceipt/v1'));
+    out.bytes(sessionBytes);
+    out.uint32(stage.index + 1);
+    out.bytes(grant.grantId);
+    out.bytes(signedGrantHash);
+  });
+}
+
 Uint8List securityCanonicalBytes(void Function(SecurityCanonicalOutput) write) {
   final builder = BytesBuilder(copy: false);
   write(SecurityCanonicalOutput(builder));
@@ -613,6 +771,8 @@ List<int> _uint32Bytes(int value) {
 void _requireLength(List<int> value, int length, String name) {
   if (value.length != length) throw FormatException('Invalid $name length');
 }
+
+bool _allZero(List<int> value) => value.every((byte) => byte == 0);
 
 void _requireP256PublicKey(List<int> value, String name) {
   if (value.length != 65 || value.first != 0x04) {

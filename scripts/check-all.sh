@@ -60,7 +60,11 @@ fi
     CROSSDESKTOP_CORE_LIBRARY="$core_library" "$flutter_bin_dir/flutter" test
     "$flutter_bin_dir/flutter" build macos --debug
     "$flutter_bin_dir/flutter" build ios --simulator --debug
-    test -d "$repo_root/apps/client_flutter/build/ios/Debug-iphonesimulator/Runner.app"
+    ios_app="$repo_root/apps/client_flutter/build/ios/iphonesimulator/Runner.app"
+    test -d "$ios_app"
+    test -f "$ios_app/Runner.debug.dylib"
+    nm -gU "$ios_app/Runner.debug.dylib" \
+        | grep -F '_cdr_security_engine_configure_webrtc_context' >/dev/null
     "$flutter_bin_dir/flutter" build apk --debug
 )
 

@@ -41,6 +41,17 @@ enum CdrResult {
   CDR_ERROR_IO = -10,
   CDR_ERROR_BUFFER_TOO_SMALL = -11,
   CDR_ERROR_INVALID_SIGNATURE = -12,
+  CDR_ERROR_REPLAY = -13,
+  CDR_ERROR_EXPIRED = -14,
+  CDR_ERROR_PERMISSION_DENIED = -15,
+  CDR_ERROR_REVOKED = -16,
+  CDR_ERROR_SESSION_MISMATCH = -17,
+  CDR_ERROR_PAUSED = -18,
+  CDR_ERROR_INVALID_MESSAGE = -19,
+  CDR_ERROR_NOT_YET_VALID = -20,
+  CDR_ERROR_SOFT_EXPIRED = -21,
+  CDR_ERROR_HARD_EXPIRED = -22,
+  CDR_ERROR_LIFETIME_EXCEEDED = -23,
 };
 
 /* Security helpers never accept or return private key material. Native
@@ -51,11 +62,82 @@ int32_t cdr_security_machine_code_v2(
 int32_t cdr_security_verify_p256_signature_der(
     const uint8_t *public_key, size_t public_key_len, const uint8_t *message,
     size_t message_len, const uint8_t *signature, size_t signature_len);
+int32_t cdr_security_validate_device_identity(
+    const uint8_t *identity_protobuf, size_t identity_protobuf_len,
+    uint64_t now_unix_ms);
 int32_t cdr_security_sas_code(
     const uint8_t *first_public_key, size_t first_public_key_len,
     const uint8_t *second_public_key, size_t second_public_key_len,
     const uint8_t *session_nonce, size_t session_nonce_len, uint8_t *output,
     size_t output_capacity);
+
+typedef struct CdrSecurityEngine CdrSecurityEngine;
+
+enum CdrSecurityPhase {
+  CDR_SECURITY_PHASE_IDLE = 0,
+  CDR_SECURITY_PHASE_PAIRING_AWAITING_CONFIRMATION = 1,
+  CDR_SECURITY_PHASE_PAIRING_CONFIRMED = 2,
+  CDR_SECURITY_PHASE_AUTHENTICATING = 3,
+  CDR_SECURITY_PHASE_AWAITING_WEBRTC_BINDING = 4,
+  CDR_SECURITY_PHASE_AUTHORIZED = 5,
+  CDR_SECURITY_PHASE_FAILED = 6,
+};
+
+enum CdrSecuritySessionMode {
+  CDR_SECURITY_SESSION_MODE_PAIRING = 1,
+  CDR_SECURITY_SESSION_MODE_TRUSTED_AUTHENTICATION = 2,
+};
+
+/* Security engines are single-thread confined. Protobuf inputs use the
+ * crossdesktop.v1 trust.proto messages and are copied during each call. */
+CdrSecurityEngine *cdr_security_engine_create(
+    const uint8_t *local_root_fingerprint,
+    size_t local_root_fingerprint_len);
+void cdr_security_engine_destroy(CdrSecurityEngine *engine);
+int32_t cdr_security_engine_phase(
+    const CdrSecurityEngine *engine, uint32_t *out_phase);
+int32_t cdr_security_engine_set_paused(
+    CdrSecurityEngine *engine, uint8_t paused);
+int32_t cdr_security_engine_begin_session(
+    CdrSecurityEngine *engine, const uint8_t *session_id,
+    size_t session_id_len, const uint8_t *peer_root_fingerprint,
+    size_t peer_root_fingerprint_len, uint64_t requested_permission_bits,
+    uint32_t mode);
+int32_t cdr_security_engine_confirm_pairing(
+    CdrSecurityEngine *engine, uint8_t sas_matches);
+int32_t cdr_security_engine_validate_pairing_grant(
+    CdrSecurityEngine *engine, const uint8_t *grant_protobuf,
+    size_t grant_protobuf_len, const uint8_t *issuer_root_public_key,
+    size_t issuer_root_public_key_len, uint64_t now_unix_ms,
+    uint64_t *out_permission_bits);
+int32_t cdr_security_engine_complete_pairing(CdrSecurityEngine *engine);
+int32_t cdr_security_engine_end_session(CdrSecurityEngine *engine);
+int32_t cdr_security_engine_revoke_grant(
+    CdrSecurityEngine *engine, const uint8_t *grant_id,
+    size_t grant_id_len);
+int32_t cdr_security_engine_verify_envelope(
+    CdrSecurityEngine *engine, const uint8_t *envelope_protobuf,
+    size_t envelope_protobuf_len, const uint8_t *sender_identity_protobuf,
+    size_t sender_identity_protobuf_len, uint64_t now_unix_ms);
+int32_t cdr_security_engine_authorize_grant(
+    CdrSecurityEngine *engine, const uint8_t *grant_protobuf,
+    size_t grant_protobuf_len, const uint8_t *issuer_root_public_key,
+    size_t issuer_root_public_key_len,
+    const uint8_t *expected_subject_fingerprint,
+    size_t expected_subject_fingerprint_len, uint64_t now_unix_ms,
+    uint64_t *out_permission_bits);
+int32_t cdr_security_engine_configure_webrtc_context(
+    CdrSecurityEngine *engine, const uint8_t *controller_nonce,
+    size_t controller_nonce_len, const uint8_t *host_nonce,
+    size_t host_nonce_len,
+    const uint8_t *controller_authentication_public_key,
+    size_t controller_authentication_public_key_len,
+    const uint8_t *host_authentication_public_key,
+    size_t host_authentication_public_key_len);
+int32_t cdr_security_engine_bind_webrtc(
+    CdrSecurityEngine *engine, const uint8_t *binding_protobuf,
+    size_t binding_protobuf_len, uint64_t now_unix_ms,
+    uint64_t *out_permission_bits);
 
 enum CdrTransferDirection {
   CDR_TRANSFER_DIRECTION_UPLOAD = 1,

@@ -3,6 +3,19 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+enum PlatformDeviceKeyProtection {
+  secureHardware,
+  osProtected,
+  legacySoftware,
+  unknown,
+}
+
+enum PlatformDeviceKeySecurityState {
+  readyHardwareProtected,
+  readyOsProtected,
+  migrationRequired,
+}
+
 class PlatformDeviceKeyIdentity {
   const PlatformDeviceKeyIdentity({
     required this.rootKeyHandle,
@@ -12,7 +25,10 @@ class PlatformDeviceKeyIdentity {
     required this.authenticationNotBefore,
     required this.authenticationExpiresAt,
     required this.authenticationCertificate,
-    required this.hardwareBacked,
+    required this.protection,
+    required this.securityState,
+    this.diagnosticCode,
+    this.diagnosticMessage,
   });
 
   final String rootKeyHandle;
@@ -22,7 +38,13 @@ class PlatformDeviceKeyIdentity {
   final DateTime authenticationNotBefore;
   final DateTime authenticationExpiresAt;
   final Uint8List authenticationCertificate;
-  final bool hardwareBacked;
+  final PlatformDeviceKeyProtection protection;
+  final PlatformDeviceKeySecurityState securityState;
+  final String? diagnosticCode;
+  final String? diagnosticMessage;
+
+  bool get hardwareBacked =>
+      protection == PlatformDeviceKeyProtection.secureHardware;
 
   factory PlatformDeviceKeyIdentity.fromMap(Map<Object?, Object?> value) {
     Uint8List bytes(String key) {
@@ -36,6 +58,26 @@ class PlatformDeviceKeyIdentity {
       return base64Decode(encoded);
     }
 
+    final hardwareBacked = value['hardwareBacked'] == true;
+    final protection = switch (value['protection'] as String?) {
+      'secureHardware' => PlatformDeviceKeyProtection.secureHardware,
+      'osProtected' => PlatformDeviceKeyProtection.osProtected,
+      'legacySoftware' => PlatformDeviceKeyProtection.legacySoftware,
+      _ =>
+        hardwareBacked
+            ? PlatformDeviceKeyProtection.secureHardware
+            : PlatformDeviceKeyProtection.osProtected,
+    };
+    final securityState = switch (value['securityState'] as String?) {
+      'readyHardwareProtected' =>
+        PlatformDeviceKeySecurityState.readyHardwareProtected,
+      'readyOsProtected' => PlatformDeviceKeySecurityState.readyOsProtected,
+      'migrationRequired' => PlatformDeviceKeySecurityState.migrationRequired,
+      _ =>
+        hardwareBacked
+            ? PlatformDeviceKeySecurityState.readyHardwareProtected
+            : PlatformDeviceKeySecurityState.readyOsProtected,
+    };
     return PlatformDeviceKeyIdentity(
       rootKeyHandle: value['rootKeyHandle'] as String? ?? '',
       rootPublicKey: bytes('rootPublicKey'),
@@ -51,7 +93,10 @@ class PlatformDeviceKeyIdentity {
         isUtc: true,
       ),
       authenticationCertificate: bytes('authenticationCertificate'),
-      hardwareBacked: value['hardwareBacked'] == true,
+      protection: protection,
+      securityState: securityState,
+      diagnosticCode: value['diagnosticCode'] as String?,
+      diagnosticMessage: value['diagnosticMessage'] as String?,
     );
   }
 }
@@ -59,9 +104,15 @@ class PlatformDeviceKeyIdentity {
 abstract interface class DeviceKeyPlatformAdapter {
   bool get supported;
 
+  bool get supportsIdentityRecovery;
+
   Future<PlatformDeviceKeyIdentity> loadOrCreateIdentity();
 
   Future<PlatformDeviceKeyIdentity> rotateAuthenticationKey();
+
+  Future<PlatformDeviceKeyIdentity> upgradeToHardwareIdentity();
+
+  Future<PlatformDeviceKeyIdentity> resetIdentity();
 
   Future<Uint8List> signWithRoot(Uint8List message);
 
@@ -90,6 +141,10 @@ class MethodChannelDeviceKeyPlatformAdapter
       Platform.isMacOS || Platform.isIOS || Platform.isWindows;
 
   @override
+  bool get supportsIdentityRecovery =>
+      Platform.isMacOS || Platform.isIOS || Platform.isWindows;
+
+  @override
   Future<PlatformDeviceKeyIdentity> loadOrCreateIdentity() async {
     final value = await _channel.invokeMapMethod<Object?, Object?>(
       'loadOrCreateIdentity',
@@ -112,6 +167,25 @@ class MethodChannelDeviceKeyPlatformAdapter
       throw PlatformException(
         code: 'device_identity_unavailable',
         message: 'Native authentication key rotation returned no value',
+      );
+    }
+    return PlatformDeviceKeyIdentity.fromMap(value);
+  }
+
+  @override
+  Future<PlatformDeviceKeyIdentity> upgradeToHardwareIdentity() =>
+      _loadIdentity('upgradeToHardwareIdentity');
+
+  @override
+  Future<PlatformDeviceKeyIdentity> resetIdentity() =>
+      _loadIdentity('resetIdentity');
+
+  Future<PlatformDeviceKeyIdentity> _loadIdentity(String method) async {
+    final value = await _channel.invokeMapMethod<Object?, Object?>(method);
+    if (value == null) {
+      throw PlatformException(
+        code: 'device_identity_unavailable',
+        message: 'Native device identity returned no value for $method',
       );
     }
     return PlatformDeviceKeyIdentity.fromMap(value);
@@ -159,6 +233,9 @@ class UnsupportedDeviceKeyPlatformAdapter implements DeviceKeyPlatformAdapter {
   @override
   bool get supported => false;
 
+  @override
+  bool get supportsIdentityRecovery => false;
+
   Never _unsupported() => throw UnsupportedError(
     'Current platform has no protected device-key implementation.',
   );
@@ -170,6 +247,13 @@ class UnsupportedDeviceKeyPlatformAdapter implements DeviceKeyPlatformAdapter {
   @override
   Future<PlatformDeviceKeyIdentity> rotateAuthenticationKey() async =>
       _unsupported();
+
+  @override
+  Future<PlatformDeviceKeyIdentity> upgradeToHardwareIdentity() async =>
+      _unsupported();
+
+  @override
+  Future<PlatformDeviceKeyIdentity> resetIdentity() async => _unsupported();
 
   @override
   Future<Uint8List> signWithAuthenticationKey(Uint8List message) async =>

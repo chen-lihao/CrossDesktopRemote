@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'package:cross_desktop_remote/core/identity/device_identity.dart';
+import 'package:cross_desktop_remote/core/security/trusted_device_coordinator.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_models.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -67,6 +69,120 @@ void main() {
     );
   });
 
+  test('pairing receipt binds transaction, stage and signed grant', () {
+    final now = DateTime.utc(2026, 9, 12);
+    final grant = _grant(now, id: 6);
+    final accepted = trustedPairingReceiptBytes(
+      sessionId: 'pairing-receipt',
+      grant: grant,
+      stage: TrustedPairingReceiptStage.accepted,
+    );
+    final committed = trustedPairingReceiptBytes(
+      sessionId: 'pairing-receipt',
+      grant: grant,
+      stage: TrustedPairingReceiptStage.committed,
+    );
+
+    expect(committed, isNot(orderedEquals(accepted)));
+    expect(
+      trustedPairingReceiptBytes(
+        sessionId: 'different-session',
+        grant: grant,
+        stage: TrustedPairingReceiptStage.accepted,
+      ),
+      isNot(orderedEquals(accepted)),
+    );
+  });
+
+  test('grant clock skew applies only to its start time', () {
+    final now = DateTime.utc(2026, 9, 12, 12);
+    final future = _grant(now.add(const Duration(seconds: 30)), id: 9);
+    final tooFarFuture = _grant(
+      now.add(const Duration(seconds: 30, milliseconds: 1)),
+      id: 10,
+    );
+    final expired = _grant(now.subtract(const Duration(days: 90)), id: 11);
+
+    expect(future.isUsableAt(now), isTrue);
+    expect(tooFarFuture.isUsableAt(now), isFalse);
+    expect(expired.isUsableAt(now), isFalse);
+  });
+
+  test('pairing records remain pending until peer commit', () async {
+    final repository = await TrustedDeviceRepository.open(
+      databasePath: ':memory:',
+      encryptionKey: List<int>.filled(32, 19),
+    );
+    addTearDown(repository.close);
+    final now = DateTime.utc(2026, 9, 12);
+    final record = TrustedDeviceRecord(
+      peerName: 'Pending PC',
+      peerIdentity: _identity(),
+      grant: _grant(now, id: 20),
+      localIsIssuer: false,
+      createdAt: now,
+      lastConnectedAt: now,
+    );
+
+    await repository.stagePairing(
+      pairingSessionId: 'pending-session',
+      record: record,
+      expiresAt: now.add(const Duration(minutes: 5)),
+    );
+    expect(await repository.list(), isEmpty);
+
+    final firstCommit = await repository.commitPairing(
+      pairingSessionId: 'pending-session',
+      grantId: record.grant.grantId,
+      now: now.add(const Duration(minutes: 1)),
+    );
+    final duplicateCommit = await repository.commitPairing(
+      pairingSessionId: 'pending-session',
+      grantId: record.grant.grantId,
+      now: now.add(const Duration(minutes: 1)),
+    );
+
+    expect(firstCommit.committedNow, isTrue);
+    expect(duplicateCommit.committedNow, isFalse);
+    expect((await repository.list()).single.peerName, 'Pending PC');
+  });
+
+  test('cancelled pairing never becomes trusted', () async {
+    final repository = await TrustedDeviceRepository.open(
+      databasePath: ':memory:',
+      encryptionKey: List<int>.filled(32, 21),
+    );
+    addTearDown(repository.close);
+    final now = DateTime.utc(2026, 9, 12);
+    final record = TrustedDeviceRecord(
+      peerName: 'Cancelled PC',
+      peerIdentity: _identity(),
+      grant: _grant(now, id: 22),
+      localIsIssuer: true,
+      createdAt: now,
+      lastConnectedAt: now,
+    );
+    await repository.stagePairing(
+      pairingSessionId: 'cancelled-session',
+      record: record,
+      expiresAt: now.add(const Duration(minutes: 5)),
+    );
+    await repository.discardPairing(
+      pairingSessionId: 'cancelled-session',
+      grantId: record.grant.grantId,
+    );
+
+    await expectLater(
+      repository.commitPairing(
+        pairingSessionId: 'cancelled-session',
+        grantId: record.grant.grantId,
+        now: now,
+      ),
+      throwsA(isA<StateError>()),
+    );
+    expect(await repository.list(), isEmpty);
+  });
+
   test('encrypts, lists, audits and revokes trusted-device records', () async {
     final repository = await TrustedDeviceRepository.open(
       databasePath: ':memory:',
@@ -123,6 +239,50 @@ void main() {
     expect(await repository.readConnectionsPaused(), isTrue);
     await repository.writeConnectionsPaused(false);
     expect(await repository.readConnectionsPaused(), isFalse);
+  });
+
+  test('publishes active-session invalidations for pause and revoke', () async {
+    final repository = await TrustedDeviceRepository.open(
+      databasePath: ':memory:',
+      encryptionKey: List<int>.filled(32, 31),
+    );
+    final now = DateTime.utc(2026, 9, 12);
+    final record = TrustedDeviceRecord(
+      peerName: 'Revoked PC',
+      peerIdentity: _identity(),
+      grant: _grant(now, id: 12),
+      localIsIssuer: true,
+      createdAt: now,
+      lastConnectedAt: now,
+    );
+    await repository.upsert(record);
+    final coordinator = TrustedDeviceCoordinator(
+      identity: DeviceIdentityController(),
+      initialRepository: repository,
+      now: () => now,
+    );
+    addTearDown(coordinator.dispose);
+    await coordinator.initialize();
+    final invalidations = <TrustedAuthorizationInvalidation>[];
+    final subscription = coordinator.invalidations.listen(invalidations.add);
+    addTearDown(subscription.cancel);
+
+    await coordinator.setConnectionsPaused(true);
+    await coordinator.setConnectionsPaused(false);
+    await coordinator.revoke(record);
+
+    expect(invalidations, hasLength(2));
+    expect(
+      invalidations.first.reason,
+      TrustedAuthorizationInvalidationReason.allConnectionsPaused,
+    );
+    expect(
+      invalidations.last.affects(
+        peerFingerprint: record.peerIdentity.rootFingerprint,
+      ),
+      isTrue,
+    );
+    expect(invalidations.last.affects(grantId: record.grant.grantId), isTrue);
   });
 }
 

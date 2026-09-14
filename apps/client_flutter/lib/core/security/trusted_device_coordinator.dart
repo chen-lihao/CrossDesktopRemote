@@ -1,9 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_models.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_repository.dart';
-import 'package:crypto/crypto.dart';
+import 'package:cross_desktop_remote/core/security/trusted_security_engine.dart';
 import 'package:flutter/foundation.dart';
 
 enum TrustedAuthenticationFailure {
@@ -12,10 +13,43 @@ enum TrustedAuthenticationFailure {
   invalidCertificate,
   invalidSignature,
   replay,
+  clockSkew,
   expired,
   revoked,
   permissionsDenied,
   hardReviewRequired,
+  invalidLifetime,
+}
+
+enum TrustedAuthorizationInvalidationReason {
+  allConnectionsPaused,
+  grantRevoked,
+}
+
+@immutable
+class TrustedAuthorizationInvalidation {
+  const TrustedAuthorizationInvalidation({
+    required this.reason,
+    this.peerRootFingerprint,
+    this.grantIds = const [],
+  });
+
+  final TrustedAuthorizationInvalidationReason reason;
+  final Uint8List? peerRootFingerprint;
+  final List<Uint8List> grantIds;
+
+  bool affects({Uint8List? peerFingerprint, Uint8List? grantId}) {
+    if (reason == TrustedAuthorizationInvalidationReason.allConnectionsPaused) {
+      return true;
+    }
+    if (peerFingerprint != null &&
+        peerRootFingerprint != null &&
+        constantTimeBytesEqual(peerFingerprint, peerRootFingerprint!)) {
+      return true;
+    }
+    return grantId != null &&
+        grantIds.any((value) => constantTimeBytesEqual(value, grantId));
+  }
 }
 
 class TrustedAuthenticationException implements Exception {
@@ -32,26 +66,36 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
   TrustedDeviceCoordinator({
     required this.identity,
     TrustedDeviceRepository? initialRepository,
+    TrustedSecurityEngineFactory? securityEngineFactory,
     DateTime Function()? now,
   }) : _repository = initialRepository,
+       _securityEngineFactory =
+           securityEngineFactory ??
+           NativeTrustedSecurityEngineFactory.tryOpen(),
        _now = now ?? DateTime.now;
 
   final DeviceIdentityController identity;
+  final TrustedSecurityEngineFactory? _securityEngineFactory;
   TrustedDeviceRepository? _repository;
   Future<void>? _initializing;
   final DateTime Function() _now;
   List<TrustedDeviceRecord> _devices = const [];
   bool _connectionsPaused = false;
   final Map<String, int> _nextSequenceBySession = {};
-  final Map<String, int> _lastRemoteSequenceBySession = {};
-  final Map<String, DateTime> _consumedNonces = {};
+  final Map<String, TrustedSecuritySession> _securitySessions = {};
+  final StreamController<TrustedAuthorizationInvalidation> _invalidations =
+      StreamController<TrustedAuthorizationInvalidation>.broadcast(sync: true);
 
   bool get initialized => _repository != null;
   bool get supported =>
-      identity.identity?.trustedAuthenticationAvailable == true;
+      identity.identity?.trustedAuthenticationAvailable == true &&
+      _securityEngineFactory != null;
+  bool get securityCoreAvailable => _securityEngineFactory != null;
   bool get connectionsPaused => _connectionsPaused;
   bool get connectionsEnabled => supported && !_connectionsPaused;
   List<TrustedDeviceRecord> get devices => List.unmodifiable(_devices);
+  Stream<TrustedAuthorizationInvalidation> get invalidations =>
+      _invalidations.stream;
 
   Future<void> initialize() async {
     if (_repository != null) return;
@@ -68,6 +112,7 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
 
   Future<void> _openRepository() async {
     _repository = await TrustedDeviceRepository.open();
+    await _repository!.prunePairingTransactions(_now());
     _connectionsPaused = await _repository!.readConnectionsPaused();
     await reload();
   }
@@ -77,7 +122,139 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
     if (_connectionsPaused == value) return;
     await _repository!.writeConnectionsPaused(value);
     _connectionsPaused = value;
+    for (final session in _securitySessions.values) {
+      session.setPaused(value);
+    }
+    if (value) {
+      _invalidations.add(
+        const TrustedAuthorizationInvalidation(
+          reason: TrustedAuthorizationInvalidationReason.allConnectionsPaused,
+        ),
+      );
+    }
     notifyListeners();
+  }
+
+  void beginSecuritySession({
+    required String sessionId,
+    required Uint8List peerRootFingerprint,
+    required Set<TrustedPermission> requestedPermissions,
+    required TrustedSecuritySessionMode mode,
+  }) {
+    final factory = _securityEngineFactory;
+    final local = localPublicIdentity();
+    if (factory == null) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.unsupported,
+        'Rust 可信安全核心不可用',
+      );
+    }
+    endSession(sessionId);
+    final session = factory.create(local.rootFingerprint);
+    try {
+      session.setPaused(_connectionsPaused);
+      session.begin(
+        sessionId: sessionId,
+        peerRootFingerprint: peerRootFingerprint,
+        requestedPermissions: requestedPermissions,
+        mode: mode,
+      );
+      _securitySessions[sessionId] = session;
+    } on TrustedSecurityEngineException catch (error) {
+      session.dispose();
+      throw _authenticationException(error);
+    } catch (_) {
+      session.dispose();
+      rethrow;
+    }
+  }
+
+  TrustedSecurityPhase securityPhase(String sessionId) =>
+      _requireSecuritySession(sessionId).phase;
+
+  void confirmPairingSecuritySession(String sessionId, bool sasMatches) {
+    try {
+      _requireSecuritySession(sessionId).confirmPairing(sasMatches);
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
+    }
+  }
+
+  void completePairingSecuritySession(String sessionId) {
+    try {
+      _requireSecuritySession(sessionId).completePairing();
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
+    } finally {
+      endSession(sessionId);
+    }
+  }
+
+  Set<TrustedPermission> authorizeSessionGrant({
+    required String sessionId,
+    required TrustedDeviceGrant grant,
+    required Uint8List issuerRootPublicKey,
+    required Uint8List expectedSubjectFingerprint,
+  }) {
+    try {
+      return _requireSecuritySession(sessionId).authorizeGrant(
+        grant: grant,
+        issuerRootPublicKey: issuerRootPublicKey,
+        expectedSubjectFingerprint: expectedSubjectFingerprint,
+        now: _now(),
+      );
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
+    }
+  }
+
+  Set<TrustedPermission> validatePairingGrant({
+    required String sessionId,
+    required TrustedDeviceGrant grant,
+    required Uint8List issuerRootPublicKey,
+  }) {
+    try {
+      return _requireSecuritySession(sessionId).validatePairingGrant(
+        grant: grant,
+        issuerRootPublicKey: issuerRootPublicKey,
+        now: _now(),
+      );
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
+    }
+  }
+
+  void configureWebRtcSecurityContext({
+    required String sessionId,
+    required Uint8List controllerNonce,
+    required Uint8List hostNonce,
+    required TrustedPeerIdentity controllerIdentity,
+    required TrustedPeerIdentity hostIdentity,
+  }) {
+    try {
+      _requireSecuritySession(sessionId).configureWebRtcContext(
+        controllerNonce: controllerNonce,
+        hostNonce: hostNonce,
+        controllerAuthenticationPublicKey:
+            controllerIdentity.authenticationPublicKey,
+        hostAuthenticationPublicKey: hostIdentity.authenticationPublicKey,
+      );
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
+    }
+  }
+
+  Set<TrustedPermission> bindWebRtcSession({
+    required String sessionId,
+    required TrustedSessionBinding binding,
+  }) {
+    binding.validateStructure();
+    try {
+      return _requireSecuritySession(sessionId)
+          .bindWebRtc(binding: binding, now: _now());
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
+    }
   }
 
   Future<void> reload() async {
@@ -155,58 +332,57 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
     );
   }
 
-  Future<TrustedDeviceRecord> trustController({
+  Future<TrustedDeviceRecord> stagePairing({
+    required String pairingSessionId,
     required String peerName,
-    required TrustedPeerIdentity controller,
+    required TrustedPeerIdentity peer,
     required TrustedDeviceGrant grant,
+    required bool localIsIssuer,
   }) async {
     await initialize();
-    await _validatePeerIdentity(controller);
-    await _validateGrant(
-      grant: grant,
-      issuer: localPublicIdentity(),
-      expectedSubject: controller.rootFingerprint,
-      requestedPermissions: grant.permissions,
-    );
     final now = _now().toUtc();
     final record = TrustedDeviceRecord(
       peerName: peerName,
-      peerIdentity: controller,
+      peerIdentity: peer,
       grant: grant,
-      localIsIssuer: true,
+      localIsIssuer: localIsIssuer,
       createdAt: now,
       lastConnectedAt: now,
     );
-    await _save(record);
-    await _appendAudit(TrustedAuditAction.paired, record);
+    await _repository!.stagePairing(
+      pairingSessionId: pairingSessionId,
+      record: record,
+      expiresAt: now.add(const Duration(minutes: 5)),
+    );
     return record;
   }
 
-  Future<TrustedDeviceRecord> trustHost({
-    required String peerName,
-    required TrustedPeerIdentity host,
-    required TrustedDeviceGrant grant,
+  Future<TrustedDeviceRecord> commitPairing({
+    required String pairingSessionId,
+    required Uint8List grantId,
   }) async {
     await initialize();
-    await _validatePeerIdentity(host);
-    await _validateGrant(
-      grant: grant,
-      issuer: host,
-      expectedSubject: localPublicIdentity().rootFingerprint,
-      requestedPermissions: grant.permissions,
+    final result = await _repository!.commitPairing(
+      pairingSessionId: pairingSessionId,
+      grantId: grantId,
+      now: _now(),
     );
-    final now = _now().toUtc();
-    final record = TrustedDeviceRecord(
-      peerName: peerName,
-      peerIdentity: host,
-      grant: grant,
-      localIsIssuer: false,
-      createdAt: now,
-      lastConnectedAt: now,
+    if (result.committedNow) {
+      await _appendAudit(TrustedAuditAction.paired, result.record);
+      await reload();
+    }
+    return result.record;
+  }
+
+  Future<void> discardPendingPairing(
+    String pairingSessionId, {
+    Uint8List? grantId,
+  }) async {
+    await initialize();
+    await _repository!.discardPairing(
+      pairingSessionId: pairingSessionId,
+      grantId: grantId,
     );
-    await _save(record);
-    await _appendAudit(TrustedAuditAction.paired, record);
-    return record;
   }
 
   Future<TrustedDeviceRecord?> findTrustedHost(String machineCode) async {
@@ -247,8 +423,21 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
         utf8.encode(sessionId).length > trustedMaximumSessionIdBytes) {
       throw const FormatException('Invalid trusted session id');
     }
-    final encodedPayload = Uint8List.fromList(utf8.encode(jsonEncode(payload)));
-    if (encodedPayload.length > trustedMaximumSignedPayloadBytes) {
+    return createRawEnvelope(
+      sessionId: sessionId,
+      recipientRootFingerprint: recipientRootFingerprint,
+      payload: Uint8List.fromList(utf8.encode(jsonEncode(payload))),
+      nonce: nonce,
+    );
+  }
+
+  Future<SignedTrustedEnvelope> createRawEnvelope({
+    required String sessionId,
+    required Uint8List recipientRootFingerprint,
+    required Uint8List payload,
+    Uint8List? nonce,
+  }) async {
+    if (payload.length > trustedMaximumSignedPayloadBytes) {
       throw const FormatException('Trusted message is too large');
     }
     final local = localPublicIdentity();
@@ -263,7 +452,7 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
       issuedAt: now,
       expiresAt: now.add(trustedSessionTicketLifetime),
       nonce: nonce ?? securityRandomBytes(16),
-      payload: encodedPayload,
+      payload: payload,
       signature: Uint8List(0),
     );
     final signature = await identity.signWithAuthenticationKey(
@@ -286,10 +475,20 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
     required SignedTrustedEnvelope envelope,
     required TrustedPeerIdentity sender,
   }) async {
+    final payload = await verifyRawEnvelope(envelope: envelope, sender: sender);
+    final decoded = jsonDecode(utf8.decode(payload));
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('Trusted envelope payload must be a map');
+    }
+    return decoded;
+  }
+
+  Future<Uint8List> verifyRawEnvelope({
+    required SignedTrustedEnvelope envelope,
+    required TrustedPeerIdentity sender,
+  }) async {
     envelope.validateStructure();
     await _validatePeerIdentity(sender);
-    final local = localPublicIdentity();
-    final now = _now().toUtc();
     if (!constantTimeBytesEqual(
       envelope.senderRootFingerprint,
       sender.rootFingerprint,
@@ -299,59 +498,13 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
         '发送设备身份与已固定身份不一致',
       );
     }
-    if (!constantTimeBytesEqual(
-      envelope.recipientRootFingerprint,
-      local.rootFingerprint,
-    )) {
-      throw const TrustedAuthenticationException(
-        TrustedAuthenticationFailure.identityChanged,
-        '可信消息并非发送给本机',
-      );
+    try {
+      _requireSecuritySession(envelope.sessionId)
+          .verifyEnvelope(envelope: envelope, sender: sender, now: _now());
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
     }
-    if (envelope.issuedAt.isAfter(now.add(trustedMaximumClockSkew)) ||
-        !now.isBefore(envelope.expiresAt)) {
-      throw const TrustedAuthenticationException(
-        TrustedAuthenticationFailure.expired,
-        '可信会话票据已过期',
-      );
-    }
-    _consumedNonces.removeWhere((_, expiresAt) => !now.isBefore(expiresAt));
-    final peerSessionKey =
-        '${envelope.sessionId}:'
-        '${base64UrlEncode(envelope.senderRootFingerprint)}';
-    final lastSequence = _lastRemoteSequenceBySession[peerSessionKey] ?? 0;
-    final nonce = '$peerSessionKey:${base64UrlEncode(envelope.nonce)}';
-    if (envelope.sequence <= lastSequence ||
-        _consumedNonces.containsKey(nonce)) {
-      throw const TrustedAuthenticationException(
-        TrustedAuthenticationFailure.replay,
-        '检测到重复或回退的可信认证消息',
-      );
-    }
-    if (_consumedNonces.length >= 4096) {
-      throw const TrustedAuthenticationException(
-        TrustedAuthenticationFailure.replay,
-        '可信认证防重放缓存已满，请重新建立会话',
-      );
-    }
-    final verified = await identity.verifyP256Signature(
-      publicKey: sender.authenticationPublicKey,
-      message: envelope.signingBytes,
-      signature: envelope.signature,
-    );
-    if (!verified) {
-      throw const TrustedAuthenticationException(
-        TrustedAuthenticationFailure.invalidSignature,
-        '可信认证签名无效',
-      );
-    }
-    _lastRemoteSequenceBySession[peerSessionKey] = envelope.sequence;
-    _consumedNonces[nonce] = envelope.expiresAt;
-    final decoded = jsonDecode(utf8.decode(envelope.payload));
-    if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('Trusted envelope payload must be a map');
-    }
-    return decoded;
+    return envelope.payload;
   }
 
   Future<void> validatePresentedGrant({
@@ -518,6 +671,22 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
   Future<void> revoke(TrustedDeviceRecord record) async {
     await initialize();
     await _repository!.revoke(record, _now().toUtc());
+    final grantIds = <Uint8List>[
+      record.grant.grantId,
+      if (record.previousGrant case final previous?) previous.grantId,
+    ];
+    for (final session in _securitySessions.values) {
+      for (final grantId in grantIds) {
+        session.revokeGrant(grantId);
+      }
+    }
+    _invalidations.add(
+      TrustedAuthorizationInvalidation(
+        reason: TrustedAuthorizationInvalidationReason.grantRevoked,
+        peerRootFingerprint: record.peerIdentity.rootFingerprint,
+        grantIds: List.unmodifiable(grantIds),
+      ),
+    );
     await _appendAudit(TrustedAuditAction.revoked, record);
     await reload();
   }
@@ -532,50 +701,80 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
 
   void endSession(String sessionId) {
     _nextSequenceBySession.remove(sessionId);
-    _lastRemoteSequenceBySession.removeWhere(
-      (key, _) => key.startsWith('$sessionId:'),
-    );
-    _consumedNonces.removeWhere((key, _) => key.startsWith('$sessionId:'));
+    final session = _securitySessions.remove(sessionId);
+    if (session != null) {
+      try {
+        session.end();
+      } finally {
+        session.dispose();
+      }
+    }
+  }
+
+  TrustedSecuritySession _requireSecuritySession(String sessionId) {
+    final session = _securitySessions[sessionId];
+    if (session == null) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.unsupported,
+        '可信安全会话尚未建立',
+      );
+    }
+    return session;
+  }
+
+  TrustedAuthenticationException _authenticationException(
+    TrustedSecurityEngineException error,
+  ) {
+    final failure = switch (error.failure) {
+      TrustedSecurityFailure.invalidSignature ||
+      TrustedSecurityFailure.invalidMessage =>
+        TrustedAuthenticationFailure.invalidSignature,
+      TrustedSecurityFailure.replay => TrustedAuthenticationFailure.replay,
+      TrustedSecurityFailure.notYetValid =>
+        TrustedAuthenticationFailure.clockSkew,
+      TrustedSecurityFailure.expired || TrustedSecurityFailure.softExpired =>
+        TrustedAuthenticationFailure.expired,
+      TrustedSecurityFailure.hardExpired =>
+        TrustedAuthenticationFailure.hardReviewRequired,
+      TrustedSecurityFailure.lifetimeExceeded =>
+        TrustedAuthenticationFailure.invalidLifetime,
+      TrustedSecurityFailure.permissionDenied =>
+        TrustedAuthenticationFailure.permissionsDenied,
+      TrustedSecurityFailure.revoked => TrustedAuthenticationFailure.revoked,
+      TrustedSecurityFailure.sessionMismatch =>
+        TrustedAuthenticationFailure.identityChanged,
+      TrustedSecurityFailure.paused || TrustedSecurityFailure.unavailable =>
+        TrustedAuthenticationFailure.unsupported,
+      TrustedSecurityFailure.invalidArgument ||
+      TrustedSecurityFailure.invalidState ||
+      TrustedSecurityFailure.unknown =>
+        TrustedAuthenticationFailure.invalidSignature,
+    };
+    final message = switch (failure) {
+      TrustedAuthenticationFailure.clockSkew =>
+        '两端系统时间相差超过 30 秒，请检查两台设备的“自动设置日期与时间”',
+      TrustedAuthenticationFailure.expired => '可信授权或认证子密钥已过期',
+      TrustedAuthenticationFailure.hardReviewRequired =>
+        '可信关系已达到人工复核期限，请使用连接码重新确认',
+      TrustedAuthenticationFailure.invalidLifetime => '可信凭证的有效期范围无效',
+      _ => error.message,
+    };
+    return TrustedAuthenticationException(failure, message);
   }
 
   Future<void> _validatePeerIdentity(TrustedPeerIdentity peer) async {
     peer.validateStructure();
-    final fingerprint = Uint8List.fromList(
-      sha256.convert(peer.rootPublicKey).bytes,
-    );
-    if (!constantTimeBytesEqual(fingerprint, peer.rootFingerprint)) {
+    final factory = _securityEngineFactory;
+    if (factory == null) {
       throw const TrustedAuthenticationException(
-        TrustedAuthenticationFailure.identityChanged,
-        '设备根公钥指纹不匹配',
+        TrustedAuthenticationFailure.unsupported,
+        'Rust 可信安全核心不可用',
       );
     }
-    if (DeviceIdentityController.machineCodeV2ForRootPublicKey(
-          peer.rootPublicKey,
-        ) !=
-        peer.machineCode) {
-      throw const TrustedAuthenticationException(
-        TrustedAuthenticationFailure.identityChanged,
-        '机器码与设备根身份不匹配',
-      );
-    }
-    final now = _now().toUtc();
-    if (now.isBefore(peer.authenticationNotBefore) ||
-        !now.isBefore(peer.authenticationExpiresAt)) {
-      throw const TrustedAuthenticationException(
-        TrustedAuthenticationFailure.expired,
-        '设备认证子密钥已过期',
-      );
-    }
-    final verified = await identity.verifyP256Signature(
-      publicKey: peer.rootPublicKey,
-      message: peer.authenticationCertificateBody,
-      signature: peer.authenticationCertificate,
-    );
-    if (!verified) {
-      throw const TrustedAuthenticationException(
-        TrustedAuthenticationFailure.invalidCertificate,
-        '设备认证子密钥证书无效',
-      );
+    try {
+      factory.validatePeerIdentity(peer: peer, now: _now());
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
     }
   }
 
@@ -600,6 +799,12 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
       );
     }
     final now = _now().toUtc();
+    if (grant.issuedAt.isAfter(now.add(trustedMaximumClockSkew))) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.clockSkew,
+        '两端系统时间相差超过 30 秒，请检查两台设备的“自动设置日期与时间”',
+      );
+    }
     if (!now.isBefore(grant.hardExpiresAt)) {
       throw const TrustedAuthenticationException(
         TrustedAuthenticationFailure.hardReviewRequired,
@@ -633,6 +838,12 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
 
   void _ensureGrantCurrent(TrustedDeviceRecord record) {
     final now = _now().toUtc();
+    if (record.grant.issuedAt.isAfter(now.add(trustedMaximumClockSkew))) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.clockSkew,
+        '两端系统时间相差超过 30 秒，请检查两台设备的“自动设置日期与时间”',
+      );
+    }
     if (!now.isBefore(record.grant.hardExpiresAt)) {
       throw const TrustedAuthenticationException(
         TrustedAuthenticationFailure.hardReviewRequired,
@@ -678,7 +889,12 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
 
   @override
   void dispose() {
+    for (final session in _securitySessions.values) {
+      session.dispose();
+    }
+    _securitySessions.clear();
     _repository?.close();
+    unawaited(_invalidations.close());
     super.dispose();
   }
 }

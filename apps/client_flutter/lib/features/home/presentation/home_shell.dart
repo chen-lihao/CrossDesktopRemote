@@ -77,16 +77,25 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final identity = await _identity.loadOrCreate();
     _controllerSession.setLocalDeviceId(identity.deviceId);
     _hostSession?.setLocalDeviceId(identity.deviceId);
-    if (identity.trustedAuthenticationAvailable) {
-      try {
-        await _trustedDevices.initialize();
-      } catch (_) {
-        // The dynamic connection-code path remains available when the local
-        // encrypted trust store cannot be opened.
-      }
+    try {
+      // The local trust store remains available for inspection and revocation
+      // even when the platform identity is locked, missing, or awaiting a
+      // Secure Enclave migration. Identity readiness gates authentication,
+      // not access to local security records.
+      await _trustedDevices.initialize();
+    } catch (_) {
+      // The dynamic connection-code path remains available when the local
+      // encrypted trust store cannot be opened.
     }
     await _settings.load();
-    await _history.load();
+    try {
+      // An ad-hoc macOS build deliberately has no protected SecretStore.
+      // Session history remains disabled instead of weakening its encryption
+      // or preventing the dynamic connection-code UI from starting.
+      await _history.load();
+    } catch (_) {
+      // A signed build can retry after the system key store becomes available.
+    }
     final availability = _hostAvailability;
     if (availability != null) {
       await availability.setIncomingAccessEnabled(

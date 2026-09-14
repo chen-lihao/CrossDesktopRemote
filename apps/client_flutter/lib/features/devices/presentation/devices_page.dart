@@ -73,6 +73,7 @@ class _DevicesPageState extends State<DevicesPage> {
   bool _publicationBusy = false;
   bool _serverTesting = false;
   String? _serverTestStatus;
+  bool _identityOperationBusy = false;
 
   @override
   void initState() {
@@ -403,6 +404,129 @@ class _DevicesPageState extends State<DevicesPage> {
     }
   }
 
+  bool get _identityChangeBlocked {
+    const activeStates = {
+      RemoteSessionState.connecting,
+      RemoteSessionState.streaming,
+    };
+    return activeStates.contains(_controllerSession.state) ||
+        (_hostSession != null && activeStates.contains(_hostSession!.state));
+  }
+
+  Future<void> _retryProtectedIdentity() async {
+    if (_identityOperationBusy) return;
+    setState(() => _identityOperationBusy = true);
+    try {
+      final identity = await widget.identity.retryProtectedIdentity();
+      if (identity.trustedAuthenticationAvailable) {
+        await widget.trustedDevices.initialize();
+        await _hostAvailability?.refreshRegistration();
+        AppMessenger.show('设备安全身份已恢复', level: AppMessageLevel.success);
+      } else {
+        AppMessenger.show(
+          identity.diagnosticMessage ?? '设备安全身份仍不可用',
+          level: AppMessageLevel.warning,
+        );
+      }
+    } catch (error) {
+      AppMessenger.show('重试设备安全身份失败：$error', level: AppMessageLevel.error);
+    } finally {
+      if (mounted) setState(() => _identityOperationBusy = false);
+    }
+  }
+
+  Future<void> _upgradeProtectedIdentity() async {
+    if (_identityOperationBusy) return;
+    if (_identityChangeBlocked) {
+      AppMessenger.show('请先断开当前远程会话再升级设备身份', level: AppMessageLevel.warning);
+      return;
+    }
+    if (widget.trustedDevices.devices.isNotEmpty) {
+      AppMessenger.show(
+        '请先撤销现有可信设备；安全身份升级后必须重新使用连接码配对',
+        level: AppMessageLevel.warning,
+      );
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('升级设备安全身份'),
+        content: const Text(
+          '将通过系统安全密钥库创建新的 Secure Enclave 根身份。机器码会随之变化，旧身份不会继承任何可信授权；后续设备需要重新使用动态连接码配对。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('确认升级'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _identityOperationBusy = true);
+    try {
+      await widget.identity.upgradeToHardwareIdentity();
+      await widget.trustedDevices.initialize();
+      await _hostAvailability?.refreshRegistration();
+      AppMessenger.show(
+        'Secure Enclave 设备身份已启用；机器码已更新',
+        level: AppMessageLevel.success,
+      );
+    } catch (error) {
+      AppMessenger.show('升级设备安全身份失败：$error', level: AppMessageLevel.error);
+    } finally {
+      if (mounted) setState(() => _identityOperationBusy = false);
+    }
+  }
+
+  Future<void> _resetProtectedIdentity() async {
+    if (_identityOperationBusy) return;
+    if (_identityChangeBlocked) {
+      AppMessenger.show('请先断开当前远程会话再重置设备身份', level: AppMessageLevel.warning);
+      return;
+    }
+    if (widget.trustedDevices.devices.isNotEmpty) {
+      AppMessenger.show('请先撤销所有可信设备，再重置本机安全身份', level: AppMessageLevel.warning);
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('重置设备安全身份'),
+        content: const Text(
+          '此操作会删除系统安全密钥库中的本机设备身份并创建新的 Secure Enclave 身份，机器码会变化，且无法恢复。动态连接码功能不受影响。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('重置并重新创建'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _identityOperationBusy = true);
+    try {
+      await widget.identity.resetProtectedIdentity();
+      await widget.trustedDevices.initialize();
+      await _hostAvailability?.refreshRegistration();
+      AppMessenger.show('设备安全身份已重置', level: AppMessageLevel.success);
+    } catch (error) {
+      AppMessenger.show('重置设备安全身份失败：$error', level: AppMessageLevel.error);
+    } finally {
+      if (mounted) setState(() => _identityOperationBusy = false);
+    }
+  }
+
   Future<void> _disconnectIncomingSession() async {
     await _hostSession?.disconnect();
   }
@@ -553,6 +677,7 @@ class _DevicesPageState extends State<DevicesPage> {
       animation: Listenable.merge([
         _controllerSession,
         ?_hostAvailability,
+        widget.identity,
         widget.trustedDevices,
       ]),
       builder: (context, _) {
@@ -694,62 +819,58 @@ class _DevicesPageState extends State<DevicesPage> {
                       Text(pairing.message!),
                     ],
                     if (pairingSession?.role == RemoteRole.host &&
-                        pairing.phase == TrustedPairingPhase.verifyCode)
-                      ...[
-                        SwitchListTile.adaptive(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text('允许控制键鼠'),
-                          value: pairing.permissions.contains(
-                            TrustedPermission.controlInput,
-                          ),
-                          onChanged: pairing.remoteConfirmed
-                              ? null
-                              : (value) => pairingSession!
-                                    .setTrustedPairingPermission(
-                                      TrustedPermission.controlInput,
-                                      value,
-                                    ),
+                        pairing.phase == TrustedPairingPhase.verifyCode) ...[
+                      SwitchListTile.adaptive(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('允许控制键鼠'),
+                        value: pairing.permissions.contains(
+                          TrustedPermission.controlInput,
                         ),
-                        SwitchListTile.adaptive(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text('允许同步剪贴板'),
-                          value:
-                              pairing.permissions.contains(
-                                TrustedPermission.readClipboard,
-                              ) &&
-                              pairing.permissions.contains(
-                                TrustedPermission.writeClipboard,
-                              ),
-                          onChanged: pairing.remoteConfirmed
-                              ? null
-                              : pairingSession!
-                                    .setTrustedPairingClipboardEnabled,
+                        onChanged: pairing.remoteConfirmed
+                            ? null
+                            : (value) =>
+                                  pairingSession!.setTrustedPairingPermission(
+                                    TrustedPermission.controlInput,
+                                    value,
+                                  ),
+                      ),
+                      SwitchListTile.adaptive(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('允许同步剪贴板'),
+                        value:
+                            pairing.permissions.contains(
+                              TrustedPermission.readClipboard,
+                            ) &&
+                            pairing.permissions.contains(
+                              TrustedPermission.writeClipboard,
+                            ),
+                        onChanged: pairing.remoteConfirmed
+                            ? null
+                            : pairingSession!.setTrustedPairingClipboardEnabled,
+                      ),
+                      SwitchListTile.adaptive(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('允许文件传输'),
+                        value: pairing.permissions.contains(
+                          TrustedPermission.transferFiles,
                         ),
-                        SwitchListTile.adaptive(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text('允许文件传输'),
-                          value: pairing.permissions.contains(
-                            TrustedPermission.transferFiles,
-                          ),
-                          onChanged: pairing.remoteConfirmed
-                              ? null
-                              : (value) => pairingSession!
-                                    .setTrustedPairingPermission(
-                                      TrustedPermission.transferFiles,
-                                      value,
-                                    ),
-                        ),
-                        SwitchListTile.adaptive(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text('自动续期可信关系'),
-                          subtitle: const Text(
-                            '每次成功认证后可续期 90 天，但不会超过一年人工复核期限。',
-                          ),
-                          value: pairing.automaticRenewal,
-                          onChanged: pairingSession!
-                              .setTrustedPairingAutomaticRenewal,
-                        ),
-                      ],
+                        onChanged: pairing.remoteConfirmed
+                            ? null
+                            : (value) =>
+                                  pairingSession!.setTrustedPairingPermission(
+                                    TrustedPermission.transferFiles,
+                                    value,
+                                  ),
+                      ),
+                      SwitchListTile.adaptive(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('自动续期可信关系'),
+                        subtitle: const Text('每次成功认证后可续期 90 天，但不会超过一年人工复核期限。'),
+                        value: pairing.automaticRenewal,
+                        onChanged:
+                            pairingSession!.setTrustedPairingAutomaticRenewal,
+                      ),
+                    ],
                     const SizedBox(height: 12),
                     Wrap(
                       spacing: 8,
@@ -781,7 +902,7 @@ class _DevicesPageState extends State<DevicesPage> {
             ],
             const SizedBox(height: 12),
             if (!widget.trustedDevices.supported)
-              const Text('当前设备的受保护身份密钥不可用；仍可继续使用动态连接码。')
+              _buildIdentitySecurityStatus(widget.identity.identity)
             else if (trusted.isEmpty)
               const Text('暂无可信设备。先使用动态连接码连接，再在这里确认两端校验码。')
             else
@@ -817,6 +938,120 @@ class _DevicesPageState extends State<DevicesPage> {
                   ),
                 ),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIdentitySecurityStatus(DeviceIdentity? identity) {
+    final state =
+        identity?.securityState ?? DeviceIdentitySecurityState.unavailable;
+    final (message, icon, color) = switch (state) {
+      DeviceIdentitySecurityState.migrationRequired => (
+        '检测到旧版或非硬件身份。新版本不会继续使用该私钥，需要确认替换为 Secure Enclave 身份。',
+        Icons.upgrade_outlined,
+        Theme.of(context).colorScheme.tertiary,
+      ),
+      DeviceIdentitySecurityState.keychainLocked => (
+        '系统钥匙串当前不可访问。请解锁 Mac 后重试。',
+        Icons.lock_outline,
+        Theme.of(context).colorScheme.error,
+      ),
+      DeviceIdentitySecurityState.identityChanged => (
+        '本机密钥与已绑定身份不一致。为防止身份接管，可信认证已停止。',
+        Icons.gpp_bad_outlined,
+        Theme.of(context).colorScheme.error,
+      ),
+      DeviceIdentitySecurityState.keyUnavailable => (
+        '设备私钥缺失或不完整，可信认证已安全关闭。',
+        Icons.key_off_outlined,
+        Theme.of(context).colorScheme.error,
+      ),
+      DeviceIdentitySecurityState.transientFailure => (
+        'Secure Enclave、系统密钥库或签名自检暂时失败，请重试。',
+        Icons.sync_problem_outlined,
+        Theme.of(context).colorScheme.error,
+      ),
+      DeviceIdentitySecurityState.readySoftwareBacked => (
+        '当前身份仅受操作系统软件密钥存储保护，不满足免码认证的安全要求。',
+        Icons.shield_outlined,
+        Theme.of(context).colorScheme.tertiary,
+      ),
+      _ => (
+        identity?.diagnosticCode == 'trusted_identity_disabled'
+            ? '当前是未签名构建，可信认证已关闭；动态连接码仍可正常使用。'
+            : identity?.diagnosticCode == 'missing_application_identifier'
+            ? '应用签名缺少 provisioning profile 授权的钥匙串访问组，可信认证已安全关闭。'
+            : '当前平台没有可用的硬件保护设备身份；仍可继续使用动态连接码。',
+        Icons.info_outline,
+        Theme.of(context).colorScheme.onSurfaceVariant,
+      ),
+    };
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.28)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: color),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(message),
+                  if (identity?.diagnosticCode case final code?) ...[
+                    const SizedBox(height: 4),
+                    SelectableText(
+                      identity?.diagnosticMessage == null
+                          ? code
+                          : '$code · ${identity!.diagnosticMessage}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      if (state ==
+                              DeviceIdentitySecurityState.migrationRequired &&
+                          widget.identity.protectedIdentityRecoverySupported)
+                        FilledButton.tonalIcon(
+                          onPressed: _identityOperationBusy
+                              ? null
+                              : _upgradeProtectedIdentity,
+                          icon: const Icon(Icons.security_outlined),
+                          label: const Text('升级安全身份'),
+                        ),
+                      if (identity?.canRetryProtectedIdentity == true)
+                        OutlinedButton.icon(
+                          onPressed: _identityOperationBusy
+                              ? null
+                              : _retryProtectedIdentity,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('重试'),
+                        ),
+                      if (identity?.canResetProtectedIdentity == true &&
+                          widget.identity.protectedIdentityRecoverySupported)
+                        TextButton.icon(
+                          onPressed: _identityOperationBusy
+                              ? null
+                              : _resetProtectedIdentity,
+                          icon: const Icon(Icons.restart_alt),
+                          label: const Text('重置身份'),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
