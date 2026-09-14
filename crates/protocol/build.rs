@@ -21,7 +21,11 @@ fn main() {
         println!("cargo:rerun-if-changed={}", proto_file.display());
     }
 
+    let protoc = protoc_bin_vendored::protoc_bin_path()
+        .expect("the vendored protoc binary must be available for this target");
+
     prost_build::Config::new()
+        .protoc_executable(protoc)
         .compile_protos(&proto_files, &[proto_root])
         .expect("protocol definitions must compile");
 }

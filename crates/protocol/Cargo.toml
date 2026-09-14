@@ -8,3 +8,4 @@ prost = "0.14.4"
 
 [build-dependencies]
 prost-build = "0.14.4"
+protoc-bin-vendored = "3"
