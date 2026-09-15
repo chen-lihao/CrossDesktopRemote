@@ -19,6 +19,8 @@ export 'src/native/utils.dart'
 export 'src/native/adapter_type.dart';
 export 'src/native/camera_utils.dart';
 export 'src/native/audio_management.dart';
+export 'src/native/system_audio_capture.dart'
+    if (dart.library.js_interop) 'src/web/system_audio_capture.dart';
 export 'src/native/android/audio_configuration.dart';
 export 'src/native/ios/audio_configuration.dart';
 export 'src/native/rtc_video_platform_view_controller.dart';

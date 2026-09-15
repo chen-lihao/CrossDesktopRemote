@@ -35,6 +35,7 @@ class AppSettingsController extends ChangeNotifier {
   static const _historyLimitKey = 'settings.session_history_limit';
   static const _advancedNetworkKey = 'settings.show_advanced_network';
   static const _incomingAccessKey = 'settings.incoming_access_enabled';
+  static const _systemAudioSharingKey = 'settings.system_audio_sharing_enabled';
   static const _displayPresentationKey = 'settings.remote_display_presentation';
 
   SharedPreferencesAsync? _preferences;
@@ -65,6 +66,7 @@ class AppSettingsController extends ChangeNotifier {
   int sessionHistoryLimit = 50;
   bool showAdvancedNetwork = false;
   bool incomingAccessEnabled = true;
+  bool systemAudioSharingEnabled = false;
   RemoteDisplayPresentationMode displayPresentationMode =
       RemoteDisplayPresentationMode.singleWindow;
   bool loaded = false;
@@ -142,6 +144,8 @@ class AppSettingsController extends ChangeNotifier {
     );
     showAdvancedNetwork = await store.getBool(_advancedNetworkKey) ?? false;
     incomingAccessEnabled = await store.getBool(_incomingAccessKey) ?? true;
+    systemAudioSharingEnabled =
+        await store.getBool(_systemAudioSharingKey) ?? false;
     final storedPresentation = await store.getString(_displayPresentationKey);
     displayPresentationMode = RemoteDisplayPresentationMode.values.firstWhere(
       (value) => value.name == storedPresentation,
@@ -253,6 +257,13 @@ class AppSettingsController extends ChangeNotifier {
     incomingAccessEnabled = value;
     notifyListeners();
     await _persist((store) => store.setBool(_incomingAccessKey, value));
+  }
+
+  Future<void> setSystemAudioSharingEnabled(bool value) async {
+    if (systemAudioSharingEnabled == value) return;
+    systemAudioSharingEnabled = value;
+    notifyListeners();
+    await _persist((store) => store.setBool(_systemAudioSharingKey, value));
   }
 
   Future<void> setDisplayPresentationMode(

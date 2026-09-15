@@ -462,6 +462,13 @@ class _DevicesPageState extends State<DevicesPage> {
                       permissions: permissions,
                       onChanged: setPermission,
                     ),
+                    if (Platform.isWindows || Platform.isMacOS)
+                      _policyPermissionTile(
+                        permission: TrustedPermission.listenSystemAudio,
+                        title: '收听本机系统声音',
+                        permissions: permissions,
+                        onChanged: setPermission,
+                      ),
                   ],
                 ),
               ),
@@ -997,6 +1004,22 @@ class _DevicesPageState extends State<DevicesPage> {
                                     value,
                                   ),
                       ),
+                      if (Platform.isWindows || Platform.isMacOS)
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('允许收听本机系统声音'),
+                          subtitle: const Text('系统声音采集会在远程会话期间持续显示状态。'),
+                          value: pairing.permissions.contains(
+                            TrustedPermission.listenSystemAudio,
+                          ),
+                          onChanged: pairing.remoteConfirmed
+                              ? null
+                              : (value) =>
+                                    pairingSession!.setTrustedPairingPermission(
+                                      TrustedPermission.listenSystemAudio,
+                                      value,
+                                    ),
+                        ),
                       SwitchListTile.adaptive(
                         contentPadding: EdgeInsets.zero,
                         title: const Text('自动续期可信关系'),
@@ -1222,6 +1245,9 @@ class _DevicesPageState extends State<DevicesPage> {
         permissions.contains(TrustedPermission.uploadFilesToHost) ||
         permissions.contains(TrustedPermission.downloadFilesFromHost)) {
       labels.add('文件传输');
+    }
+    if (permissions.contains(TrustedPermission.listenSystemAudio)) {
+      labels.add('系统声音');
     }
     return labels.join('、');
   }

@@ -906,6 +906,7 @@ fn permissions_from_proto(values: &[i32]) -> Result<PermissionSet, ()> {
             PermissionScope::RecordSession => SessionPermission::RecordSession,
             PermissionScope::UploadFileToHost => SessionPermission::UploadFilesToHost,
             PermissionScope::DownloadFileFromHost => SessionPermission::DownloadFilesFromHost,
+            PermissionScope::ListenSystemAudio => SessionPermission::ListenSystemAudio,
             PermissionScope::Unspecified => return Err(()),
         };
         result = result.grant(permission);

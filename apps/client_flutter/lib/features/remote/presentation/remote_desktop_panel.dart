@@ -33,6 +33,7 @@ enum _RemoteToolbarAction {
   settings,
   viewFit,
   fileTransfer,
+  audio,
   videoPolicy,
   displayAdjustment,
   repair,
@@ -1294,6 +1295,8 @@ class _RemoteToolbar extends StatelessWidget {
                               );
                             case _RemoteToolbarAction.fileTransfer:
                               onFileTransfer();
+                            case _RemoteToolbarAction.audio:
+                              session.toggleRemoteAudioMuted();
                             case _RemoteToolbarAction.videoPolicy:
                               if (!session.qualityPending) {
                                 unawaited(
@@ -1353,6 +1356,27 @@ class _RemoteToolbar extends StatelessWidget {
                                   contentPadding: EdgeInsets.zero,
                                   leading: Icon(Icons.swap_horiz),
                                   title: Text('文件传输'),
+                                ),
+                              ),
+                            if (session.remoteSystemAudioAvailable)
+                              PopupMenuItem(
+                                value: _RemoteToolbarAction.audio,
+                                child: ListTile(
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: Icon(
+                                    session.remoteAudioMuted
+                                        ? Icons.volume_off_outlined
+                                        : Icons.volume_up_outlined,
+                                  ),
+                                  title: Text(
+                                    session.remoteAudioMuted
+                                        ? '恢复远程声音'
+                                        : '静音远程声音',
+                                  ),
+                                  subtitle: Text(
+                                    session.systemAudioStatusLabel,
+                                  ),
                                 ),
                               ),
                             PopupMenuItem(
@@ -1416,6 +1440,18 @@ class _RemoteToolbar extends StatelessWidget {
                                 : '文件传输尚未就绪',
                             onPressed: onFileTransfer,
                             icon: const Icon(Icons.swap_horiz),
+                          ),
+                        ),
+                      if (!compact && session.remoteSystemAudioAvailable)
+                        IconButton(
+                          tooltip: session.remoteAudioMuted
+                              ? '恢复远程声音'
+                              : '静音远程声音 · ${session.systemAudioStatusLabel}',
+                          onPressed: session.toggleRemoteAudioMuted,
+                          icon: Icon(
+                            session.remoteAudioMuted
+                                ? Icons.volume_off_outlined
+                                : Icons.volume_up_outlined,
                           ),
                         ),
                       if (!compact)

@@ -349,6 +349,38 @@ class SettingsPage extends StatelessWidget {
                     ),
                     const SizedBox(height: 16),
                   ],
+                  if (hostSession != null &&
+                      (Platform.isMacOS || Platform.isWindows)) ...[
+                    _SettingsSection(
+                      title: '远程声音',
+                      icon: Icons.volume_up_outlined,
+                      children: [
+                        SwitchListTile(
+                          title: const Text('共享本机系统声音'),
+                          subtitle: Text(
+                            hostSession!.state ==
+                                        RemoteSessionState.streaming ||
+                                    hostSession!.state ==
+                                        RemoteSessionState.reconnecting
+                                ? hostSession!.systemAudioStatusLabel
+                                : '默认关闭；开启后，仅在远程会话中采集并发送系统播放声音',
+                          ),
+                          value: settings.systemAudioSharingEnabled,
+                          onChanged: (value) => unawaited(
+                            settings.setSystemAudioSharingEnabled(value),
+                          ),
+                        ),
+                        const ListTile(
+                          leading: Icon(Icons.privacy_tip_outlined),
+                          title: Text('不采集麦克风'),
+                          subtitle: Text(
+                            '系统声音使用独立音频轨道；可信连接还必须由被控端授予“收听系统声音”权限',
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                  ],
                   _SettingsSection(
                     title: '连接与发现',
                     icon: Icons.lan_outlined,

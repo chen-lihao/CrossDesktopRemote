@@ -17,6 +17,8 @@ const atomicShortcutV1Capability = 'atomic-shortcut-v1';
 const scopedInputResetV1Capability = 'scoped-input-reset-v1';
 const videoPolicyV2Capability = 'video-policy-v2';
 const multiDisplayStreamV1Capability = 'multi-display-stream-v1';
+const systemAudioCaptureV1Capability = 'system-audio-capture-v1';
+const remoteAudioPlaybackV1Capability = 'remote-audio-playback-v1';
 const deviceIdentityV1Capability = 'device-identity-v1';
 const trustedDeviceAuthV1Capability = 'trusted-device-auth-v1';
 const signedWebRtcBindingV1Capability = 'signed-webrtc-binding-v1';
@@ -51,6 +53,8 @@ List<String> buildRemoteClientCapabilities({
   required bool explicitFileTransferSupported,
   bool fileClipboardSupported = false,
   bool trustedDeviceAuthenticationSupported = false,
+  bool systemAudioCaptureSupported = false,
+  bool remoteAudioPlaybackSupported = false,
   bool enableIosGeometryV3 = iosActiveContentGeometryV3Enabled,
 }) {
   final capabilities = <String>[];
@@ -80,6 +84,12 @@ List<String> buildRemoteClientCapabilities({
   capabilities.add(atomicShortcutV1Capability);
   capabilities.add(scopedInputResetV1Capability);
   capabilities.add(videoPolicyV2Capability);
+  if (role == RemoteRole.host && systemAudioCaptureSupported) {
+    capabilities.add(systemAudioCaptureV1Capability);
+  }
+  if (role == RemoteRole.controller && remoteAudioPlaybackSupported) {
+    capabilities.add(remoteAudioPlaybackV1Capability);
+  }
   if (trustedDeviceAuthenticationSupported) {
     capabilities.addAll(const [
       deviceIdentityV1Capability,

@@ -63,6 +63,10 @@ void FlutterWebRTC::HandleMethodCall(
     const EncodableMap constraints = findMap(params, "constraints");
 
     GetDisplayMedia(constraints, std::move(result));
+  } else if (method_call.method_name().compare("getSystemAudio") == 0) {
+    GetSystemAudio(std::move(result));
+  } else if (method_call.method_name().compare("stopSystemAudio") == 0) {
+    StopSystemAudio(std::move(result));
   } else if (method_call.method_name().compare("getDesktopSources") == 0) {
     // types: ["screen", "window"]
     if (!method_call.arguments()) {

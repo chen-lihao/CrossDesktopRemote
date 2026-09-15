@@ -9,6 +9,9 @@
 #import "FlutterRTCMediaStream.h"
 #import "FlutterRTCPeerConnection.h"
 #import "FlutterRTCVideoRenderer.h"
+#if TARGET_OS_OSX
+#import "FlutterRTCSystemAudioCapturer.h"
+#endif
 #import "FlutterRTCFrameCryptor.h"
 #if TARGET_OS_IPHONE
 #import "FlutterRTCMediaRecorder.h"
@@ -501,12 +504,11 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
                                                              decoderFactory:decoderFactory
                                                       audioProcessingModule:_audioManager.audioProcessingModule];
 
-        // Allow an embedding plugin (e.g. livekit_client) to own the audio
-        // device module's engine-lifecycle delegate. Only override the observer
-        // when one is registered, leaving default behavior unchanged otherwise.
-        if (gAudioDeviceModuleObserver != nil) {
-            _peerConnectionFactory.audioDeviceModule.observer = gAudioDeviceModuleObserver;
-        }
+        // The plugin must remain the default audio-device observer so its
+        // system-audio source can route ScreenCaptureKit PCM into WebRTC.
+        // An embedding plugin may explicitly replace that process-wide owner.
+        _peerConnectionFactory.audioDeviceModule.observer =
+            gAudioDeviceModuleObserver != nil ? gAudioDeviceModuleObserver : self;
 
 #if TARGET_OS_OSX
         // CoreAudio ADM requires explicit device initialization on macOS
@@ -608,6 +610,20 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     NSDictionary* argsMap = call.arguments;
     NSDictionary* constraints = argsMap[@"constraints"];
     [self getDisplayMedia:constraints result:result];
+  } else if ([@"getSystemAudio" isEqualToString:call.method]) {
+#if TARGET_OS_OSX
+    [self getSystemAudio:result];
+#else
+    result([FlutterError errorWithCode:@"SystemAudioUnavailable"
+                               message:@"System audio capture is not available on this platform"
+                               details:nil]);
+#endif
+  } else if ([@"stopSystemAudio" isEqualToString:call.method]) {
+#if TARGET_OS_OSX
+    [self stopSystemAudio:result];
+#else
+    result(nil);
+#endif
   } else if ([@"switchDesktopCaptureSource" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     [self switchDesktopCaptureSource:argsMap result:result];
@@ -2909,6 +2925,27 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 }
 
 #pragma mark - RTCAudioDeviceModuleDelegate methods
+
+- (NSInteger)audioDeviceModule:(RTCAudioDeviceModule*)audioDeviceModule
+                        engine:(AVAudioEngine*)engine
+      configureInputFromSource:(AVAudioNode* _Nullable)source
+                 toDestination:(AVAudioNode*)destination
+                    withFormat:(AVAudioFormat*)format
+                       context:(NSDictionary*)context {
+#if TARGET_OS_OSX
+  FlutterSystemAudioCapturer* capturer = self.systemAudioCapturer;
+  if (capturer != nil && capturer.isActive) {
+    return [capturer configureInputForEngine:engine
+                                     source:source
+                                destination:destination
+                                     format:format];
+  }
+#endif
+  if (source != nil) {
+    [engine connect:source to:destination format:format];
+  }
+  return 0;
+}
 
 - (void)audioDeviceModuleDidUpdateDevices:(RTCAudioDeviceModule *)audioDeviceModule {
     NSLog(@"audioDeviceModule did update devices");

@@ -79,6 +79,39 @@ void main() {
     );
   });
 
+  test('system audio capabilities are role scoped and independently gated', () {
+    final host = buildRemoteClientCapabilities(
+      role: RemoteRole.host,
+      platform: 'windows',
+      clipboardSupported: false,
+      explicitFileTransferSupported: false,
+      systemAudioCaptureSupported: true,
+      remoteAudioPlaybackSupported: true,
+    );
+    final controller = buildRemoteClientCapabilities(
+      role: RemoteRole.controller,
+      platform: 'ios',
+      clipboardSupported: false,
+      explicitFileTransferSupported: false,
+      systemAudioCaptureSupported: true,
+      remoteAudioPlaybackSupported: true,
+    );
+
+    expect(host, contains(systemAudioCaptureV1Capability));
+    expect(host, isNot(contains(remoteAudioPlaybackV1Capability)));
+    expect(controller, contains(remoteAudioPlaybackV1Capability));
+    expect(controller, isNot(contains(systemAudioCaptureV1Capability)));
+    expect(
+      buildRemoteClientCapabilities(
+        role: RemoteRole.host,
+        platform: 'windows',
+        clipboardSupported: false,
+        explicitFileTransferSupported: false,
+      ),
+      isNot(contains(systemAudioCaptureV1Capability)),
+    );
+  });
+
   test('legacy renderers still use the unified display transaction', () {
     expect(
       buildRemoteClientCapabilities(

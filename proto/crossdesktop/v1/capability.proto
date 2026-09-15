@@ -45,6 +45,14 @@ enum PermissionScope {
   // PERMISSION_SCOPE_TRANSFER_FILE remains the legacy bidirectional scope.
   PERMISSION_SCOPE_UPLOAD_FILE_TO_HOST = 8;
   PERMISSION_SCOPE_DOWNLOAD_FILE_FROM_HOST = 9;
+  PERMISSION_SCOPE_LISTEN_SYSTEM_AUDIO = 10;
+}
+
+message AudioCapabilities {
+  bool supports_system_capture = 1;
+  bool supports_playback = 2;
+  bool supports_stereo = 3;
+  repeated uint32 sample_rates = 4;
 }
 
 message DisplayCapability {
@@ -77,4 +85,5 @@ message ClientCapabilities {
   ClipboardCapabilities clipboard = 8;
   TransferCapabilities transfer = 9;
   TrustedDeviceCapabilities trusted_device = 10;
+  AudioCapabilities audio = 11;
 }

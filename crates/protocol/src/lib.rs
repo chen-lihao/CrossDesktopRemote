@@ -38,6 +38,7 @@ mod tests {
         assert!(decoded.supports_file_resume);
         assert!(decoded.clipboard.is_none());
         assert!(decoded.transfer.is_none());
+        assert!(decoded.audio.is_none());
     }
 
     #[test]

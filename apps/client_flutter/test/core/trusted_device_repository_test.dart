@@ -379,6 +379,20 @@ void main() {
     );
   });
 
+  test('system audio permission is explicit and survives strict decoding', () {
+    final permissions = {
+      TrustedPermission.viewScreen,
+      TrustedPermission.listenSystemAudio,
+    };
+    final bits = trustedPermissionBits(permissions);
+
+    expect(trustedPermissionsFromBitsStrict(bits), permissions);
+    expect(
+      defaultHostAccessPermissions,
+      isNot(contains(TrustedPermission.listenSystemAudio)),
+    );
+  });
+
   test('publishes active-session invalidations for pause and revoke', () async {
     final repository = await TrustedDeviceRepository.open(
       databasePath: ':memory:',

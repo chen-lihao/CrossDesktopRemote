@@ -7,6 +7,19 @@ namespace flutter_webrtc_plugin {
 FlutterScreenCapture::FlutterScreenCapture(FlutterWebRTCBase* base)
     : base_(base) {}
 
+FlutterScreenCapture::~FlutterScreenCapture() {
+  StopLoopbackCapture();
+}
+
+void FlutterScreenCapture::StopLoopbackCapture() {
+  if (loopback_capturer_) {
+    loopback_capturer_->Stop();
+    loopback_capturer_.reset();
+  }
+  loopback_audio_source_ = nullptr;
+  loopback_is_session_scoped_ = false;
+}
+
 bool FlutterScreenCapture::BuildDesktopSourcesList(const EncodableList& types,
                                                    bool force_reload) {
   size_t size = types.size();
@@ -137,11 +150,9 @@ void FlutterScreenCapture::OnPaused(
     scoped_refptr<RTCDesktopCapturer> capturer) {}
 
 void FlutterScreenCapture::OnStop(scoped_refptr<RTCDesktopCapturer> capturer) {
-  if (loopback_capturer_) {
-    loopback_capturer_->Stop();
-    loopback_capturer_.reset();
-    loopback_audio_source_ = nullptr;
-  }
+  // Legacy getDisplayMedia(audio: true) remains display-scoped. The dedicated
+  // GetSystemAudio source is session-scoped and survives display replacement.
+  if (!loopback_is_session_scoped_) StopLoopbackCapture();
 }
 
 void FlutterScreenCapture::OnError(scoped_refptr<RTCDesktopCapturer> capturer) {
@@ -221,10 +232,7 @@ void FlutterScreenCapture::GetDisplayMedia(
 
   if (capture_audio) {
     // Stop any previous loopback session before starting a new one.
-    if (loopback_capturer_) {
-      loopback_capturer_->Stop();
-      loopback_capturer_.reset();
-    }
+    StopLoopbackCapture();
 
     // Disable all audio processing for loopback capture.  Echo cancellation,
     // AGC, and noise suppression are designed for microphone input; applied to
@@ -245,6 +253,7 @@ void FlutterScreenCapture::GetDisplayMedia(
                                           audio_uuid.c_str());
 
     loopback_capturer_ = CreateLoopbackCapturer(source_id);
+    loopback_is_session_scoped_ = false;
 
     if (loopback_capturer_ && loopback_capturer_->Start(loopback_audio_source_)) {
       EncodableMap audio_info;
@@ -356,6 +365,61 @@ void FlutterScreenCapture::GetDisplayMedia(
   desktop_capturer->Start(uint32_t(fps));
 
   result->Success(EncodableValue(params));
+}
+
+void FlutterScreenCapture::GetSystemAudio(
+    std::unique_ptr<MethodResultProxy> result) {
+  StopLoopbackCapture();
+
+  RTCAudioOptions options;
+  options.echo_cancellation = false;
+  options.auto_gain_control = false;
+  options.noise_suppression = false;
+  const std::string source_label =
+      "system_audio_input_" + base_->GenerateUUID();
+  loopback_audio_source_ = base_->factory_->CreateAudioSource(
+      source_label.c_str(), RTCAudioSource::SourceType::kCustom, options);
+
+  const std::string stream_id = base_->GenerateUUID();
+  const std::string track_id = base_->GenerateUUID();
+  scoped_refptr<RTCMediaStream> stream =
+      base_->factory_->CreateStream(stream_id.c_str());
+  scoped_refptr<RTCAudioTrack> track =
+      base_->factory_->CreateAudioTrack(loopback_audio_source_,
+                                        track_id.c_str());
+
+  loopback_capturer_ = CreateLoopbackCapturer("0");
+  if (!loopback_capturer_ ||
+      !loopback_capturer_->Start(loopback_audio_source_)) {
+    StopLoopbackCapture();
+    result->Error("SystemAudioUnavailable",
+                  "System loopback audio capture is unavailable");
+    return;
+  }
+  loopback_is_session_scoped_ = true;
+  stream->AddTrack(track);
+  base_->local_tracks_[track_id] = track;
+  base_->local_streams_[stream_id] = stream;
+
+  EncodableMap track_info;
+  track_info[EncodableValue("id")] = EncodableValue(track_id);
+  track_info[EncodableValue("label")] = EncodableValue(track_id);
+  track_info[EncodableValue("kind")] = EncodableValue(std::string("audio"));
+  track_info[EncodableValue("enabled")] = EncodableValue(true);
+  EncodableList audio_tracks;
+  audio_tracks.push_back(EncodableValue(track_info));
+
+  EncodableMap params;
+  params[EncodableValue("streamId")] = EncodableValue(stream_id);
+  params[EncodableValue("audioTracks")] = EncodableValue(audio_tracks);
+  params[EncodableValue("videoTracks")] = EncodableValue(EncodableList());
+  result->Success(EncodableValue(params));
+}
+
+void FlutterScreenCapture::StopSystemAudio(
+    std::unique_ptr<MethodResultProxy> result) {
+  StopLoopbackCapture();
+  result->Success();
 }
 
 }  // namespace flutter_webrtc_plugin

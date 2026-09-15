@@ -123,7 +123,7 @@ bool ApplicationLoopbackCapturer::Start(
     scoped_refptr<RTCAudioSource> source) {
   if (running_) return true;
 
-    source_ = source;
+  source_ = source;
 
   audio_client_ = TryInitApplicationLoopback();
   if (!audio_client_) {
@@ -135,6 +135,8 @@ bool ApplicationLoopbackCapturer::Start(
   if (buffer_ready_event_ == nullptr) {
     audio_client_->Release();
     audio_client_ = nullptr;
+    CoTaskMemFree(mix_format_);
+    mix_format_ = nullptr;
     return false;
   }
 
@@ -144,6 +146,8 @@ bool ApplicationLoopbackCapturer::Start(
               << hr << "\n";
     audio_client_->Release();
     audio_client_ = nullptr;
+    CoTaskMemFree(mix_format_);
+    mix_format_ = nullptr;
     CloseHandle(buffer_ready_event_);
     buffer_ready_event_ = nullptr;
     return false;
@@ -155,6 +159,8 @@ bool ApplicationLoopbackCapturer::Start(
               << std::hex << hr << "\n";
     audio_client_->Release();
     audio_client_ = nullptr;
+    CoTaskMemFree(mix_format_);
+    mix_format_ = nullptr;
     CloseHandle(buffer_ready_event_);
     buffer_ready_event_ = nullptr;
     return false;
@@ -168,6 +174,8 @@ bool ApplicationLoopbackCapturer::Start(
     capture_client_ = nullptr;
     audio_client_->Release();
     audio_client_ = nullptr;
+    CoTaskMemFree(mix_format_);
+    mix_format_ = nullptr;
     CloseHandle(buffer_ready_event_);
     buffer_ready_event_ = nullptr;
     return false;
@@ -177,12 +185,13 @@ bool ApplicationLoopbackCapturer::Start(
 
   // Cache audio format for FeederThread (mix_format_ lives on this thread).
   cached_sample_rate_  = static_cast<int>(mix_format_->nSamplesPerSec);
-  cached_out_channels_ = 1;
-  // Initialise ring buffer: 500 ms of mono int16 samples.
+  cached_out_channels_ = mix_format_->nChannels > 1 ? 2 : 1;
+  // The ring absorbs normal WASAPI batching without adding the old 500 ms
+  // latency floor. The feeder keeps a tighter adaptive working set below.
   {
     const size_t frames_per_20ms =
         static_cast<size_t>(cached_sample_rate_) / 50;
-    ring_capacity_frames_ = 25 * frames_per_20ms;   // 500 ms headroom
+    ring_capacity_frames_ = 10 * frames_per_20ms;   // 200 ms hard capacity
     ring_buf_.assign(ring_capacity_frames_ * cached_out_channels_, int16_t{0});
     ring_write_frame_ = 0;
     ring_read_frame_  = 0;
@@ -405,8 +414,8 @@ IAudioClient* ApplicationLoopbackCapturer::TryInitApplicationLoopback() {
   });
 
   WaitForSingleObject(done_event, 7000);
-  CloseHandle(done_event);
   worker.join();
+  CloseHandle(done_event);
 
   if (!result.client) return nullptr;
   mix_format_ = result.fmt;
@@ -415,7 +424,7 @@ IAudioClient* ApplicationLoopbackCapturer::TryInitApplicationLoopback() {
 
 // ---------------------------------------------------------------------------
 // CaptureThread
-// Reads WASAPI packets, converts to int16 mono, and writes to the ring
+// Reads WASAPI packets, converts to int16 mono/stereo, and writes to the ring
 // buffer.  It does NOT call CaptureFrame — that is FeederThread's job.
 // This decouples the WASAPI callback timing from the WebRTC audio thread,
 // preventing the AudioSendStream race-checker crash.
@@ -499,7 +508,13 @@ void ApplicationLoopbackCapturer::CaptureThread() {
                 : left;
                 
             // Write to our stereo output buffer
-            conv[f] = static_cast<int16_t>((static_cast<int32_t>(left) + right) / 2);
+            if (out_channels == 1) {
+              conv[f] = static_cast<int16_t>(
+                  (static_cast<int32_t>(left) + right) / 2);
+            } else {
+              conv[f * out_channels] = left;
+              conv[f * out_channels + 1] = right;
+            }
           }
         }
         {
@@ -533,8 +548,8 @@ void ApplicationLoopbackCapturer::CaptureThread() {
 
 // ---------------------------------------------------------------------------
 // FeederThread
-// Fires every 20 ms via a waitable timer (wall-clock paced) and calls
-// CaptureFrame with exactly frames_per_20ms samples from the ring buffer.
+// Fires every 10 ms via a waitable timer (wall-clock paced) and calls
+// CaptureFrame with exactly frames_per_10ms samples from the ring buffer.
 //
 // Jitter-buffer design (motivated by test_capture_wav diagnostics):
 //   WASAPI loopback routinely stalls for 20-80 ms and then delivers multiple
@@ -542,11 +557,9 @@ void ApplicationLoopbackCapturer::CaptureThread() {
 //   ~0-20 ms pre-buffered, so a 72 ms WASAPI stall emptied the ring and caused
 //   ~70 ms of silence to be sent to WebRTC (= audible chop).
 //
-//   Fix: pre-buffer 160 ms on startup before the first CaptureFrame call.
-//   In steady state the ring holds ~160 ms of audio, so a 72 ms WASAPI stall
-//   only drains the ring to ~88 ms -- still above the 50 ms starvation floor,
-//   meaning zero silence is emitted.  A 200 ms hard cap prevents unbounded
-//   latency growth after extended stalls or CPU spikes.
+//   A 100 ms startup target covers normal endpoint batching while keeping
+//   interactive desktop audio latency bounded. A 160 ms hard cap prevents
+//   unbounded growth after stalls or CPU spikes.
 // ---------------------------------------------------------------------------
 void ApplicationLoopbackCapturer::FeederThread() {
   CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -555,19 +568,19 @@ void ApplicationLoopbackCapturer::FeederThread() {
   HANDLE task = AvSetMmThreadCharacteristicsW(L"Audio", &task_index);
 
   const int    sample_rate     = cached_sample_rate_;
-  const size_t out_channels    = 1;
+  const size_t out_channels    = cached_out_channels_;
 
   // 480 samples = one 10 ms frame at 48 kHz.
   const size_t frames_per_10ms = static_cast<size_t>(sample_rate) / 100;
 
   // Jitter-buffer thresholds (all in frames).
-  const size_t target_prebuf  = 16 * frames_per_10ms;  // 160 ms startup fill
-  const size_t max_buffered   = 20 * frames_per_10ms;  // 200 ms hard cap
+  const size_t target_prebuf  = 10 * frames_per_10ms;  // 100 ms startup fill
+  const size_t max_buffered   = 16 * frames_per_10ms;  // 160 ms hard cap
 
   // Stereo ring-read buffer
   std::vector<int16_t> feed(frames_per_10ms * out_channels, int16_t{0});
 
-  // true until the ring has at least 160 ms buffered.
+  // true until the ring has the initial target buffered.
   bool prebuffering = true;
 
   // Feeder diagnostics.
@@ -620,7 +633,7 @@ void ApplicationLoopbackCapturer::FeederThread() {
 
     std::fill(feed.begin(), feed.end(), int16_t{0});
 
-    // Drift compensation: if we have delivered more than one 20-ms packet
+    // Drift compensation: if we have delivered more than one 10-ms packet
     // worth of frames ahead of real-time, skip this tick entirely (do NOT
     // consume from the ring and do NOT call CaptureFrame).  This keeps the
     // RTP send rate at exactly the nominal sample rate.
@@ -655,7 +668,7 @@ void ApplicationLoopbackCapturer::FeederThread() {
         //           << " ms)\n";
       }
 
-      // Startup pre-buffering: wait until the ring has 160 ms of audio.
+      // Startup pre-buffering: wait until the ring has 100 ms of audio.
       if (prebuffering) {
         if (ring_frames_avail_ >= target_prebuf) {
           prebuffering = false;

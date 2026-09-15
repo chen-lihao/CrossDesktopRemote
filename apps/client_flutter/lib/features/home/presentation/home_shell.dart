@@ -123,6 +123,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         initialVideoPolicy: _settings.defaultVideoPolicy,
         initialClipboardMode: _settings.clipboardSyncMode,
         initialTrustedDevices: _trustedDevices,
+        initialSystemAudioSharingEnabled: _settings.systemAudioSharingEnabled,
       );
       _hostAvailability = HostAvailabilityController(
         session: _hostSession!,
@@ -159,6 +160,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _controllerSession.setClipboardMode(_settings.clipboardSyncMode);
     _hostSession?.setIdleVideoPolicy(_settings.defaultVideoPolicy);
     _hostSession?.setClipboardMode(_settings.clipboardSyncMode);
+    unawaited(
+      _hostSession?.setSystemAudioSharingEnabled(
+            _settings.systemAudioSharingEnabled,
+          ) ??
+          Future<void>.value(),
+    );
     final availability = _hostAvailability;
     if (availability != null) {
       unawaited(

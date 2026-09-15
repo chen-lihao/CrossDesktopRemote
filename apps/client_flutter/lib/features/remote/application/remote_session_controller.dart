@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:cross_desktop_remote/core/audio/system_audio_capture_adapter.dart';
 import 'package:cross_desktop_remote/core/clipboard/clipboard_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
 import 'package:cross_desktop_remote/core/files/explicit_file_transfer_platform_adapter.dart';
@@ -189,11 +190,13 @@ class RemoteSessionController extends ChangeNotifier
     ClipboardPlatformAdapter? clipboardPlatformAdapter,
     ExplicitFileTransferPlatformAdapter? fileTransferPlatformAdapter,
     FilePasteTargetPlatformAdapter? filePasteTargetPlatformAdapter,
+    SystemAudioCaptureAdapter? systemAudioCaptureAdapter,
     Stream<DesktopWindowLifecycleEvent>? hostWindowLifecycleEvents,
     RemoteQualityProfile initialQuality = RemoteQualityProfile.automatic,
     RemoteVideoPolicy? initialVideoPolicy,
     ClipboardSyncMode initialClipboardMode = ClipboardSyncMode.bidirectional,
     TrustedDeviceCoordinator? initialTrustedDevices,
+    bool initialSystemAudioSharingEnabled = false,
   }) : _localDeviceId = localDeviceId.trim().toLowerCase(),
        _signaling = signalingClient ?? SignalingClient(),
        _hostPlatform = hostPlatformAdapter ?? createHostPlatformAdapter(),
@@ -208,10 +211,13 @@ class RemoteSessionController extends ChangeNotifier
        _filePasteTargetPlatform =
            filePasteTargetPlatformAdapter ??
            createFilePasteTargetPlatformAdapter(),
+       _systemAudioCapture =
+           systemAudioCaptureAdapter ?? createSystemAudioCaptureAdapter(),
        _selectedQuality = initialQuality,
        _selectedVideoPolicy =
            initialVideoPolicy ?? RemoteVideoPolicy.fromLegacy(initialQuality),
        _clipboardMode = _platformClipboardMode(initialClipboardMode, role),
+       _systemAudioSharingEnabled = initialSystemAudioSharingEnabled,
        _trustedDevices = initialTrustedDevices,
        _clipboardSync = TextClipboardSyncEngine(
          localIsController: role == RemoteRole.controller,
@@ -247,6 +253,7 @@ class RemoteSessionController extends ChangeNotifier
   final ClipboardPlatformAdapter _clipboardPlatform;
   final ExplicitFileTransferPlatformAdapter _fileTransferPlatform;
   final FilePasteTargetPlatformAdapter _filePasteTargetPlatform;
+  final SystemAudioCaptureAdapter _systemAudioCapture;
   final TextClipboardSyncEngine _clipboardSync;
   final ClipboardApplyGate _clipboardApplyGate = ClipboardApplyGate();
   late final ExplicitFileTransferEngine _fileTransfer;
@@ -299,9 +306,13 @@ class RemoteSessionController extends ChangeNotifier
   RTCDataChannel? _fileTransferControlChannel;
   RTCDataChannel? _fileTransferDataChannel;
   MediaStream? _localStream;
+  MediaStream? _localAudioStream;
   RemoteVideoBinding? _remoteVideoBinding;
   RTCRtpSender? _videoSender;
   RTCRtpReceiver? _videoReceiver;
+  RTCRtpSender? _audioSender;
+  RTCRtpReceiver? _audioReceiver;
+  MediaStreamTrack? _remoteAudioTrack;
   List<DesktopCapturerSource> _displaySources = const [];
   List<RemoteDisplay> _displays = const [];
   StreamSubscription<DesktopCapturerSource>? _displayAddedSubscription;
@@ -371,6 +382,8 @@ class RemoteSessionController extends ChangeNotifier
   Set<String> _serverCapabilities = const {};
   bool _remoteSupportsVideoPolicyV2 = false;
   bool _remoteSupportsMultiDisplayStreamV1 = false;
+  bool _remoteSupportsSystemAudioCaptureV1 = false;
+  bool _remoteSupportsAudioPlaybackV1 = false;
   bool _remoteSupportsActiveContentGeometry = false;
   int _remoteActiveContentGeometryVersion = 0;
   bool _remoteSupportsTextClipboardV1 = false;
@@ -424,6 +437,11 @@ class RemoteSessionController extends ChangeNotifier
   RemoteQualityProfile _selectedQuality;
   RemoteVideoPolicy _selectedVideoPolicy;
   ClipboardSyncMode _clipboardMode;
+  RemoteSystemAudioState _systemAudioState = RemoteSystemAudioState.disabled;
+  bool _remoteAudioMuted = false;
+  int _systemAudioGeneration = 0;
+  bool _systemAudioSharingEnabled;
+  Future<void> _systemAudioMutation = Future<void>.value();
   ClipboardSyncMode? _remoteClipboardMode;
   ClipboardOffer? _queuedClipboardOffer;
   late final String _filePasteOwnerId =
@@ -490,6 +508,30 @@ class RemoteSessionController extends ChangeNotifier
   bool get supportsServerInvitationPush => _supportsServerInvitationPush;
   bool get remoteSupportsMultiDisplayStreamV1 =>
       _remoteSupportsMultiDisplayStreamV1;
+  bool get remoteSystemAudioAvailable =>
+      role == RemoteRole.controller && _remoteSupportsSystemAudioCaptureV1;
+  bool get remoteSystemAudioPlaying =>
+      _audioReceiver != null &&
+      _remoteAudioTrack != null &&
+      _systemAudioState == RemoteSystemAudioState.receiving &&
+      !_remoteAudioMuted;
+  RemoteSystemAudioState get systemAudioState => _systemAudioState;
+  bool get remoteAudioMuted => _remoteAudioMuted;
+  bool get systemAudioCaptureSupported =>
+      role == RemoteRole.host && _systemAudioCapture.supported;
+  bool get systemAudioSharingEnabled => _systemAudioSharingEnabled;
+  String get systemAudioStatusLabel => switch (_systemAudioState) {
+    RemoteSystemAudioState.unsupported => '对端不支持系统声音',
+    RemoteSystemAudioState.disabled => '系统声音未共享',
+    RemoteSystemAudioState.requesting => '正在启动系统声音',
+    RemoteSystemAudioState.capturing => '正在采集系统声音',
+    RemoteSystemAudioState.sending => '正在共享系统声音',
+    RemoteSystemAudioState.receiving =>
+      _remoteAudioMuted ? '远程声音已静音' : '正在播放远程声音',
+    RemoteSystemAudioState.suspended => '系统声音已暂停',
+    RemoteSystemAudioState.recovering => '正在恢复系统声音',
+    RemoteSystemAudioState.failed => '系统声音不可用',
+  };
   bool get screenCaptureGranted => _screenCaptureGranted;
   bool? get accessibilityGranted => _accessibilityGranted;
   RemoteQualityProfile get selectedQuality => _selectedQuality;
@@ -1198,6 +1240,9 @@ class RemoteSessionController extends ChangeNotifier
         clipboardSupported: _clipboardPlatform.supported,
         explicitFileTransferSupported: localExplicitFileTransferSupported,
         fileClipboardSupported: fileClipboardSupported,
+        systemAudioCaptureSupported:
+            role == RemoteRole.host && _systemAudioCapture.supported,
+        remoteAudioPlaybackSupported: role == RemoteRole.controller,
         trustedDeviceAuthenticationSupported:
             _trustedDevices?.supported == true,
       );
@@ -2099,6 +2144,25 @@ class RemoteSessionController extends ChangeNotifier
     selectVideoPolicy(RemoteVideoPolicy.fromLegacy(profile));
   }
 
+  void setRemoteAudioMuted(bool muted) {
+    if (role != RemoteRole.controller || !remoteSystemAudioAvailable) return;
+    _remoteAudioMuted = muted;
+    final track = _remoteAudioTrack;
+    if (track != null) track.enabled = !muted;
+    notifyListeners();
+  }
+
+  void toggleRemoteAudioMuted() => setRemoteAudioMuted(!_remoteAudioMuted);
+
+  Future<void> setSystemAudioSharingEnabled(bool enabled) async {
+    if (role != RemoteRole.host || _systemAudioSharingEnabled == enabled) {
+      return;
+    }
+    _systemAudioSharingEnabled = enabled;
+    notifyListeners();
+    await _serializeSystemAudioMutation(_reconcileHostSystemAudio);
+  }
+
   void selectVideoPolicy(RemoteVideoPolicy policy) {
     if (role != RemoteRole.controller) {
       return;
@@ -2310,11 +2374,19 @@ class RemoteSessionController extends ChangeNotifier
       _signaling.send({'type': 'candidate', ...candidate.toMap()});
     };
     peerConnection.onTrack = (event) {
-      if (!isCurrentPeerConnection() ||
-          event.track.kind != 'video' ||
-          event.streams.isEmpty) {
+      if (!isCurrentPeerConnection()) {
         return;
       }
+      if (event.track.kind == 'audio') {
+        if (role != RemoteRole.controller) return;
+        _audioReceiver = event.receiver;
+        _remoteAudioTrack = event.track;
+        event.track.enabled = !_remoteAudioMuted;
+        _systemAudioState = RemoteSystemAudioState.receiving;
+        notifyListeners();
+        return;
+      }
+      if (event.track.kind != 'video' || event.streams.isEmpty) return;
       final trackId = event.track.id?.trim();
       if (trackId == null || trackId.isEmpty) {
         _fail('远端视频轨道缺少有效标识，无法建立显示绑定');
@@ -2351,6 +2423,20 @@ class RemoteSessionController extends ChangeNotifier
           break;
       }
     };
+
+    final audioTransceiver = await peerConnection.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+      init: RTCRtpTransceiverInit(
+        direction: role == RemoteRole.host
+            ? TransceiverDirection.SendOnly
+            : TransceiverDirection.RecvOnly,
+      ),
+    );
+    if (role == RemoteRole.host) {
+      _audioSender = audioTransceiver.sender;
+    } else {
+      _audioReceiver = audioTransceiver.receiver;
+    }
 
     if (role == RemoteRole.host) {
       final channel = await peerConnection.createDataChannel(
@@ -2423,6 +2509,11 @@ class RemoteSessionController extends ChangeNotifier
             _connectionRecoveryTimer?.isActive == true);
     _cancelConnectionRecovery();
     _connectionEstablished = true;
+    if (_remoteAudioTrack != null) {
+      _systemAudioState = RemoteSystemAudioState.receiving;
+    } else if (_localAudioStream != null) {
+      _systemAudioState = RemoteSystemAudioState.sending;
+    }
     _startMediaStatsSampling();
     _setState(RemoteSessionState.streaming, recovered ? '远程会话已恢复' : '远程会话已连接');
     _emitNotice(
@@ -2447,6 +2538,9 @@ class RemoteSessionController extends ChangeNotifier
 
   void _startConnectionRecovery(RTCPeerConnection peerConnection) {
     if (_connectionRecoveryTimer?.isActive == true) return;
+    if (_remoteAudioTrack != null || _localAudioStream != null) {
+      _systemAudioState = RemoteSystemAudioState.recovering;
+    }
     _setState(RemoteSessionState.reconnecting, '连接暂时中断，正在自动恢复');
     _emitNotice('网络连接出现波动，正在自动恢复', level: RemoteNoticeLevel.warning);
     _connectionRecoveryTimer = Timer(const Duration(seconds: 8), () {
@@ -4153,6 +4247,13 @@ class RemoteSessionController extends ChangeNotifier
         );
         _screenCaptureGranted = wireBool(message['screenCaptureGranted']);
         _accessibilityGranted = wireBool(message['accessibilityGranted']);
+        final systemAudioState = message['systemAudioState'] as String?;
+        if (_remoteAudioTrack == null && systemAudioState != null) {
+          _systemAudioState = RemoteSystemAudioState.values.firstWhere(
+            (value) => value.name == systemAudioState,
+            orElse: () => RemoteSystemAudioState.disabled,
+          );
+        }
         if (_authenticationMode == RemoteAuthenticationMode.trustedDevice &&
             _trustedSessionAuthorized) {
           final remoteAuthorized = wireBool(
@@ -4797,6 +4898,7 @@ class RemoteSessionController extends ChangeNotifier
       'screenCaptureGranted': _screenCaptureGranted,
       'accessibilityGranted': _accessibilityGranted == true,
       'inputReady': _accessibilityGranted == true,
+      'systemAudioState': _systemAudioState.name,
       'trustedSessionAuthorized': _trustedSessionAuthorized,
       'effectivePermissionBits': trustedPermissionBits(_trustedPermissions),
     });
@@ -5293,6 +5395,16 @@ class RemoteSessionController extends ChangeNotifier
         _remoteSupportsMultiDisplayStreamV1 = peerCapabilities.contains(
           multiDisplayStreamV1Capability,
         );
+        _remoteSupportsSystemAudioCaptureV1 = peerCapabilities.contains(
+          systemAudioCaptureV1Capability,
+        );
+        _remoteSupportsAudioPlaybackV1 = peerCapabilities.contains(
+          remoteAudioPlaybackV1Capability,
+        );
+        if (role == RemoteRole.controller &&
+            !_remoteSupportsSystemAudioCaptureV1) {
+          _systemAudioState = RemoteSystemAudioState.unsupported;
+        }
         _remoteSupportsTrustedDeviceAuthentication =
             supportsTrustedDeviceAuthentication(peerCapabilities);
         _remoteSupportsTransactionalTrustedPairing =
@@ -6612,6 +6724,7 @@ class RemoteSessionController extends ChangeNotifier
     for (final track in stream.getVideoTracks()) {
       _videoSender = await _peerConnection!.addTrack(track, stream);
     }
+    await _serializeSystemAudioMutation(_startHostSystemAudio);
     await _applyVideoPolicy(_selectedVideoPolicy);
     unawaited(_refreshOutboundVideoDiagnostics());
     _subscribeToDisplayChanges();
@@ -6619,6 +6732,136 @@ class RemoteSessionController extends ChangeNotifier
     _publishDisplayList();
     unawaited(_publishColorDiagnostics());
     notifyListeners();
+  }
+
+  Future<void> _startHostSystemAudio() async {
+    if (!_systemAudioSharingEnabled) {
+      _systemAudioState = RemoteSystemAudioState.disabled;
+      notifyListeners();
+      return;
+    }
+    if (_localAudioStream != null) {
+      _systemAudioState = RemoteSystemAudioState.sending;
+      notifyListeners();
+      return;
+    }
+    final generation = ++_systemAudioGeneration;
+    final authorized =
+        _authenticationMode != RemoteAuthenticationMode.trustedDevice ||
+        _trustedPermissions.contains(TrustedPermission.listenSystemAudio);
+    if (!_systemAudioCapture.supported || !_remoteSupportsAudioPlaybackV1) {
+      _systemAudioState = RemoteSystemAudioState.unsupported;
+      _publishHostState();
+      notifyListeners();
+      return;
+    }
+    if (!authorized) {
+      _systemAudioState = RemoteSystemAudioState.disabled;
+      _publishHostState();
+      notifyListeners();
+      return;
+    }
+    final sender = _audioSender;
+    if (sender == null) {
+      _systemAudioState = RemoteSystemAudioState.failed;
+      _publishHostState();
+      notifyListeners();
+      return;
+    }
+    _systemAudioState = RemoteSystemAudioState.requesting;
+    notifyListeners();
+    try {
+      final stream = await _systemAudioCapture.start();
+      if (_closing || generation != _systemAudioGeneration) {
+        await _systemAudioCapture.stop();
+        await stream.dispose();
+        return;
+      }
+      final tracks = stream.getAudioTracks();
+      if (tracks.length != 1) {
+        await _systemAudioCapture.stop();
+        await stream.dispose();
+        throw StateError('系统声音采集未返回唯一音频轨道');
+      }
+      _localAudioStream = stream;
+      _systemAudioState = RemoteSystemAudioState.capturing;
+      await sender.replaceTrack(tracks.single);
+      _systemAudioState = RemoteSystemAudioState.sending;
+      _publishHostState();
+      notifyListeners();
+    } catch (error) {
+      if (generation != _systemAudioGeneration) return;
+      await _stopHostSystemAudio();
+      _systemAudioState = RemoteSystemAudioState.failed;
+      _emitNotice('系统声音共享不可用，视频会话继续：$error', level: RemoteNoticeLevel.warning);
+      _publishHostState();
+      notifyListeners();
+    }
+  }
+
+  Future<void> _reconcileHostSystemAudio() async {
+    if (role != RemoteRole.host) return;
+    if (!_systemAudioSharingEnabled) {
+      await _stopHostSystemAudio();
+      return;
+    }
+    if (_localStream == null) {
+      _systemAudioState = _systemAudioCapture.supported
+          ? RemoteSystemAudioState.disabled
+          : RemoteSystemAudioState.unsupported;
+      notifyListeners();
+      return;
+    }
+    await _startHostSystemAudio();
+  }
+
+  Future<void> _serializeSystemAudioMutation(
+    Future<void> Function() operation,
+  ) {
+    final previous = _systemAudioMutation;
+    final completion = Completer<void>();
+    _systemAudioMutation = completion.future;
+    return (() async {
+      try {
+        await previous;
+        await operation();
+      } finally {
+        completion.complete();
+      }
+    })();
+  }
+
+  Future<void> _stopHostSystemAudio() async {
+    _systemAudioGeneration += 1;
+    try {
+      await _audioSender?.replaceTrack(null);
+    } catch (_) {
+      // The peer connection may already be closed during failure cleanup.
+    }
+    try {
+      await _systemAudioCapture.stop();
+    } catch (_) {
+      // Native capture may never have started on unsupported peers.
+    }
+    final stream = _localAudioStream;
+    _localAudioStream = null;
+    if (stream != null) {
+      for (final track in stream.getAudioTracks()) {
+        try {
+          await track.stop();
+        } catch (_) {}
+      }
+      try {
+        await stream.dispose();
+      } catch (_) {}
+    }
+    if (role == RemoteRole.host) {
+      _systemAudioState = _systemAudioCapture.supported
+          ? RemoteSystemAudioState.disabled
+          : RemoteSystemAudioState.unsupported;
+      _publishHostState();
+      notifyListeners();
+    }
   }
 
   Future<void> _refreshOutboundVideoDiagnostics() async {
@@ -7597,13 +7840,19 @@ class RemoteSessionController extends ChangeNotifier
         !identical(displayTransaction.previousStream, _localStream)) {
       await _disposeMediaStream(displayTransaction.previousStream);
     }
+    if (role == RemoteRole.host) {
+      await _serializeSystemAudioMutation(_stopHostSystemAudio);
+    }
     for (final track in _localStream?.getTracks() ?? <MediaStreamTrack>[]) {
-      track.stop();
+      await track.stop();
     }
     await _localStream?.dispose();
     _localStream = null;
     _videoSender = null;
     _videoReceiver = null;
+    _audioSender = null;
+    _audioReceiver = null;
+    _remoteAudioTrack = null;
     await _peerConnection?.close();
     await _peerConnection?.dispose();
     _peerConnection = null;
@@ -7630,6 +7879,8 @@ class RemoteSessionController extends ChangeNotifier
     _remoteSupportsScopedInputResetV1 = false;
     _remoteSupportsVideoPolicyV2 = false;
     _remoteSupportsMultiDisplayStreamV1 = false;
+    _remoteSupportsSystemAudioCaptureV1 = false;
+    _remoteSupportsAudioPlaybackV1 = false;
     _remoteSupportsTrustedDeviceAuthentication = false;
     _remoteSupportsTransactionalTrustedPairing = false;
     _remoteSupportsHostOwnedTrustedPolicy = false;
@@ -7723,6 +7974,10 @@ class RemoteSessionController extends ChangeNotifier
     _videoGeometryState = RemoteVideoGeometryState.stable;
     _captureTargetLongEdge = null;
     _captureTargetSourceId = null;
+    _remoteAudioMuted = false;
+    _systemAudioState = _systemAudioCapture.supported && role == RemoteRole.host
+        ? RemoteSystemAudioState.disabled
+        : RemoteSystemAudioState.unsupported;
     _updateClipboardStatus();
     _closing = false;
   }

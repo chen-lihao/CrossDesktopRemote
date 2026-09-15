@@ -73,6 +73,7 @@ pub enum SessionPermission {
     RecordSession = 6,
     UploadFilesToHost = 7,
     DownloadFilesFromHost = 8,
+    ListenSystemAudio = 9,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -81,7 +82,7 @@ pub struct PermissionSet(u64);
 impl PermissionSet {
     #[must_use]
     pub const fn from_bits(bits: u64) -> Self {
-        Self(bits & 0x1ff)
+        Self(bits & 0x3ff)
     }
 
     #[must_use]
@@ -1567,6 +1568,15 @@ mod tests {
             PermissionSet::default().grant(SessionPermission::ViewScreen)
         );
         assert!(!requested.is_subset_of(allowed));
+    }
+
+    #[test]
+    fn system_audio_permission_is_explicit_and_preserved() {
+        let audio = PermissionSet::default().grant(SessionPermission::ListenSystemAudio);
+        assert!(audio.contains(SessionPermission::ListenSystemAudio));
+        assert!(!audio.contains(SessionPermission::ViewScreen));
+        assert_eq!(PermissionSet::from_bits(audio.bits()), audio);
+        assert_eq!(PermissionSet::from_bits(1_u64 << 63).bits(), 0);
     }
 
     #[test]

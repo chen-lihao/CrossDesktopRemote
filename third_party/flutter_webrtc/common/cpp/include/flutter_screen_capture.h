@@ -19,8 +19,17 @@ class FlutterScreenCapture : public MediaListObserver,
  public:
   FlutterScreenCapture(FlutterWebRTCBase* base);
 
+  ~FlutterScreenCapture() override;
+
   void GetDisplayMedia(const EncodableMap& constraints,
                        std::unique_ptr<MethodResultProxy> result);
+
+  // Starts a session-scoped system-audio capture which is deliberately not
+  // owned by a desktop video capturer. Display replacement must never stop
+  // this source.
+  void GetSystemAudio(std::unique_ptr<MethodResultProxy> result);
+
+  void StopSystemAudio(std::unique_ptr<MethodResultProxy> result);
 
   void GetDesktopSources(const EncodableList& types,
                          std::unique_ptr<MethodResultProxy> result);
@@ -53,6 +62,7 @@ class FlutterScreenCapture : public MediaListObserver,
 
  private:
   bool BuildDesktopSourcesList(const EncodableList& types, bool force_reload);
+  void StopLoopbackCapture();
 
  private:
   FlutterWebRTCBase* base_;
@@ -64,6 +74,7 @@ class FlutterScreenCapture : public MediaListObserver,
   std::unique_ptr<LoopbackCapturer> loopback_capturer_;
   // The custom audio source fed by the loopback capturer.
   scoped_refptr<RTCAudioSource> loopback_audio_source_;
+  bool loopback_is_session_scoped_ = false;
 };
 
 }  // namespace flutter_webrtc_plugin

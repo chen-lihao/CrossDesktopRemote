@@ -81,6 +81,8 @@ enum TrustedPermission {
   recordSession,
   uploadFilesToHost,
   downloadFilesFromHost,
+  // Append-only: persisted and signed permission sets use enum bit positions.
+  listenSystemAudio,
 }
 
 int trustedPermissionBits(Iterable<TrustedPermission> permissions) =>

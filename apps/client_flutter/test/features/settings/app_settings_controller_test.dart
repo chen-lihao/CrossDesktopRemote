@@ -11,6 +11,7 @@ void main() {
       final controller = AppSettingsController();
 
       await controller.load();
+      expect(controller.systemAudioSharingEnabled, isFalse);
       await controller.setDefaultQuality(RemoteQualityProfile.ultra);
       await controller.setDefaultVideoPolicy(
         const RemoteVideoPolicy(
@@ -29,6 +30,7 @@ void main() {
       await controller.setDisplayPresentationMode(
         RemoteDisplayPresentationMode.separateWindows,
       );
+      await controller.setSystemAudioSharingEnabled(true);
 
       expect(controller.loaded, isTrue);
       expect(controller.defaultQuality, RemoteQualityProfile.ultra60);
@@ -54,6 +56,7 @@ void main() {
         controller.displayPresentationMode,
         RemoteDisplayPresentationMode.separateWindows,
       );
+      expect(controller.systemAudioSharingEnabled, isTrue);
     },
   );
 }

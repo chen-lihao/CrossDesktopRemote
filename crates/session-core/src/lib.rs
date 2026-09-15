@@ -15,6 +15,7 @@ pub const FEATURE_TRUST_LEASE_RENEWAL_V1: u64 = 1 << 7;
 pub const FEATURE_DECOUPLED_TRUST_POLICY_V1: u64 = 1 << 8;
 pub const FEATURE_HOST_SESSION_AUTHORIZATION_V1: u64 = 1 << 9;
 pub const FEATURE_DIRECTIONAL_FILE_PERMISSIONS_V1: u64 = 1 << 10;
+pub const FEATURE_SYSTEM_AUDIO_V1: u64 = 1 << 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreBuildInfo {
@@ -37,7 +38,8 @@ pub const fn core_build_info() -> CoreBuildInfo {
             | FEATURE_TRUST_LEASE_RENEWAL_V1
             | FEATURE_DECOUPLED_TRUST_POLICY_V1
             | FEATURE_HOST_SESSION_AUTHORIZATION_V1
-            | FEATURE_DIRECTIONAL_FILE_PERMISSIONS_V1,
+            | FEATURE_DIRECTIONAL_FILE_PERMISSIONS_V1
+            | FEATURE_SYSTEM_AUDIO_V1,
     }
 }
 
@@ -70,6 +72,15 @@ pub struct NegotiatedDataCapabilities {
     pub clipboard: NegotiatedClipboardCapabilities,
     pub transfer: NegotiatedTransferCapabilities,
     pub trusted_device: NegotiatedTrustedDeviceCapabilities,
+    pub audio: NegotiatedAudioCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NegotiatedAudioCapabilities {
+    pub can_send_system_audio: bool,
+    pub can_receive_system_audio: bool,
+    pub stereo: bool,
+    pub sample_rates: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -95,10 +106,42 @@ pub fn negotiate_data_capabilities(
     NegotiatedDataCapabilities {
         legacy_peer: remote.clipboard.is_none()
             && remote.transfer.is_none()
-            && remote.trusted_device.is_none(),
+            && remote.trusted_device.is_none()
+            && remote.audio.is_none(),
         clipboard: negotiate_clipboard(local, remote),
         transfer: negotiate_transfer(local, remote),
         trusted_device: negotiate_trusted_device(local, remote),
+        audio: negotiate_audio(local, remote),
+    }
+}
+
+fn negotiate_audio(
+    local: &ClientCapabilities,
+    remote: &ClientCapabilities,
+) -> NegotiatedAudioCapabilities {
+    let (Some(local), Some(remote)) = (&local.audio, &remote.audio) else {
+        return NegotiatedAudioCapabilities::default();
+    };
+    let remote_rates: BTreeSet<_> = remote.sample_rates.iter().copied().collect();
+    let mut sample_rates: Vec<_> = local
+        .sample_rates
+        .iter()
+        .copied()
+        .filter(|rate| *rate > 0 && remote_rates.contains(rate))
+        .collect();
+    sample_rates.sort_unstable();
+    sample_rates.dedup();
+    let can_send_system_audio =
+        local.supports_system_capture && remote.supports_playback && !sample_rates.is_empty();
+    let can_receive_system_audio =
+        local.supports_playback && remote.supports_system_capture && !sample_rates.is_empty();
+    NegotiatedAudioCapabilities {
+        can_send_system_audio,
+        can_receive_system_audio,
+        stereo: (can_send_system_audio || can_receive_system_audio)
+            && local.supports_stereo
+            && remote.supports_stereo,
+        sample_rates,
     }
 }
 
@@ -267,7 +310,9 @@ fn negotiate_version(
 
 #[cfg(test)]
 mod tests {
-    use protocol::v1::{ClipboardCapabilities, TransferCapabilities, TrustedDeviceCapabilities};
+    use protocol::v1::{
+        AudioCapabilities, ClipboardCapabilities, TransferCapabilities, TrustedDeviceCapabilities,
+    };
 
     use super::*;
 
@@ -294,6 +339,7 @@ mod tests {
             info.feature_flags & FEATURE_DIRECTIONAL_FILE_PERMISSIONS_V1,
             0
         );
+        assert_ne!(info.feature_flags & FEATURE_SYSTEM_AUDIO_V1, 0);
     }
 
     #[test]
@@ -304,6 +350,8 @@ mod tests {
         assert!(!negotiated.clipboard.enabled);
         assert!(!negotiated.transfer.enabled);
         assert!(!negotiated.trusted_device.enabled);
+        assert!(!negotiated.audio.can_send_system_audio);
+        assert!(!negotiated.audio.can_receive_system_audio);
     }
 
     #[test]
@@ -339,6 +387,10 @@ mod tests {
         assert!(negotiated.trusted_device.decoupled_trust_policy);
         assert!(negotiated.trusted_device.host_session_authorization);
         assert!(negotiated.trusted_device.directional_file_permissions);
+        assert!(negotiated.audio.can_send_system_audio);
+        assert!(negotiated.audio.can_receive_system_audio);
+        assert!(negotiated.audio.stereo);
+        assert_eq!(negotiated.audio.sample_rates, vec![48_000]);
     }
 
     #[test]
@@ -420,6 +472,12 @@ mod tests {
                 supports_host_session_authorization: true,
                 supports_directional_file_permissions: true,
                 supports_trusted_auth_suite_v2: true,
+            }),
+            audio: Some(AudioCapabilities {
+                supports_system_capture: true,
+                supports_playback: true,
+                supports_stereo: true,
+                sample_rates: vec![48_000],
             }),
             ..Default::default()
         }
