@@ -33,6 +33,7 @@ class HostPermissionState {
     required this.screenCaptureGranted,
     this.limitation,
     this.screenCaptureLimitation,
+    this.inputAdvisory,
   });
 
   const HostPermissionState.unavailable({String? limitation})
@@ -47,6 +48,7 @@ class HostPermissionState {
   final bool screenCaptureGranted;
   final String? limitation;
   final String? screenCaptureLimitation;
+  final String? inputAdvisory;
 }
 
 @immutable

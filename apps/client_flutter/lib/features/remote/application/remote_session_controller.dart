@@ -36,6 +36,7 @@ import 'package:cross_desktop_remote/features/remote/application/file_clipboard_
 import 'package:cross_desktop_remote/features/remote/application/text_clipboard_sync_engine.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 enum RemoteSessionState {
@@ -367,7 +368,7 @@ class RemoteSessionController extends ChangeNotifier
   HostInvitationState _hostInvitationState = HostInvitationState.unavailable;
   bool _supportsInvitationRotation = false;
   bool _supportsServerInvitationPush = false;
-  bool _supportsCompleteCapabilityManifest = false;
+  Set<String> _serverCapabilities = const {};
   bool _remoteSupportsVideoPolicyV2 = false;
   bool _remoteSupportsMultiDisplayStreamV1 = false;
   bool _remoteSupportsActiveContentGeometry = false;
@@ -380,7 +381,6 @@ class RemoteSessionController extends ChangeNotifier
   bool _remoteSupportsTrustedDeviceAuthentication = false;
   bool _remoteSupportsTransactionalTrustedPairing = false;
   bool _remoteSupportsHostOwnedTrustedPolicy = false;
-  bool _remoteSupportsTrustedAuthSuiteV2 = false;
   Set<String> _localCapabilities = const {};
   bool _remoteClipboardSupportsApplied = false;
   bool _explicitFileTransferTransportAttached = false;
@@ -2056,7 +2056,14 @@ class RemoteSessionController extends ChangeNotifier
       return;
     }
     _lastControlUnavailableNotice = now;
-    final message = _displaySwitchPending
+    final message =
+        _authenticationMode == RemoteAuthenticationMode.trustedDevice &&
+            !_trustedSessionAuthorized
+        ? '可信会话尚未完成双向认证'
+        : _authenticationMode == RemoteAuthenticationMode.trustedDevice &&
+              !_trustedPermissions.contains(TrustedPermission.controlInput)
+        ? '被控端未授权当前会话控制鼠标和键盘'
+        : _displaySwitchPending
         ? '正在切换显示器，远程输入已暂时暂停'
         : _controlChannel?.state != RTCDataChannelState.RTCDataChannelOpen
         ? '远程控制通道尚未就绪'
@@ -3261,6 +3268,7 @@ class RemoteSessionController extends ChangeNotifier
           ? const {TrustedPermission.viewScreen}
           : _pairingPermissions,
       mode: TrustedSecuritySessionMode.pairing,
+      negotiation: TrustedSessionNegotiationContext.legacy(),
     );
     _pairingInputSuspended = true;
     await _releaseHostInputState();
@@ -3322,6 +3330,7 @@ class RemoteSessionController extends ChangeNotifier
           ? const {TrustedPermission.viewScreen}
           : _pairingPermissions,
       mode: TrustedSecuritySessionMode.pairing,
+      negotiation: TrustedSessionNegotiationContext.legacy(),
     );
     _updateTrustedPairing(
       peerName: _trustedPeerName(message),
@@ -3905,8 +3914,24 @@ class RemoteSessionController extends ChangeNotifier
       return Future<void>.value();
     }
     if (_authenticationMode == RemoteAuthenticationMode.trustedDevice) {
-      if (!_trustedSessionAuthorized) return Future<void>.value();
+      if (!_trustedSessionAuthorized) {
+        if (_isRemoteInputMessage(message)) {
+          _sendControl({
+            'type': 'input-error',
+            'version': 2,
+            'code': 'TRUSTED_SESSION_NOT_AUTHORIZED',
+            'message': '可信会话尚未完成双向认证',
+          });
+        }
+        return Future<void>.value();
+      }
       if (_isRemoteInputMessage(message) && !_trustedInputAllowed) {
+        _sendControl({
+          'type': 'input-error',
+          'version': 2,
+          'code': 'INPUT_POLICY_DENIED',
+          'message': '被控端未授权当前会话控制鼠标和键盘',
+        });
         return Future<void>.value();
       }
     }
@@ -4128,6 +4153,20 @@ class RemoteSessionController extends ChangeNotifier
         );
         _screenCaptureGranted = wireBool(message['screenCaptureGranted']);
         _accessibilityGranted = wireBool(message['accessibilityGranted']);
+        if (_authenticationMode == RemoteAuthenticationMode.trustedDevice &&
+            _trustedSessionAuthorized) {
+          final remoteAuthorized = wireBool(
+            message['trustedSessionAuthorized'],
+          );
+          final remotePermissionBits =
+              (message['effectivePermissionBits'] as num?)?.toInt();
+          if (!remoteAuthorized ||
+              remotePermissionBits !=
+                  trustedPermissionBits(_trustedPermissions)) {
+            _accessibilityGranted = false;
+            _controlError = '可信会话两端的有效权限不一致，已禁用远程输入';
+          }
+        }
         if (_accessibilityGranted == true) {
           _controlError = null;
         }
@@ -4758,6 +4797,8 @@ class RemoteSessionController extends ChangeNotifier
       'screenCaptureGranted': _screenCaptureGranted,
       'accessibilityGranted': _accessibilityGranted == true,
       'inputReady': _accessibilityGranted == true,
+      'trustedSessionAuthorized': _trustedSessionAuthorized,
+      'effectivePermissionBits': trustedPermissionBits(_trustedPermissions),
     });
   }
 
@@ -5143,8 +5184,11 @@ class RemoteSessionController extends ChangeNotifier
   Future<void> _reportInputFailure(Object error) async {
     final permission = await _hostPlatform.checkPermissions();
     _applyHostPermissionState(permission);
+    final nativeMessage = error is PlatformException
+        ? error.message
+        : error.toString();
     _controlError = _accessibilityGranted == true
-        ? '本机输入注入失败'
+        ? '本机输入注入失败${nativeMessage == null || nativeMessage.isEmpty ? '' : '：$nativeMessage'}'
         : permission.limitation ?? '本机尚未允许远程鼠标和键盘输入';
     _sendControl({
       'type': 'input-error',
@@ -5166,9 +5210,7 @@ class RemoteSessionController extends ChangeNotifier
             (message['capabilities'] as List<dynamic>? ?? const [])
                 .whereType<String>()
                 .toSet();
-        _supportsCompleteCapabilityManifest = serverCapabilities.contains(
-          completeCapabilityManifestV1Capability,
-        );
+        _serverCapabilities = Set.unmodifiable(serverCapabilities);
         if (role == RemoteRole.host) {
           _supportsInvitationRotation = serverCapabilities.contains(
             'invitation-rotation',
@@ -5258,13 +5300,18 @@ class RemoteSessionController extends ChangeNotifier
         _remoteSupportsHostOwnedTrustedPolicy = supportsHostOwnedTrustedPolicy(
           peerCapabilities,
         );
-        _remoteSupportsTrustedAuthSuiteV2 = supportsTrustedAuthSuiteV2(
-          peerCapabilities,
-        );
         final mutuallySupportsTrustedAuthSuiteV2 =
-            _supportsCompleteCapabilityManifest &&
-            supportsTrustedAuthSuiteV2(_localCapabilities) &&
-            _remoteSupportsTrustedAuthSuiteV2;
+            supportsCompleteTrustedRouteV2(
+              serverCapabilities: _serverCapabilities,
+              localCapabilities: _localCapabilities,
+              remoteCapabilities: peerCapabilities,
+            );
+        if (trustedRoute && !mutuallySupportsTrustedAuthSuiteV2) {
+          throw const TrustedAuthenticationException(
+            TrustedAuthenticationFailure.unsupported,
+            '当前信令服务或对端不支持可信认证 v2，请更新并重启信令服务，或改用动态连接码',
+          );
+        }
         _trustedAuthSuiteVersion =
             trustedRoute && mutuallySupportsTrustedAuthSuiteV2
             ? trustedAuthSuiteV2
@@ -5442,6 +5489,10 @@ class RemoteSessionController extends ChangeNotifier
       peerRootFingerprint: record.peerIdentity.rootFingerprint,
       requestedPermissions: _trustedPermissions,
       mode: TrustedSecuritySessionMode.trustedAuthentication,
+      negotiation: TrustedSessionNegotiationContext(
+        authSuiteVersion: _trustedAuthSuiteVersion,
+        capabilitySha256: _trustedAuthCapabilitySha256!,
+      ),
     );
     _signaling.send({
       'type': 'trusted-auth-start',
@@ -5534,6 +5585,10 @@ class RemoteSessionController extends ChangeNotifier
       peerRootFingerprint: controller.rootFingerprint,
       requestedPermissions: permissions,
       mode: TrustedSecuritySessionMode.trustedAuthentication,
+      negotiation: TrustedSessionNegotiationContext(
+        authSuiteVersion: _trustedAuthSuiteVersion,
+        capabilitySha256: _trustedAuthCapabilitySha256!,
+      ),
     );
     await coordinator.validatePresentedGrant(
       grant: grant,
@@ -5925,7 +5980,10 @@ class RemoteSessionController extends ChangeNotifier
   }) {
     final controllerNonce = _trustedControllerNonce;
     final hostNonce = _trustedHostNonce;
-    if (controllerNonce == null || hostNonce == null) {
+    final capabilitySha256 = _trustedAuthCapabilitySha256;
+    if (controllerNonce == null ||
+        hostNonce == null ||
+        capabilitySha256 == null) {
       throw StateError('可信会话随机数尚未建立');
     }
     return {
@@ -5935,10 +5993,7 @@ class RemoteSessionController extends ChangeNotifier
       'hostNonce': base64Encode(hostNonce),
       'permissionBits': trustedPermissionBits(_trustedPermissions),
       'authSuiteVersion': _trustedAuthSuiteVersion,
-      'capabilitySha256': base64Encode(
-        _trustedAuthCapabilitySha256 ??
-            trustedAuthSuiteCapabilityHash(_trustedAuthSuiteVersion),
-      ),
+      'capabilitySha256': base64Encode(capabilitySha256),
       ...additionalFields,
     };
   }
@@ -6247,7 +6302,14 @@ class RemoteSessionController extends ChangeNotifier
     final remote = _trustedRemoteIdentity;
     final controllerNonce = _trustedControllerNonce;
     final hostNonce = _trustedHostNonce;
-    if (remote == null || controllerNonce == null || hostNonce == null) {
+    final capabilitySha256 = _trustedAuthCapabilitySha256;
+    final authorizationSha256 = _trustedAuthorizationSha256;
+    if (remote == null ||
+        controllerNonce == null ||
+        hostNonce == null ||
+        capabilitySha256 == null ||
+        (_trustedAuthSuiteVersion == trustedAuthSuiteV2 &&
+            authorizationSha256 == null)) {
       throw StateError('可信媒体绑定上下文不完整');
     }
     final controller = role == RemoteRole.controller ? local : remote;
@@ -6263,8 +6325,8 @@ class RemoteSessionController extends ChangeNotifier
       answerSdp: answerSdp,
       expiresAt: expiresAt,
       authSuiteVersion: _trustedAuthSuiteVersion,
-      authorizationSha256: _trustedAuthorizationSha256 ?? Uint8List(32),
-      capabilitySha256: _trustedAuthCapabilitySha256 ?? Uint8List(32),
+      authorizationSha256: authorizationSha256 ?? Uint8List(32),
+      capabilitySha256: capabilitySha256,
     );
   }
 
@@ -7571,7 +7633,6 @@ class RemoteSessionController extends ChangeNotifier
     _remoteSupportsTrustedDeviceAuthentication = false;
     _remoteSupportsTransactionalTrustedPairing = false;
     _remoteSupportsHostOwnedTrustedPolicy = false;
-    _remoteSupportsTrustedAuthSuiteV2 = false;
     _localCapabilities = const {};
     _remoteClipboardSupportsApplied = false;
     _remoteClipboardMode = null;
@@ -7592,7 +7653,7 @@ class RemoteSessionController extends ChangeNotifier
     _hostInvitationState = HostInvitationState.unavailable;
     _supportsInvitationRotation = false;
     _supportsServerInvitationPush = false;
-    _supportsCompleteCapabilityManifest = false;
+    _serverCapabilities = const {};
     _decoderOutputColorDiagnostics = null;
     _renderOutputColorDiagnostics = null;
     _receiverColorConversion = null;

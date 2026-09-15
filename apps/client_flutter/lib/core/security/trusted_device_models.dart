@@ -21,6 +21,36 @@ const trustedMaximumSignatureBytes = 80;
 const trustedAuthSuiteLegacy = 1;
 const trustedAuthSuiteV2 = 2;
 
+@immutable
+class TrustedSessionNegotiationContext {
+  TrustedSessionNegotiationContext({
+    required this.authSuiteVersion,
+    required Uint8List capabilitySha256,
+  }) : capabilitySha256 = Uint8List.fromList(capabilitySha256) {
+    validate();
+  }
+
+  factory TrustedSessionNegotiationContext.legacy() =>
+      TrustedSessionNegotiationContext(
+        authSuiteVersion: trustedAuthSuiteLegacy,
+        capabilitySha256: Uint8List(32),
+      );
+
+  final int authSuiteVersion;
+  final Uint8List capabilitySha256;
+
+  void validate() {
+    _requireLength(capabilitySha256, 32, 'capabilitySha256');
+    final empty = capabilitySha256.every((byte) => byte == 0);
+    if ((authSuiteVersion == trustedAuthSuiteLegacy && !empty) ||
+        (authSuiteVersion == trustedAuthSuiteV2 && empty) ||
+        (authSuiteVersion != trustedAuthSuiteLegacy &&
+            authSuiteVersion != trustedAuthSuiteV2)) {
+      throw const FormatException('Invalid trusted negotiation context');
+    }
+  }
+}
+
 Uint8List trustedAuthSuiteCapabilityHash(int version) {
   if (version != trustedAuthSuiteV2) {
     return Uint8List(32);

@@ -40,6 +40,7 @@ void main() {
         peerRootFingerprint: Uint8List.fromList(List.filled(32, 2)),
         requestedPermissions: defaultTrustedPermissions,
         mode: TrustedSecuritySessionMode.pairing,
+        negotiation: TrustedSessionNegotiationContext.legacy(),
       );
       expect(session.phase, TrustedSecurityPhase.pairingAwaitingConfirmation);
       session.confirmPairing(true);
@@ -69,6 +70,7 @@ void main() {
         peerRootFingerprint: Uint8List.fromList(List.filled(32, 2)),
         requestedPermissions: defaultTrustedPermissions,
         mode: TrustedSecuritySessionMode.trustedAuthentication,
+        negotiation: TrustedSessionNegotiationContext.legacy(),
       );
       session.configureWebRtcContext(
         controllerNonce: Uint8List.fromList(List.filled(16, 1)),

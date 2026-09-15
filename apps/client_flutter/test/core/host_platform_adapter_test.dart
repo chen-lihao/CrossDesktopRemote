@@ -206,7 +206,8 @@ void main() {
       expect(adapter.capabilities.canHostDesktop, isTrue);
       final permission = await adapter.requestPermissions();
       expect(permission.inputGranted, isTrue);
-      expect(permission.limitation, contains('UAC'));
+      expect(permission.limitation, isNull);
+      expect(permission.inputAdvisory, contains('UAC'));
       expect((await adapter.listDisplays()).single.pixelWidth, 1920);
 
       await adapter.sendPointer(

@@ -68,6 +68,7 @@ abstract interface class TrustedSecuritySession {
     required Uint8List peerRootFingerprint,
     required Set<TrustedPermission> requestedPermissions,
     required TrustedSecuritySessionMode mode,
+    required TrustedSessionNegotiationContext negotiation,
   });
 
   void confirmPairing(bool sasMatches);
@@ -231,25 +232,32 @@ class _NativeTrustedSecuritySession implements TrustedSecuritySession {
     required Uint8List peerRootFingerprint,
     required Set<TrustedPermission> requestedPermissions,
     required TrustedSecuritySessionMode mode,
+    required TrustedSessionNegotiationContext negotiation,
   }) {
     _ensureOpen();
+    negotiation.validate();
     final sessionBytes = Uint8List.fromList(utf8.encode(sessionId));
     if (sessionBytes.isEmpty || peerRootFingerprint.length != 32) {
       throw const FormatException('Invalid trusted session context');
     }
     _withBytes(sessionBytes, (sessionPointer, sessionLength) {
       _withBytes(peerRootFingerprint, (peerPointer, peerLength) {
-        _check(
-          _bindings.begin(
-            _handle,
-            sessionPointer,
-            sessionLength,
-            peerPointer,
-            peerLength,
-            trustedPermissionBits(requestedPermissions),
-            mode.index + 1,
-          ),
-        );
+        _withBytes(negotiation.capabilitySha256, (hashPointer, hashLength) {
+          _check(
+            _bindings.beginV2(
+              _handle,
+              sessionPointer,
+              sessionLength,
+              peerPointer,
+              peerLength,
+              trustedPermissionBits(requestedPermissions),
+              mode.index + 1,
+              negotiation.authSuiteVersion,
+              hashPointer,
+              hashLength,
+            ),
+          );
+        });
       });
     });
   }
@@ -583,7 +591,7 @@ typedef _PhaseNative = Int32 Function(Pointer<Void>, Pointer<Uint32>);
 typedef _PhaseDart = int Function(Pointer<Void>, Pointer<Uint32>);
 typedef _SetPausedNative = Int32 Function(Pointer<Void>, Uint8);
 typedef _SetPausedDart = int Function(Pointer<Void>, int);
-typedef _BeginNative = Int32 Function(
+typedef _BeginV2Native = Int32 Function(
   Pointer<Void>,
   Pointer<Uint8>,
   IntPtr,
@@ -591,14 +599,20 @@ typedef _BeginNative = Int32 Function(
   IntPtr,
   Uint64,
   Uint32,
+  Uint32,
+  Pointer<Uint8>,
+  IntPtr,
 );
-typedef _BeginDart = int Function(
+typedef _BeginV2Dart = int Function(
   Pointer<Void>,
   Pointer<Uint8>,
   int,
   Pointer<Uint8>,
   int,
   int,
+  int,
+  int,
+  Pointer<Uint8>,
   int,
 );
 typedef _BoolOperationNative = Int32 Function(Pointer<Void>, Uint8);
@@ -759,8 +773,8 @@ class _TrustedSecurityBindings {
       setPaused = library.lookupFunction<_SetPausedNative, _SetPausedDart>(
         'cdr_security_engine_set_paused',
       ),
-      begin = library.lookupFunction<_BeginNative, _BeginDart>(
-        'cdr_security_engine_begin_session',
+      beginV2 = library.lookupFunction<_BeginV2Native, _BeginV2Dart>(
+        'cdr_security_engine_begin_session_v2',
       ),
       confirmPairing = library
           .lookupFunction<_BoolOperationNative, _BoolOperationDart>(
@@ -819,7 +833,7 @@ class _TrustedSecurityBindings {
   final _ValidateDeviceIdentityDart validateDeviceIdentity;
   final _PhaseDart phase;
   final _SetPausedDart setPaused;
-  final _BeginDart begin;
+  final _BeginV2Dart beginV2;
   final _BoolOperationDart confirmPairing;
   final _SimpleOperationDart completePairing;
   final _SimpleOperationDart end;

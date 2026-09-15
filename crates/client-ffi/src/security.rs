@@ -139,6 +139,57 @@ pub unsafe extern "C" fn cdr_security_engine_begin_session(
     ))
 }
 
+/// Begins a session while freezing the negotiated trusted-auth suite and the
+/// canonical capability transcript hash. All later authorization and WebRTC
+/// binding messages must carry this exact context.
+///
+/// # Safety
+/// All pointers must address their stated readable byte lengths. `mode` is 1
+/// for pairing and 2 for trusted authentication.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cdr_security_engine_begin_session_v2(
+    engine: *mut CdrSecurityEngine,
+    session_id: *const u8,
+    session_id_len: usize,
+    peer_root_fingerprint: *const u8,
+    peer_root_fingerprint_len: usize,
+    requested_permission_bits: u64,
+    mode: u32,
+    auth_suite_version: u32,
+    capability_sha256: *const u8,
+    capability_sha256_len: usize,
+) -> i32 {
+    let Some(engine) = (unsafe { engine.as_mut() }) else {
+        return CDR_ERROR_NULL_POINTER;
+    };
+    let Ok(session_id) = (unsafe { read_utf8(session_id, session_id_len) }) else {
+        return CDR_ERROR_INVALID_ARGUMENT;
+    };
+    let Ok(peer) = (unsafe {
+        read_fixed::<ROOT_FINGERPRINT_BYTES>(peer_root_fingerprint, peer_root_fingerprint_len)
+    }) else {
+        return CDR_ERROR_INVALID_ARGUMENT;
+    };
+    let Ok(capability_sha256) =
+        (unsafe { read_fixed::<ROOT_FINGERPRINT_BYTES>(capability_sha256, capability_sha256_len) })
+    else {
+        return CDR_ERROR_INVALID_ARGUMENT;
+    };
+    let mode = match mode {
+        1 => TrustedSessionMode::Pairing,
+        2 => TrustedSessionMode::TrustedAuthentication,
+        _ => return CDR_ERROR_INVALID_ARGUMENT,
+    };
+    map_security_result(engine.core.begin_session_with_negotiation(
+        session_id,
+        peer,
+        PermissionSet::from_bits(requested_permission_bits),
+        mode,
+        auth_suite_version,
+        capability_sha256,
+    ))
+}
+
 /// # Safety
 /// `engine` must point to a valid security engine for this call.
 #[unsafe(no_mangle)]
@@ -1046,6 +1097,59 @@ mod tests {
                 CDR_ERROR_NOT_YET_VALID
             );
             cdr_security_engine_destroy(skewed_engine);
+        }
+    }
+
+    #[test]
+    fn security_engine_freezes_negotiated_capability_context() {
+        let local = [1_u8; ROOT_FINGERPRINT_BYTES];
+        let peer = [2_u8; ROOT_FINGERPRINT_BYTES];
+        let session = b"trusted-v2-session";
+        let capability_sha256 = [3_u8; ROOT_FINGERPRINT_BYTES];
+        let engine = cdr_security_engine_create(local.as_ptr(), local.len());
+        assert!(!engine.is_null());
+
+        // SAFETY: All pointers originate from live values in this scope.
+        unsafe {
+            assert_eq!(
+                cdr_security_engine_begin_session_v2(
+                    engine,
+                    session.as_ptr(),
+                    session.len(),
+                    peer.as_ptr(),
+                    peer.len(),
+                    1,
+                    2,
+                    2,
+                    capability_sha256.as_ptr(),
+                    capability_sha256.len(),
+                ),
+                CDR_OK
+            );
+            let mut phase = u32::MAX;
+            assert_eq!(cdr_security_engine_phase(engine, &mut phase), CDR_OK);
+            assert_eq!(phase, 3);
+            cdr_security_engine_destroy(engine);
+
+            let invalid = cdr_security_engine_create(local.as_ptr(), local.len());
+            assert!(!invalid.is_null());
+            let empty_hash = [0_u8; ROOT_FINGERPRINT_BYTES];
+            assert_eq!(
+                cdr_security_engine_begin_session_v2(
+                    invalid,
+                    session.as_ptr(),
+                    session.len(),
+                    peer.as_ptr(),
+                    peer.len(),
+                    1,
+                    2,
+                    2,
+                    empty_hash.as_ptr(),
+                    empty_hash.len(),
+                ),
+                CDR_ERROR_INVALID_STATE
+            );
+            cdr_security_engine_destroy(invalid);
         }
     }
 }

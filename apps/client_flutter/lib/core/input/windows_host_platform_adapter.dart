@@ -34,7 +34,7 @@ class WindowsHostPlatformAdapter implements HostPlatformAdapter {
       return HostPermissionState(
         inputGranted: true,
         screenCaptureGranted: true,
-        limitation: native.limitation,
+        inputAdvisory: native.limitation,
       );
     } on MissingPluginException {
       return const HostPermissionState.unavailable(

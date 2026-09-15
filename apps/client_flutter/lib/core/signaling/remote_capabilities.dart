@@ -115,6 +115,15 @@ bool supportsTrustedAuthSuiteV2(Iterable<String> capabilities) =>
     supportsHostOwnedTrustedPolicy(capabilities) &&
     capabilities.contains(trustedAuthSuiteV2Capability);
 
+bool supportsCompleteTrustedRouteV2({
+  required Iterable<String> serverCapabilities,
+  required Iterable<String> localCapabilities,
+  required Iterable<String> remoteCapabilities,
+}) =>
+    serverCapabilities.contains(completeCapabilityManifestV1Capability) &&
+    supportsTrustedAuthSuiteV2(localCapabilities) &&
+    supportsTrustedAuthSuiteV2(remoteCapabilities);
+
 /// Produces the canonical transcript hash for the capabilities that both
 /// endpoints actually advertised. The same intersection is computed on both
 /// roles, so signaling reordering and duplicates cannot change the result.

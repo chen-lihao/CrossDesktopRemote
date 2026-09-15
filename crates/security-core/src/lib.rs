@@ -603,6 +603,8 @@ pub enum TrustedSessionMode {
 struct ActiveTrustedSession {
     session_id: String,
     peer_root_fingerprint: [u8; ROOT_FINGERPRINT_BYTES],
+    auth_suite_version: u32,
+    negotiated_capability_sha256: [u8; ROOT_FINGERPRINT_BYTES],
     requested_permissions: PermissionSet,
     granted_permissions: PermissionSet,
     grant_id: Option<[u8; 16]>,
@@ -699,6 +701,31 @@ impl TrustedSecurityEngine {
         requested_permissions: PermissionSet,
         mode: TrustedSessionMode,
     ) -> Result<(), SecurityError> {
+        self.begin_session_with_negotiation(
+            session_id,
+            peer_root_fingerprint,
+            requested_permissions,
+            mode,
+            TRUSTED_AUTH_SUITE_LEGACY,
+            [0; ROOT_FINGERPRINT_BYTES],
+        )
+    }
+
+    pub fn begin_session_with_negotiation(
+        &mut self,
+        session_id: String,
+        peer_root_fingerprint: [u8; ROOT_FINGERPRINT_BYTES],
+        requested_permissions: PermissionSet,
+        mode: TrustedSessionMode,
+        auth_suite_version: u32,
+        negotiated_capability_sha256: [u8; ROOT_FINGERPRINT_BYTES],
+    ) -> Result<(), SecurityError> {
+        let capability_hash_is_empty = negotiated_capability_sha256.iter().all(|byte| *byte == 0);
+        let valid_negotiation = match auth_suite_version {
+            TRUSTED_AUTH_SUITE_LEGACY => capability_hash_is_empty,
+            TRUSTED_AUTH_SUITE_V2 => !capability_hash_is_empty,
+            _ => false,
+        };
         if self.paused {
             return Err(SecurityError::Paused);
         }
@@ -707,12 +734,17 @@ impl TrustedSecurityEngine {
             || session_id.len() > MAX_SESSION_ID_BYTES
             || requested_permissions.bits() == 0
             || !requested_permissions.contains(SessionPermission::ViewScreen)
+            || !valid_negotiation
+            || (mode == TrustedSessionMode::Pairing
+                && auth_suite_version != TRUSTED_AUTH_SUITE_LEGACY)
         {
             return Err(SecurityError::InvalidState);
         }
         self.active = Some(ActiveTrustedSession {
             session_id,
             peer_root_fingerprint,
+            auth_suite_version,
+            negotiated_capability_sha256,
             requested_permissions,
             granted_permissions: PermissionSet::default(),
             grant_id: None,
@@ -1044,6 +1076,8 @@ impl TrustedSecurityEngine {
             || active.verified_payload.as_deref() == Some(authorization.signing_bytes().as_slice());
         if authorization.session_id != active.session_id
             || active.grant_id != Some(authorization.credential_id)
+            || authorization.auth_suite_version != active.auth_suite_version
+            || authorization.capability_sha256 != active.negotiated_capability_sha256
             || authorization.controller_nonce != context.controller_nonce
             || authorization.host_nonce != context.host_nonce
             || !identities_match
@@ -1138,6 +1172,8 @@ impl TrustedSecurityEngine {
             None => binding.auth_suite_version == TRUSTED_AUTH_SUITE_LEGACY,
         };
         if binding.session_id != active.session_id
+            || binding.auth_suite_version != active.auth_suite_version
+            || binding.capability_sha256 != active.negotiated_capability_sha256
             || binding.requested_permissions != active.requested_permissions
             || active.verified_payload.as_deref() != Some(binding.signing_bytes().as_slice())
             || !context.matches(binding)
@@ -1194,11 +1230,12 @@ impl TrustedSecurityEngine {
             TrustedSecurityPhase::Authenticating | TrustedSecurityPhase::AwaitingHostAuthorization
         ) && ready.is_some()
         {
-            self.phase = if ready.is_some_and(|active| active.granted_permissions.bits() == 0) {
-                TrustedSecurityPhase::AwaitingHostAuthorization
-            } else {
-                TrustedSecurityPhase::AwaitingWebRtcBinding
-            };
+            self.phase =
+                if ready.is_some_and(|active| active.auth_suite_version == TRUSTED_AUTH_SUITE_V2) {
+                    TrustedSecurityPhase::AwaitingHostAuthorization
+                } else {
+                    TrustedSecurityPhase::AwaitingWebRtcBinding
+                };
         }
     }
 
@@ -1966,11 +2003,13 @@ mod tests {
         let host_nonce = [2; NONCE_BYTES];
         let mut engine = TrustedSecurityEngine::new(controller_fingerprint);
         engine
-            .begin_session(
+            .begin_session_with_negotiation(
                 "host-policy-session".into(),
                 host_fingerprint,
                 identity_scope,
                 TrustedSessionMode::TrustedAuthentication,
+                TRUSTED_AUTH_SUITE_V2,
+                [11; ROOT_FINGERPRINT_BYTES],
             )
             .expect("begin session");
         engine
@@ -2180,11 +2219,13 @@ mod tests {
             (&mut controller, host_fingerprint),
         ] {
             engine
-                .begin_session(
+                .begin_session_with_negotiation(
                     "suite-v2-session".into(),
                     peer,
                     identity_scope,
                     TrustedSessionMode::TrustedAuthentication,
+                    TRUSTED_AUTH_SUITE_V2,
+                    capability_sha256,
                 )
                 .expect("begin session");
             engine

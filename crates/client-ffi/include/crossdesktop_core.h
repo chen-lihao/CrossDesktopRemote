@@ -105,6 +105,12 @@ int32_t cdr_security_engine_begin_session(
     size_t session_id_len, const uint8_t *peer_root_fingerprint,
     size_t peer_root_fingerprint_len, uint64_t requested_permission_bits,
     uint32_t mode);
+int32_t cdr_security_engine_begin_session_v2(
+    CdrSecurityEngine *engine, const uint8_t *session_id,
+    size_t session_id_len, const uint8_t *peer_root_fingerprint,
+    size_t peer_root_fingerprint_len, uint64_t requested_permission_bits,
+    uint32_t mode, uint32_t auth_suite_version,
+    const uint8_t *capability_sha256, size_t capability_sha256_len);
 int32_t cdr_security_engine_confirm_pairing(
     CdrSecurityEngine *engine, uint8_t sas_matches);
 int32_t cdr_security_engine_validate_pairing_grant(

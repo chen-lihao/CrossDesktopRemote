@@ -84,6 +84,8 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
   bool _connectionsPaused = false;
   final Map<String, int> _nextSequenceBySession = {};
   final Map<String, TrustedSecuritySession> _securitySessions = {};
+  final Map<String, TrustedSessionNegotiationContext> _securityNegotiations =
+      {};
   final StreamController<TrustedAuthorizationInvalidation> _invalidations =
       StreamController<TrustedAuthorizationInvalidation>.broadcast(sync: true);
 
@@ -141,6 +143,7 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
     required Uint8List peerRootFingerprint,
     required Set<TrustedPermission> requestedPermissions,
     required TrustedSecuritySessionMode mode,
+    required TrustedSessionNegotiationContext negotiation,
   }) {
     final factory = _securityEngineFactory;
     final local = localPublicIdentity();
@@ -159,8 +162,10 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
         peerRootFingerprint: peerRootFingerprint,
         requestedPermissions: requestedPermissions,
         mode: mode,
+        negotiation: negotiation,
       );
       _securitySessions[sessionId] = session;
+      _securityNegotiations[sessionId] = negotiation;
     } on TrustedSecurityEngineException catch (error) {
       session.dispose();
       throw _authenticationException(error);
@@ -543,6 +548,14 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
     required Uint8List controllerNonce,
     required Uint8List hostNonce,
   }) async {
+    final negotiation = _securityNegotiations[sessionId];
+    if (negotiation == null ||
+        negotiation.authSuiteVersion != trustedAuthSuiteV2) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.unsupported,
+        '可信会话没有有效的 v2 协商上下文',
+      );
+    }
     final policy = await hostAccessPolicyFor(controllerRecord);
     if (!policy.enabled) {
       throw const TrustedAuthenticationException(
@@ -563,8 +576,8 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
       hostNonce: hostNonce,
       issuedAt: now,
       expiresAt: now.add(const Duration(seconds: 45)),
-      authSuiteVersion: trustedAuthSuiteV2,
-      capabilitySha256: trustedAuthSuiteCapabilityHash(trustedAuthSuiteV2),
+      authSuiteVersion: negotiation.authSuiteVersion,
+      capabilitySha256: negotiation.capabilitySha256,
     );
     authorization.validateStructure();
     return authorization;
@@ -898,6 +911,7 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
 
   void endSession(String sessionId) {
     _nextSequenceBySession.remove(sessionId);
+    _securityNegotiations.remove(sessionId);
     final session = _securitySessions.remove(sessionId);
     if (session != null) {
       try {
@@ -1092,6 +1106,7 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
       session.dispose();
     }
     _securitySessions.clear();
+    _securityNegotiations.clear();
     _repository?.close();
     unawaited(_invalidations.close());
     super.dispose();

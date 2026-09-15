@@ -253,4 +253,31 @@ void main() {
       everyElement(0),
     );
   });
+
+  test('trusted v2 route requires a complete server capability manifest', () {
+    final peers = buildRemoteClientCapabilities(
+      role: RemoteRole.host,
+      platform: 'windows',
+      clipboardSupported: true,
+      explicitFileTransferSupported: true,
+      trustedDeviceAuthenticationSupported: true,
+    );
+
+    expect(
+      supportsCompleteTrustedRouteV2(
+        serverCapabilities: const [completeCapabilityManifestV1Capability],
+        localCapabilities: peers,
+        remoteCapabilities: peers,
+      ),
+      isTrue,
+    );
+    expect(
+      supportsCompleteTrustedRouteV2(
+        serverCapabilities: const [],
+        localCapabilities: peers,
+        remoteCapabilities: peers,
+      ),
+      isFalse,
+    );
+  });
 }
