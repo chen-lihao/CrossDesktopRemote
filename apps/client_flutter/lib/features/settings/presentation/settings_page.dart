@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
+import 'package:cross_desktop_remote/core/presentation/adaptive_layout.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_server_profile.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
@@ -58,463 +59,402 @@ class SettingsPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: Listenable.merge([settings, session, ?hostSession]),
-      builder: (context, _) => ListView(
-        padding: const EdgeInsets.all(24),
+      builder: (context, _) => AppPageScaffold(
+        title: '设置',
+        subtitle: '这些选项会保存在本机，并作为后续远程会话的默认值。',
+        maxWidth: 920,
         children: [
-          Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 920),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text('设置', style: Theme.of(context).textTheme.headlineMedium),
-                  const SizedBox(height: 6),
-                  Text(
-                    '这些选项会保存在本机，并作为后续远程会话的默认值。',
-                    style: Theme.of(context).textTheme.bodyLarge,
-                  ),
-                  const SizedBox(height: 24),
-                  _SettingsSection(
-                    title: '画质与性能',
-                    icon: Icons.high_quality_outlined,
-                    children: [
-                      ListTile(
-                        title: const Text('默认分辨率'),
-                        subtitle: const Text('与帧率独立设置；自动会根据网络与设备能力调整'),
-                        trailing: DropdownButton<RemoteResolutionMode>(
-                          value: settings.defaultVideoPolicy.resolution,
-                          onChanged: (value) {
-                            if (value == null) return;
-                            if (value == RemoteResolutionMode.custom) {
-                              unawaited(_editCustomVideoPolicy(context));
-                              return;
-                            }
-                            unawaited(
-                              settings.setDefaultVideoPolicy(
-                                settings.defaultVideoPolicy.copyWith(
-                                  resolution: value,
-                                ),
-                              ),
-                            );
-                          },
-                          items: [
-                            for (final value in RemoteResolutionMode.values)
-                              DropdownMenuItem(
-                                value: value,
-                                child: Text(value.label),
-                              ),
-                          ],
-                        ),
+          _SettingsSection(
+            title: '画质与性能',
+            icon: Icons.high_quality_outlined,
+            children: [
+              ListTile(
+                title: const Text('默认分辨率'),
+                subtitle: const Text('与帧率独立设置；自动会根据网络与设备能力调整'),
+                trailing: DropdownButton<RemoteResolutionMode>(
+                  value: settings.defaultVideoPolicy.resolution,
+                  onChanged: (value) {
+                    if (value == null) return;
+                    if (value == RemoteResolutionMode.custom) {
+                      unawaited(_editCustomVideoPolicy(context));
+                      return;
+                    }
+                    unawaited(
+                      settings.setDefaultVideoPolicy(
+                        settings.defaultVideoPolicy.copyWith(resolution: value),
                       ),
-                      ListTile(
-                        title: const Text('默认帧率'),
-                        subtitle: const Text('高刷新率会增加编码、网络和耗电压力'),
-                        trailing: DropdownButton<RemoteFrameRateMode>(
-                          value: settings.defaultVideoPolicy.frameRate,
-                          onChanged: (value) {
-                            if (value == null) return;
-                            if (value == RemoteFrameRateMode.custom) {
-                              unawaited(_editCustomVideoPolicy(context));
-                              return;
-                            }
-                            unawaited(
-                              settings.setDefaultVideoPolicy(
-                                settings.defaultVideoPolicy.copyWith(
-                                  frameRate: value,
-                                ),
-                              ),
-                            );
-                          },
-                          items: [
-                            for (final value in RemoteFrameRateMode.values)
-                              DropdownMenuItem(
-                                value: value,
-                                child: Text(value.label),
-                              ),
-                          ],
-                        ),
-                      ),
-                      ListTile(
-                        title: const Text('自定义与码率'),
-                        subtitle: Text(settings.defaultVideoPolicy.label),
-                        trailing: IconButton(
-                          tooltip: '编辑自定义视频策略',
-                          onPressed: () =>
-                              unawaited(_editCustomVideoPolicy(context)),
-                          icon: const Icon(Icons.tune),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  _SettingsSection(
-                    title: '远程桌面窗口',
-                    icon: Icons.window_outlined,
-                    children: [
-                      ListTile(
-                        title: const Text('多显示器展示方式'),
-                        subtitle: Text(
-                          settings.displayPresentationMode ==
-                                  RemoteDisplayPresentationMode.singleWindow
-                              ? '默认在一个独立远程窗口内切换显示器'
-                              : session.remoteSupportsMultiDisplayStreamV1
-                              ? '每个显示器使用独立媒体轨道和独立窗口'
-                              : '对端尚未协商 multi-display-stream-v1，当前会话自动使用单窗口',
-                        ),
-                        trailing: DropdownButton<RemoteDisplayPresentationMode>(
-                          value: settings.displayPresentationMode,
-                          onChanged: (value) {
-                            if (value != null) {
-                              unawaited(
-                                settings.setDisplayPresentationMode(value),
-                              );
-                            }
-                          },
-                          items: [
-                            for (final mode
-                                in RemoteDisplayPresentationMode.values)
-                              DropdownMenuItem(
-                                value: mode,
-                                child: Text(mode.label),
-                              ),
-                          ],
-                        ),
-                      ),
-                      const ListTile(
-                        leading: Icon(Icons.info_outline),
-                        title: Text('独立窗口不会建立第二条远程连接'),
-                        subtitle: Text('关闭窗口只关闭画面工作区；会话、剪贴板和文件传输继续由主窗口管理'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  _SettingsSection(
-                    title: '远程输入',
-                    icon: Icons.touch_app_outlined,
-                    children: [
-                      ListTile(
-                        title: const Text('默认触控方式'),
-                        trailing: SegmentedButton<RemotePointerMode>(
-                          showSelectedIcon: false,
-                          segments: const [
-                            ButtonSegment(
-                              value: RemotePointerMode.touchpad,
-                              label: Text('触控板'),
-                            ),
-                            ButtonSegment(
-                              value: RemotePointerMode.direct,
-                              label: Text('直接触控'),
-                            ),
-                          ],
-                          selected: {settings.pointerMode},
-                          onSelectionChanged: (values) =>
-                              unawaited(settings.setPointerMode(values.single)),
-                        ),
-                      ),
-                      ListTile(
-                        title: const Text('默认远程键盘'),
-                        subtitle: const Text('快捷键操作使用小键盘；文字和拼音使用系统键盘'),
-                        trailing: DropdownButton<RemoteKeyboardMode>(
-                          value: settings.keyboardMode,
-                          onChanged: (value) {
-                            if (value != null) {
-                              unawaited(settings.setKeyboardMode(value));
-                            }
-                          },
-                          items: [
-                            for (final mode in RemoteKeyboardMode.values)
-                              DropdownMenuItem(
-                                value: mode,
-                                child: Text(mode.label),
-                              ),
-                          ],
-                        ),
-                      ),
-                      if (Platform.isMacOS ||
-                          Platform.isWindows ||
-                          Platform.isLinux)
-                        ListTile(
-                          title: const Text('默认文字输入方式'),
-                          subtitle: Text(settings.textInputMode.description),
-                          trailing: DropdownButton<RemoteTextInputMode>(
-                            value: settings.textInputMode,
-                            onChanged: (value) {
-                              if (value != null) {
-                                unawaited(settings.setTextInputMode(value));
-                              }
-                            },
-                            items: [
-                              for (final mode in RemoteTextInputMode.values)
-                                DropdownMenuItem(
-                                  value: mode,
-                                  child: Text(mode.label),
-                                ),
-                            ],
-                          ),
-                        ),
-                      _SliderSetting(
-                        label: '指针灵敏度',
-                        value: settings.pointerSensitivity,
-                        min: .5,
-                        max: 2.5,
-                        divisions: 20,
-                        onChanged: (value) =>
-                            unawaited(settings.setPointerSensitivity(value)),
-                      ),
-                      _SliderSetting(
-                        label: '滚动灵敏度',
-                        value: settings.scrollSensitivity,
-                        min: .5,
-                        max: 4,
-                        divisions: 35,
-                        onChanged: (value) =>
-                            unawaited(settings.setScrollSensitivity(value)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  if (_dataSession.clipboardSupported) ...[
-                    _SettingsSection(
-                      title: '数据交换',
-                      icon: Icons.content_paste_go_outlined,
-                      children: [
-                        if (Platform.isIOS)
-                          SwitchListTile(
-                            title: const Text('用户触发式文本粘贴'),
-                            subtitle: const Text(
-                              '仅在你点击远程键盘的“粘贴”时读取 iPad 剪贴板，并只发送到被控端',
-                            ),
-                            value:
-                                settings.clipboardSyncMode !=
-                                ClipboardSyncMode.disabled,
-                            onChanged: (enabled) => unawaited(
-                              settings.setClipboardSyncMode(
-                                enabled
-                                    ? ClipboardSyncMode.controllerToHost
-                                    : ClipboardSyncMode.disabled,
-                              ),
-                            ),
-                          )
-                        else
-                          ListTile(
-                            title: const Text('文本剪贴板'),
-                            subtitle: Text(
-                              settings.clipboardSyncMode.description,
-                            ),
-                            trailing: DropdownButton<ClipboardSyncMode>(
-                              value: settings.clipboardSyncMode,
-                              onChanged: (value) {
-                                if (value != null) {
-                                  unawaited(
-                                    settings.setClipboardSyncMode(value),
-                                  );
-                                }
-                              },
-                              items: [
-                                for (final mode in ClipboardSyncMode.values)
-                                  DropdownMenuItem(
-                                    value: mode,
-                                    child: Text(mode.label),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ListTile(
-                          leading: Icon(
-                            _dataSession.clipboardStatus ==
-                                    ClipboardSyncStatus.error
-                                ? Icons.error_outline
-                                : _dataSession.clipboardStatus ==
-                                      ClipboardSyncStatus.ready
-                                ? Icons.check_circle_outline
-                                : Icons.sync_outlined,
-                          ),
-                          title: const Text('剪贴板状态'),
-                          subtitle: Text(_dataSession.clipboardStatusMessage),
-                        ),
-                        ListTile(
-                          leading: Icon(Icons.shield_outlined),
-                          title: Text(
-                            Platform.isIOS
-                                ? '不会在后台读取 iPad 剪贴板'
-                                : '仅同步新复制的 UTF-8 文本',
-                          ),
-                          subtitle: Text(
-                            Platform.isIOS
-                                ? '必须由用户点击粘贴；单条上限 256 KiB；不写入会话记录'
-                                : '不同步连接前的历史内容；单条上限 256 KiB；不写入会话记录',
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
+                    );
+                  },
+                  items: [
+                    for (final value in RemoteResolutionMode.values)
+                      DropdownMenuItem(value: value, child: Text(value.label)),
                   ],
-                  if (hostSession != null &&
-                      (Platform.isMacOS || Platform.isWindows)) ...[
-                    _SettingsSection(
-                      title: '远程声音',
-                      icon: Icons.volume_up_outlined,
-                      children: [
-                        SwitchListTile(
-                          title: const Text('共享本机系统声音'),
-                          subtitle: Text(
-                            hostSession!.state ==
-                                        RemoteSessionState.streaming ||
-                                    hostSession!.state ==
-                                        RemoteSessionState.reconnecting
-                                ? hostSession!.systemAudioStatusLabel
-                                : '默认关闭；开启后，仅在远程会话中采集并发送系统播放声音',
-                          ),
-                          value: settings.systemAudioSharingEnabled,
-                          onChanged: (value) => unawaited(
-                            settings.setSystemAudioSharingEnabled(value),
-                          ),
-                        ),
-                        const ListTile(
-                          leading: Icon(Icons.privacy_tip_outlined),
-                          title: Text('不采集麦克风'),
-                          subtitle: Text(
-                            '系统声音使用独立音频轨道；可信连接还必须由被控端授予“收听系统声音”权限',
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                  ],
-                  _SettingsSection(
-                    title: '连接与发现',
-                    icon: Icons.lan_outlined,
-                    children: [
-                      ListTile(
-                        title: const Text('信令服务器'),
-                        subtitle: SelectableText(
-                          settings.signalingServerUrl.isEmpty
-                              ? '尚未配置，请在“设备”页输入'
-                              : settings.signalingServerUrl,
-                        ),
-                        leading: const Icon(Icons.dns_outlined),
-                        trailing: const Icon(Icons.edit_outlined),
-                        onTap: () => _editSignalingServer(context, settings),
-                      ),
-                      SwitchListTile(
-                        title: const Text('局域网设备发现'),
-                        subtitle: const Text('自动显示同一局域网内正在共享的设备'),
-                        value: settings.lanDiscoveryEnabled,
-                        onChanged: (value) =>
-                            unawaited(settings.setLanDiscoveryEnabled(value)),
-                      ),
-                      SwitchListTile(
-                        title: const Text('显示高级网络信息'),
-                        subtitle: const Text('在设备页显示信令地址和全部网卡地址'),
-                        value: settings.showAdvancedNetwork,
-                        onChanged: (value) =>
-                            unawaited(settings.setShowAdvancedNetwork(value)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  _SettingsSection(
-                    title: '安全与权限',
-                    icon: Icons.security_outlined,
-                    children: [
-                      if (hostSession != null)
-                        SwitchListTile(
-                          title: const Text('允许接收远程连接'),
-                          subtitle: const Text(
-                            '默认开启；应用连接信令服务后自动生成一次性连接码，不会提前采集屏幕',
-                          ),
-                          value: settings.incomingAccessEnabled,
-                          onChanged: (value) => unawaited(
-                            settings.setIncomingAccessEnabled(value),
-                          ),
-                        ),
-                      SwitchListTile(
-                        title: const Text('保存会话元数据'),
-                        subtitle: const Text('不保存屏幕、剪贴板和键盘输入内容'),
-                        value: settings.sessionHistoryEnabled,
-                        onChanged: (value) =>
-                            unawaited(settings.setSessionHistoryEnabled(value)),
-                      ),
-                      ListTile(
-                        enabled: settings.sessionHistoryEnabled,
-                        title: const Text('历史记录上限'),
-                        trailing: DropdownButton<int>(
-                          value: settings.sessionHistoryLimit,
-                          onChanged: settings.sessionHistoryEnabled
-                              ? (value) {
-                                  if (value != null) {
-                                    unawaited(
-                                      settings.setSessionHistoryLimit(value),
-                                    );
-                                  }
-                                }
-                              : null,
-                          items: const [
-                            DropdownMenuItem(value: 10, child: Text('10 条')),
-                            DropdownMenuItem(value: 25, child: Text('25 条')),
-                            DropdownMenuItem(value: 50, child: Text('50 条')),
-                            DropdownMenuItem(value: 100, child: Text('100 条')),
-                          ],
-                        ),
-                      ),
-                      if (hostSession != null)
-                        ListTile(
-                          leading: Icon(
-                            hostSession!.accessibilityGranted == true
-                                ? Icons.check_circle_outline
-                                : Icons.warning_amber_outlined,
-                          ),
-                          title: const Text('远程输入权限'),
-                          subtitle: Text(
-                            hostSession!.accessibilityGranted == true
-                                ? '辅助功能权限已就绪'
-                                : '尚未允许鼠标和键盘控制',
-                          ),
-                          trailing: TextButton(
-                            onPressed: hostSession!.accessibilityGranted == true
-                                ? () => hostSession!.refreshHostPermissions(
-                                    announce: true,
-                                  )
-                                : hostSession!.requestHostInputPermission,
-                            child: Text(
-                              hostSession!.accessibilityGranted == true
-                                  ? '重新检查'
-                                  : '前往设置',
-                            ),
-                          ),
-                        ),
-                      if (hostSession != null)
-                        ListTile(
-                          leading: Icon(
-                            hostSession!.screenCaptureGranted
-                                ? Icons.check_circle_outline
-                                : Icons.warning_amber_outlined,
-                          ),
-                          title: const Text('屏幕录制权限'),
-                          subtitle: Text(
-                            hostSession!.screenCaptureGranted
-                                ? '屏幕采集权限已就绪'
-                                : '尚未允许采集被控端屏幕',
-                          ),
-                          trailing: TextButton(
-                            onPressed: hostSession!.screenCaptureGranted
-                                ? () => hostSession!.refreshHostPermissions(
-                                    announce: true,
-                                  )
-                                : hostSession!
-                                      .requestHostScreenCapturePermission,
-                            child: Text(
-                              hostSession!.screenCaptureGranted
-                                  ? '重新检查'
-                                  : '前往设置',
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ],
+                ),
               ),
+              ListTile(
+                title: const Text('默认帧率'),
+                subtitle: const Text('高刷新率会增加编码、网络和耗电压力'),
+                trailing: DropdownButton<RemoteFrameRateMode>(
+                  value: settings.defaultVideoPolicy.frameRate,
+                  onChanged: (value) {
+                    if (value == null) return;
+                    if (value == RemoteFrameRateMode.custom) {
+                      unawaited(_editCustomVideoPolicy(context));
+                      return;
+                    }
+                    unawaited(
+                      settings.setDefaultVideoPolicy(
+                        settings.defaultVideoPolicy.copyWith(frameRate: value),
+                      ),
+                    );
+                  },
+                  items: [
+                    for (final value in RemoteFrameRateMode.values)
+                      DropdownMenuItem(value: value, child: Text(value.label)),
+                  ],
+                ),
+              ),
+              ListTile(
+                title: const Text('自定义与码率'),
+                subtitle: Text(settings.defaultVideoPolicy.label),
+                trailing: IconButton(
+                  tooltip: '编辑自定义视频策略',
+                  onPressed: () => unawaited(_editCustomVideoPolicy(context)),
+                  icon: const Icon(Icons.tune),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _SettingsSection(
+            title: '远程桌面窗口',
+            icon: Icons.window_outlined,
+            children: [
+              ListTile(
+                title: const Text('多显示器展示方式'),
+                subtitle: Text(
+                  settings.displayPresentationMode ==
+                          RemoteDisplayPresentationMode.singleWindow
+                      ? '默认在一个独立远程窗口内切换显示器'
+                      : session.remoteSupportsMultiDisplayStreamV1
+                      ? '每个显示器使用独立媒体轨道和独立窗口'
+                      : '对端尚未协商 multi-display-stream-v1，当前会话自动使用单窗口',
+                ),
+                trailing: DropdownButton<RemoteDisplayPresentationMode>(
+                  value: settings.displayPresentationMode,
+                  onChanged: (value) {
+                    if (value != null) {
+                      unawaited(settings.setDisplayPresentationMode(value));
+                    }
+                  },
+                  items: [
+                    for (final mode in RemoteDisplayPresentationMode.values)
+                      DropdownMenuItem(value: mode, child: Text(mode.label)),
+                  ],
+                ),
+              ),
+              const ListTile(
+                leading: Icon(Icons.info_outline),
+                title: Text('独立窗口不会建立第二条远程连接'),
+                subtitle: Text('关闭窗口只关闭画面工作区；会话、剪贴板和文件传输继续由主窗口管理'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _SettingsSection(
+            title: '远程输入',
+            icon: Icons.touch_app_outlined,
+            children: [
+              ListTile(
+                title: const Text('默认触控方式'),
+                trailing: SegmentedButton<RemotePointerMode>(
+                  showSelectedIcon: false,
+                  segments: const [
+                    ButtonSegment(
+                      value: RemotePointerMode.touchpad,
+                      label: Text('触控板'),
+                    ),
+                    ButtonSegment(
+                      value: RemotePointerMode.direct,
+                      label: Text('直接触控'),
+                    ),
+                  ],
+                  selected: {settings.pointerMode},
+                  onSelectionChanged: (values) =>
+                      unawaited(settings.setPointerMode(values.single)),
+                ),
+              ),
+              ListTile(
+                title: const Text('默认远程键盘'),
+                subtitle: const Text('快捷键操作使用小键盘；文字和拼音使用系统键盘'),
+                trailing: DropdownButton<RemoteKeyboardMode>(
+                  value: settings.keyboardMode,
+                  onChanged: (value) {
+                    if (value != null) {
+                      unawaited(settings.setKeyboardMode(value));
+                    }
+                  },
+                  items: [
+                    for (final mode in RemoteKeyboardMode.values)
+                      DropdownMenuItem(value: mode, child: Text(mode.label)),
+                  ],
+                ),
+              ),
+              if (Platform.isMacOS || Platform.isWindows || Platform.isLinux)
+                ListTile(
+                  title: const Text('默认文字输入方式'),
+                  subtitle: Text(settings.textInputMode.description),
+                  trailing: DropdownButton<RemoteTextInputMode>(
+                    value: settings.textInputMode,
+                    onChanged: (value) {
+                      if (value != null) {
+                        unawaited(settings.setTextInputMode(value));
+                      }
+                    },
+                    items: [
+                      for (final mode in RemoteTextInputMode.values)
+                        DropdownMenuItem(value: mode, child: Text(mode.label)),
+                    ],
+                  ),
+                ),
+              _SliderSetting(
+                label: '指针灵敏度',
+                value: settings.pointerSensitivity,
+                min: .5,
+                max: 2.5,
+                divisions: 20,
+                onChanged: (value) =>
+                    unawaited(settings.setPointerSensitivity(value)),
+              ),
+              _SliderSetting(
+                label: '滚动灵敏度',
+                value: settings.scrollSensitivity,
+                min: .5,
+                max: 4,
+                divisions: 35,
+                onChanged: (value) =>
+                    unawaited(settings.setScrollSensitivity(value)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (_dataSession.clipboardSupported) ...[
+            _SettingsSection(
+              title: '数据交换',
+              icon: Icons.content_paste_go_outlined,
+              children: [
+                if (Platform.isIOS)
+                  SwitchListTile(
+                    title: const Text('用户触发式文本粘贴'),
+                    subtitle: const Text('仅在你点击远程键盘的“粘贴”时读取 iPad 剪贴板，并只发送到被控端'),
+                    value:
+                        settings.clipboardSyncMode !=
+                        ClipboardSyncMode.disabled,
+                    onChanged: (enabled) => unawaited(
+                      settings.setClipboardSyncMode(
+                        enabled
+                            ? ClipboardSyncMode.controllerToHost
+                            : ClipboardSyncMode.disabled,
+                      ),
+                    ),
+                  )
+                else
+                  ListTile(
+                    title: const Text('文本剪贴板'),
+                    subtitle: Text(settings.clipboardSyncMode.description),
+                    trailing: DropdownButton<ClipboardSyncMode>(
+                      value: settings.clipboardSyncMode,
+                      onChanged: (value) {
+                        if (value != null) {
+                          unawaited(settings.setClipboardSyncMode(value));
+                        }
+                      },
+                      items: [
+                        for (final mode in ClipboardSyncMode.values)
+                          DropdownMenuItem(
+                            value: mode,
+                            child: Text(mode.label),
+                          ),
+                      ],
+                    ),
+                  ),
+                ListTile(
+                  leading: Icon(
+                    _dataSession.clipboardStatus == ClipboardSyncStatus.error
+                        ? Icons.error_outline
+                        : _dataSession.clipboardStatus ==
+                              ClipboardSyncStatus.ready
+                        ? Icons.check_circle_outline
+                        : Icons.sync_outlined,
+                  ),
+                  title: const Text('剪贴板状态'),
+                  subtitle: Text(_dataSession.clipboardStatusMessage),
+                ),
+                ListTile(
+                  leading: Icon(Icons.shield_outlined),
+                  title: Text(
+                    Platform.isIOS ? '不会在后台读取 iPad 剪贴板' : '仅同步新复制的 UTF-8 文本',
+                  ),
+                  subtitle: Text(
+                    Platform.isIOS
+                        ? '必须由用户点击粘贴；单条上限 256 KiB；不写入会话记录'
+                        : '不同步连接前的历史内容；单条上限 256 KiB；不写入会话记录',
+                  ),
+                ),
+              ],
             ),
+            const SizedBox(height: 16),
+          ],
+          if (hostSession != null &&
+              (Platform.isMacOS || Platform.isWindows)) ...[
+            _SettingsSection(
+              title: '远程声音',
+              icon: Icons.volume_up_outlined,
+              children: [
+                SwitchListTile(
+                  title: const Text('共享本机系统声音'),
+                  subtitle: Text(
+                    hostSession!.state == RemoteSessionState.streaming ||
+                            hostSession!.state ==
+                                RemoteSessionState.reconnecting
+                        ? hostSession!.systemAudioStatusLabel
+                        : '默认关闭；开启后，仅在远程会话中采集并发送系统播放声音',
+                  ),
+                  value: settings.systemAudioSharingEnabled,
+                  onChanged: (value) =>
+                      unawaited(settings.setSystemAudioSharingEnabled(value)),
+                ),
+                const ListTile(
+                  leading: Icon(Icons.privacy_tip_outlined),
+                  title: Text('不采集麦克风'),
+                  subtitle: Text('系统声音使用独立音频轨道；可信连接还必须由被控端授予“收听系统声音”权限'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+          ],
+          _SettingsSection(
+            title: '连接与发现',
+            icon: Icons.lan_outlined,
+            children: [
+              ListTile(
+                title: const Text('信令服务器'),
+                subtitle: SelectableText(
+                  settings.signalingServerUrl.isEmpty
+                      ? '尚未配置，请在“设备”页输入'
+                      : settings.signalingServerUrl,
+                ),
+                leading: const Icon(Icons.dns_outlined),
+                trailing: const Icon(Icons.edit_outlined),
+                onTap: () => _editSignalingServer(context, settings),
+              ),
+              SwitchListTile(
+                title: const Text('局域网设备发现'),
+                subtitle: const Text('自动显示同一局域网内正在共享的设备'),
+                value: settings.lanDiscoveryEnabled,
+                onChanged: (value) =>
+                    unawaited(settings.setLanDiscoveryEnabled(value)),
+              ),
+              SwitchListTile(
+                title: const Text('显示高级网络信息'),
+                subtitle: const Text('在设备页显示信令地址和全部网卡地址'),
+                value: settings.showAdvancedNetwork,
+                onChanged: (value) =>
+                    unawaited(settings.setShowAdvancedNetwork(value)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _SettingsSection(
+            title: '安全与权限',
+            icon: Icons.security_outlined,
+            children: [
+              if (hostSession != null)
+                SwitchListTile(
+                  title: const Text('允许接收远程连接'),
+                  subtitle: const Text('默认开启；应用连接信令服务后自动生成一次性连接码，不会提前采集屏幕'),
+                  value: settings.incomingAccessEnabled,
+                  onChanged: (value) =>
+                      unawaited(settings.setIncomingAccessEnabled(value)),
+                ),
+              SwitchListTile(
+                title: const Text('保存会话元数据'),
+                subtitle: const Text('不保存屏幕、剪贴板和键盘输入内容'),
+                value: settings.sessionHistoryEnabled,
+                onChanged: (value) =>
+                    unawaited(settings.setSessionHistoryEnabled(value)),
+              ),
+              ListTile(
+                enabled: settings.sessionHistoryEnabled,
+                title: const Text('历史记录上限'),
+                trailing: DropdownButton<int>(
+                  value: settings.sessionHistoryLimit,
+                  onChanged: settings.sessionHistoryEnabled
+                      ? (value) {
+                          if (value != null) {
+                            unawaited(settings.setSessionHistoryLimit(value));
+                          }
+                        }
+                      : null,
+                  items: const [
+                    DropdownMenuItem(value: 10, child: Text('10 条')),
+                    DropdownMenuItem(value: 25, child: Text('25 条')),
+                    DropdownMenuItem(value: 50, child: Text('50 条')),
+                    DropdownMenuItem(value: 100, child: Text('100 条')),
+                  ],
+                ),
+              ),
+              if (hostSession != null)
+                ListTile(
+                  leading: Icon(
+                    hostSession!.accessibilityGranted == true
+                        ? Icons.check_circle_outline
+                        : Icons.warning_amber_outlined,
+                  ),
+                  title: const Text('远程输入权限'),
+                  subtitle: Text(
+                    hostSession!.accessibilityGranted == true
+                        ? '辅助功能权限已就绪'
+                        : '尚未允许鼠标和键盘控制',
+                  ),
+                  trailing: TextButton(
+                    onPressed: hostSession!.accessibilityGranted == true
+                        ? () => hostSession!.refreshHostPermissions(
+                            announce: true,
+                          )
+                        : hostSession!.requestHostInputPermission,
+                    child: Text(
+                      hostSession!.accessibilityGranted == true
+                          ? '重新检查'
+                          : '前往设置',
+                    ),
+                  ),
+                ),
+              if (hostSession != null)
+                ListTile(
+                  leading: Icon(
+                    hostSession!.screenCaptureGranted
+                        ? Icons.check_circle_outline
+                        : Icons.warning_amber_outlined,
+                  ),
+                  title: const Text('屏幕录制权限'),
+                  subtitle: Text(
+                    hostSession!.screenCaptureGranted
+                        ? '屏幕采集权限已就绪'
+                        : '尚未允许采集被控端屏幕',
+                  ),
+                  trailing: TextButton(
+                    onPressed: hostSession!.screenCaptureGranted
+                        ? () => hostSession!.refreshHostPermissions(
+                            announce: true,
+                          )
+                        : hostSession!.requestHostScreenCapturePermission,
+                    child: Text(
+                      hostSession!.screenCaptureGranted ? '重新检查' : '前往设置',
+                    ),
+                  ),
+                ),
+            ],
           ),
         ],
       ),

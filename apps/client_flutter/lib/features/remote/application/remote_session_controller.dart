@@ -582,6 +582,8 @@ class RemoteSessionController extends ChangeNotifier
   bool get fileClipboardPastePending =>
       _fileClipboardPastePreparing || _fileClipboardPasteTransferId != null;
   bool get fileClipboardOfferPending => _fileClipboardOffers.hasOffer;
+  String? get fileClipboardOperationId =>
+      _fileClipboardPasteTransferId ?? _fileClipboardOffers.currentOfferId;
   String get fileClipboardPasteStatus {
     if (_fileClipboardPastePreparing) return '正在锁定远程目标目录';
     final task = fileClipboardPasteTask;

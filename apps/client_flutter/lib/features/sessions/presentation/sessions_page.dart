@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
+import 'package:cross_desktop_remote/core/presentation/adaptive_layout.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/sessions/application/session_history_controller.dart';
@@ -46,84 +47,64 @@ class _SessionsPageState extends State<SessionsPage> {
       animation: Listenable.merge([...widget.sessions, widget.history]),
       builder: (context, _) {
         final session = _activeSession;
-        return ListView(
-          padding: const EdgeInsets.all(24),
+        return AppPageScaffold(
+          title: '会话',
+          subtitle: '查看当前连接质量、分页会话与文件传输审计记录。',
+          maxWidth: 980,
           children: [
-            Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 980),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(
-                      '会话',
-                      style: Theme.of(context).textTheme.headlineMedium,
-                    ),
-                    const SizedBox(height: 6),
-                    const Text('查看当前连接质量、分页会话与文件传输审计记录。'),
-                    const SizedBox(height: 24),
-                    if (session != null) _buildActiveSession(context, session),
-                    if (session != null) const SizedBox(height: 24),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            '最近会话',
-                            style: Theme.of(context).textTheme.titleLarge,
-                          ),
-                        ),
-                        if (widget.history.records.isNotEmpty)
-                          TextButton.icon(
-                            onPressed: _confirmClearHistory,
-                            icon: const Icon(Icons.delete_outline),
-                            label: const Text('清空'),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    if (widget.history.records.isEmpty)
-                      const Card(
-                        child: Padding(
-                          padding: EdgeInsets.all(24),
-                          child: Row(
-                            children: [
-                              Icon(Icons.history),
-                              SizedBox(width: 16),
-                              Expanded(child: Text('暂无会话记录；这里只保存连接元数据。')),
-                            ],
-                          ),
-                        ),
-                      )
-                    else
-                      for (final record in widget.history.records)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: _HistoryTile(
-                            record: record,
-                            history: widget.history,
-                          ),
-                        ),
-                    if (widget.history.hasMore)
-                      Center(
-                        child: OutlinedButton.icon(
-                          onPressed: widget.history.loadingMore
-                              ? null
-                              : () => unawaited(widget.history.loadNextPage()),
-                          icon: widget.history.loadingMore
-                              ? const SizedBox.square(
-                                  dimension: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Icon(Icons.expand_more),
-                          label: const Text('加载更多（每页 10 条）'),
-                        ),
-                      ),
-                  ],
+            if (session != null) _buildActiveSession(context, session),
+            if (session != null) const SizedBox(height: 24),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '最近会话',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                ),
+                if (widget.history.records.isNotEmpty)
+                  TextButton.icon(
+                    onPressed: _confirmClearHistory,
+                    icon: const Icon(Icons.delete_outline),
+                    label: const Text('清空'),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (widget.history.records.isEmpty)
+              const Card(
+                child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Row(
+                    children: [
+                      Icon(Icons.history),
+                      SizedBox(width: 16),
+                      Expanded(child: Text('暂无会话记录；这里只保存连接元数据。')),
+                    ],
+                  ),
+                ),
+              )
+            else
+              for (final record in widget.history.records)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: _HistoryTile(record: record, history: widget.history),
+                ),
+            if (widget.history.hasMore)
+              Center(
+                child: OutlinedButton.icon(
+                  onPressed: widget.history.loadingMore
+                      ? null
+                      : () => unawaited(widget.history.loadNextPage()),
+                  icon: widget.history.loadingMore
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.expand_more),
+                  label: const Text('加载更多（每页 10 条）'),
                 ),
               ),
-            ),
           ],
         );
       },

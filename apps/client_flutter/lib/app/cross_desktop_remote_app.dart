@@ -13,6 +13,11 @@ class CrossDesktopRemoteApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       navigatorKey: AppMessenger.navigatorKey,
       scaffoldMessengerKey: AppMessenger.scaffoldMessengerKey,
+      builder: (context, child) => AppNotificationPresenter(
+        scope: AppNotificationScope.main,
+        messengerKey: AppMessenger.scaffoldMessengerKey,
+        child: child ?? const SizedBox.shrink(),
+      ),
       theme: CrossDesktopTheme.light(),
       darkTheme: CrossDesktopTheme.dark(),
       themeMode: ThemeMode.system,

@@ -5,6 +5,7 @@ import 'package:cross_desktop_remote/core/discovery/lan_discovery_service.dart';
 import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/network/lan_address_service.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
+import 'package:cross_desktop_remote/core/presentation/adaptive_layout.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_coordinator.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_models.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
@@ -681,7 +682,6 @@ class _DevicesPageState extends State<DevicesPage> {
   Future<void> _rotateHostInvitation() async {
     final availability = _hostAvailability;
     if (!mounted || availability == null || !availability.available) return;
-    AppMessenger.show('正在向信令服务器申请新连接码', level: AppMessageLevel.info);
     try {
       await availability.invitationLease.rotateNow();
     } catch (error) {
@@ -751,7 +751,6 @@ class _DevicesPageState extends State<DevicesPage> {
       _isPublishing = true;
       _discoveryError = null;
       await _refreshDiscoveryDiagnostics();
-      AppMessenger.show('本机已上线并发布到局域网', level: AppMessageLevel.success);
     } catch (error) {
       _discoveryError = '发布局域网设备失败：$error';
       AppMessenger.show(_discoveryError!, level: AppMessageLevel.error);
@@ -809,10 +808,18 @@ class _DevicesPageState extends State<DevicesPage> {
         widget.trustedDevices,
       ]),
       builder: (context, _) {
+        final pagePadding = AppLayoutTokens.pagePadding(
+          AppLayoutScope.sizeOf(context),
+        );
         return CustomScrollView(
           slivers: [
             SliverPadding(
-              padding: const EdgeInsets.fromLTRB(24, 24, 24, 12),
+              padding: EdgeInsets.fromLTRB(
+                pagePadding,
+                pagePadding,
+                pagePadding,
+                12,
+              ),
               sliver: SliverToBoxAdapter(
                 child: Center(
                   child: ConstrainedBox(
@@ -835,7 +842,12 @@ class _DevicesPageState extends State<DevicesPage> {
               ),
             ),
             SliverPadding(
-              padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+              padding: EdgeInsets.fromLTRB(
+                pagePadding,
+                8,
+                pagePadding,
+                pagePadding,
+              ),
               sliver: SliverToBoxAdapter(
                 child: Center(
                   child: ConstrainedBox(
@@ -1474,7 +1486,8 @@ class _ConnectionCard extends StatelessWidget {
               if (role == RemoteRole.host)
                 _buildHostContent(
                   context,
-                  twoColumns: constraints.maxWidth >= 820,
+                  twoColumns:
+                      AppLayoutScope.sizeOf(context) == AppLayoutSize.expanded,
                 )
               else
                 _buildControllerContent(context),

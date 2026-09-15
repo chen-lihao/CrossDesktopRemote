@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cross_desktop_remote/core/discovery/lan_discovery_service.dart';
 import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/platform/device_capabilities.dart';
+import 'package:cross_desktop_remote/core/presentation/adaptive_layout.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_coordinator.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/features/devices/presentation/devices_page.dart';
@@ -26,8 +27,6 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
-  static const _desktopBreakpoint = 840.0;
-
   static const _destinations = <NavigationDestination>[
     NavigationDestination(
       icon: Icon(Icons.devices_outlined),
@@ -223,72 +222,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final useNavigationRail = constraints.maxWidth >= _desktopBreakpoint;
-
-        if (useNavigationRail) {
-          return _withRemoteViewerPortal(
-            Scaffold(
-              body: SafeArea(
-                child: Row(
-                  children: [
-                    NavigationRail(
-                      extended: constraints.maxWidth >= 1180,
-                      selectedIndex: _selectedIndex,
-                      onDestinationSelected: _select,
-                      leading: const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 20),
-                        child: Tooltip(
-                          message: 'CrossDesktopRemote',
-                          child: Icon(Icons.desktop_windows_outlined),
-                        ),
-                      ),
-                      destinations: _destinations
-                          .map(
-                            (destination) => NavigationRailDestination(
-                              icon: destination.icon,
-                              selectedIcon: destination.selectedIcon,
-                              label: Text(destination.label),
-                            ),
-                          )
-                          .toList(growable: false),
-                    ),
-                    const VerticalDivider(width: 1),
-                    Expanded(
-                      key: const ValueKey('workspace'),
-                      child: IndexedStack(
-                        index: _selectedIndex,
-                        children: _pages,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        }
-
-        return _withRemoteViewerPortal(
-          Scaffold(
-            appBar: AppBar(
-              title: const Text(
-                'CrossDesktopRemote',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            body: SafeArea(
-              child: IndexedStack(index: _selectedIndex, children: _pages),
-            ),
-            bottomNavigationBar: NavigationBar(
-              selectedIndex: _selectedIndex,
-              onDestinationSelected: _select,
-              destinations: _destinations,
-            ),
-          ),
-        );
-      },
+    return _withRemoteViewerPortal(
+      AdaptiveAppShell(
+        selectedIndex: _selectedIndex,
+        onDestinationSelected: _select,
+        destinations: _destinations,
+        body: IndexedStack(
+          key: const ValueKey('workspace'),
+          index: _selectedIndex,
+          children: _pages,
+        ),
+      ),
     );
   }
 

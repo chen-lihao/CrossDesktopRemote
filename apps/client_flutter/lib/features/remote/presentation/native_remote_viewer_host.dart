@@ -4,6 +4,7 @@
 // ignore_for_file: implementation_imports, invalid_use_of_internal_member
 
 import 'package:cross_desktop_remote/app/theme.dart';
+import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_host.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_presentation_controller.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_workspace.dart';
@@ -36,6 +37,10 @@ class NativeRemoteViewerHost implements RemoteViewerHost {
     }
     request.presentation.setVisible(true);
     _presentation = request.presentation;
+    final notificationScope = AppNotificationScope(
+      'remote-desktop-${identityHashCode(request.presentation)}',
+    );
+    final notificationKey = GlobalKey<ScaffoldMessengerState>();
 
     late final WindowEntry entry;
     late final RegularWindowController controller;
@@ -77,6 +82,13 @@ class NativeRemoteViewerHost implements RemoteViewerHost {
       builder: (_) => MaterialApp(
         title: _windowTitle(request),
         debugShowCheckedModeBanner: false,
+        scaffoldMessengerKey: notificationKey,
+        builder: (context, child) => AppNotificationPresenter(
+          scope: notificationScope,
+          messengerKey: notificationKey,
+          clearOnDispose: true,
+          child: child ?? const SizedBox.shrink(),
+        ),
         theme: CrossDesktopTheme.light(),
         darkTheme: CrossDesktopTheme.dark(),
         themeMode: ThemeMode.system,

@@ -7,6 +7,7 @@ import 'package:cross_desktop_remote/core/input/remote_input_reset.dart';
 import 'package:cross_desktop_remote/core/input/remote_shortcut_policy.dart';
 import 'package:cross_desktop_remote/core/platform/desktop_window_mode.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
+import 'package:cross_desktop_remote/core/presentation/operation_banner.dart';
 import 'package:cross_desktop_remote/core/signaling/remote_capabilities.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
@@ -189,6 +190,7 @@ Future<void> _showRemoteInputSettings(
                             !session.remoteSupportsPhysicalKeyboard) {
                           AppMessenger.show(
                             '当前被控端不支持系统输入法模式',
+                            context: context,
                             level: AppMessageLevel.warning,
                           );
                           return;
@@ -223,7 +225,10 @@ Future<void> _showRemoteInputSettings(
                     onPressed: session.canSendControl
                         ? () {
                             session.sendText('你好');
-                            AppMessenger.show('已发送中文诊断文本“你好”');
+                            AppMessenger.show(
+                              '已发送中文诊断文本“你好”',
+                              context: context,
+                            );
                           }
                         : null,
                     icon: const Icon(Icons.science_outlined),
@@ -581,7 +586,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _surfaceKey.currentState?.requestHardwareKeyboardFocus();
         });
-        AppMessenger.show('已进入全屏，按 Esc 可退出');
+        AppMessenger.show('已进入全屏，按 Esc 可退出', context: context);
       }
       return;
     }
@@ -603,7 +608,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
     );
     if (mounted) {
       setState(() => _rendererAttached = true);
-      AppMessenger.show('已退出全屏');
+      AppMessenger.show('已退出全屏', context: context);
     }
   }
 
@@ -613,7 +618,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _surfaceKey.currentState?.requestHardwareKeyboardFocus();
       });
-      AppMessenger.show('已退出全屏');
+      AppMessenger.show('已退出全屏', context: context);
     }
   }
 
@@ -656,6 +661,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
       value == RemotePointerMode.touchpad
           ? '触控板：双击第二下按住可拖动，双指轻点为右键'
           : '直接触控：按住拖动可选文字，双指轻点为右键',
+      context: context,
       level: AppMessageLevel.success,
     );
     _showGestureGuideOnce(context, value);
@@ -665,6 +671,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
     setState(() => _viewFit = value);
     AppMessenger.show(
       value == RemoteViewFit.contain ? '画面模式：完整适应' : '画面模式：填满并裁剪',
+      context: context,
       level: AppMessageLevel.success,
     );
   }
@@ -683,7 +690,7 @@ class _RemoteDesktopPanelState extends State<RemoteDesktopPanel> {
     _inputSettings.value = _inputSettings.value.copyWith(textInputMode: mode);
     widget.onTextInputModeChanged?.call(mode);
     _surfaceKey.currentState?.requestHardwareKeyboardFocus();
-    AppMessenger.show('文字输入：${mode.label}');
+    AppMessenger.show('文字输入：${mode.label}', context: context);
   }
 
   Widget _buildToolbar(
@@ -884,7 +891,7 @@ class _FullScreenRemoteDesktopPageState
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      AppMessenger.show('已进入全屏，可从顶部工具栏调出远程键盘');
+      AppMessenger.show('已进入全屏，可从顶部工具栏调出远程键盘', context: context);
     });
     if (Platform.isIOS || Platform.isAndroid) {
       unawaited(
@@ -917,6 +924,7 @@ class _FullScreenRemoteDesktopPageState
       value == RemotePointerMode.touchpad
           ? '触控板：双击第二下按住可拖动，双指轻点为右键'
           : '直接触控：按住拖动可选文字，双指轻点为右键',
+      context: context,
       level: AppMessageLevel.success,
     );
     _showGestureGuideOnce(context, value);
@@ -940,7 +948,7 @@ class _FullScreenRemoteDesktopPageState
     );
     widget.onTextInputModeChanged?.call(mode);
     _surfaceKey.currentState?.requestHardwareKeyboardFocus();
-    AppMessenger.show('文字输入：${mode.label}');
+    AppMessenger.show('文字输入：${mode.label}', context: context);
   }
 
   @override
@@ -973,6 +981,7 @@ class _FullScreenRemoteDesktopPageState
                       value == RemoteViewFit.contain
                           ? '画面模式：完整适应'
                           : '画面模式：填满并裁剪',
+                      context: context,
                       level: AppMessageLevel.success,
                     );
                   },
@@ -1044,36 +1053,21 @@ class _FileClipboardPasteProgress extends StatelessWidget {
         final progress = transferPending
             ? session.fileClipboardPasteTask?.progress
             : null;
-        final colorScheme = Theme.of(context).colorScheme;
-        return Material(
-          color: colorScheme.primaryContainer,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            child: Row(
-              children: [
-                const Icon(Icons.content_paste_go_outlined, size: 18),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    transferPending
-                        ? session.fileClipboardPasteStatus
-                        : '已记录文件；在远程 Finder/文件资源管理器按粘贴后才开始传输',
-                  ),
-                ),
-                if (transferPending) ...[
-                  const SizedBox(width: 12),
-                  SizedBox(
-                    width: 120,
-                    child: LinearProgressIndicator(value: progress),
-                  ),
-                ] else
-                  TextButton(
-                    onPressed: session.cancelFileClipboardOffer,
-                    child: const Text('取消'),
-                  ),
-              ],
-            ),
-          ),
+        final task = session.fileClipboardPasteTask;
+        return OperationBanner(
+          operationKey:
+              session.fileClipboardOperationId ?? 'file-clipboard-operation',
+          title: transferPending ? '正在粘贴文件' : '复制文件准备就绪',
+          collapsedLabel: transferPending ? '文件传输中' : '待粘贴文件',
+          details: transferPending
+              ? session.fileClipboardPasteStatus
+              : '在远程 Finder/文件资源管理器按粘贴后才开始传输',
+          progress: progress,
+          onCancel: transferPending && task != null && task.canCancel
+              ? () => session.cancelExplicitFileTransfer(task.id)
+              : !transferPending
+              ? session.cancelFileClipboardOffer
+              : null,
         );
       },
     );
@@ -1154,7 +1148,6 @@ class _RemoteToolbar extends StatelessWidget {
                         onSelected: (value) {
                           if (value == '__refresh_displays__') {
                             session.refreshRemoteDisplays();
-                            AppMessenger.show('正在刷新远程显示器列表');
                             return;
                           }
                           session.selectDisplay(value);
@@ -1807,7 +1800,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       _releaseDesktopKeys(reason: 'keyboard-mode-changed');
       _textFocus.unfocus();
       _hardwareFocus.requestFocus();
-      AppMessenger.show('已使用被控端 Windows 输入法，可直接键入拼音');
+      AppMessenger.show('已使用被控端 Windows 输入法，可直接键入拼音', context: context);
       return;
     }
     if (nextMode == RemoteKeyboardMode.compact) {
@@ -1829,7 +1822,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
         _systemKeyboardDocked = false;
       });
       _hardwareFocus.requestFocus();
-      AppMessenger.show('快捷小键盘已打开，可拖动并使用常用组合键');
+      AppMessenger.show('快捷小键盘已打开，可拖动并使用常用组合键', context: context);
       return;
     }
     setState(() {
@@ -2056,16 +2049,21 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       try {
         final shown = await _nativeIme.show(clientId: _imeClientId);
         if (!shown) throw StateError('iOS keyboard rejected first responder');
-        if (announce) AppMessenger.show('即时远程键盘已打开');
+        if (!mounted) return;
+        if (announce) {
+          AppMessenger.show('即时远程键盘已打开', context: context);
+        }
         return;
       } catch (error) {
         _handleNativeImeError(error);
       }
     }
     await _activateFlutterKeyboard();
+    if (!mounted) return;
     if (announce) {
       AppMessenger.show(
         Platform.isIOS ? '原生键盘不可用，已切换兼容输入模式' : '远程键盘已打开',
+        context: context,
         level: Platform.isIOS ? AppMessageLevel.warning : AppMessageLevel.info,
       );
     }
@@ -2414,9 +2412,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
                     top: 12,
                     left: 12,
                     right: 12,
-                    child: IgnorePointer(
-                      child: _FileClipboardPasteProgress(session: session),
-                    ),
+                    child: _FileClipboardPasteProgress(session: session),
                   ),
                   if (widget.inputSettings.pointerMode ==
                           RemotePointerMode.touchpad &&
@@ -3261,6 +3257,7 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       session.sendText(text);
       AppMessenger.show(
         '本地编辑文本已发送（${text.runes.length} 个字符）',
+        context: context,
         level: AppMessageLevel.success,
       );
     }
