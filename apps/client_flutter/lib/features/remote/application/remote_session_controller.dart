@@ -333,6 +333,7 @@ class RemoteSessionController extends ChangeNotifier
   Timer? _windowsCaptureRecoveryTimer;
   final List<RTCIceCandidate> _pendingCandidates = [];
   bool _remoteDescriptionSet = false;
+  bool _mediaNegotiationSealed = false;
   bool _initialized = false;
   bool _closing = false;
   bool _connectionEstablished = false;
@@ -2160,6 +2161,12 @@ class RemoteSessionController extends ChangeNotifier
     }
     _systemAudioSharingEnabled = enabled;
     notifyListeners();
+    if (enabled && _mediaNegotiationSealed && _audioSender == null) {
+      _systemAudioState = RemoteSystemAudioState.disabled;
+      _emitNotice('系统声音共享将在下一次远程连接生效');
+      notifyListeners();
+      return;
+    }
     await _serializeSystemAudioMutation(_reconcileHostSystemAudio);
   }
 
@@ -2423,20 +2430,6 @@ class RemoteSessionController extends ChangeNotifier
           break;
       }
     };
-
-    final audioTransceiver = await peerConnection.addTransceiver(
-      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-      init: RTCRtpTransceiverInit(
-        direction: role == RemoteRole.host
-            ? TransceiverDirection.SendOnly
-            : TransceiverDirection.RecvOnly,
-      ),
-    );
-    if (role == RemoteRole.host) {
-      _audioSender = audioTransceiver.sender;
-    } else {
-      _audioReceiver = audioTransceiver.receiver;
-    }
 
     if (role == RemoteRole.host) {
       final channel = await peerConnection.createDataChannel(
@@ -6652,6 +6645,7 @@ class RemoteSessionController extends ChangeNotifier
       );
       await _startHostCapture();
       if (!trusted) _signaling.send({'type': 'approve'});
+      _mediaNegotiationSealed = true;
       final offer = await _peerConnection!.createOffer({});
       await _peerConnection!.setLocalDescription(offer);
       if (trusted) {
@@ -6761,7 +6755,7 @@ class RemoteSessionController extends ChangeNotifier
       notifyListeners();
       return;
     }
-    final sender = _audioSender;
+    final sender = await _ensureHostSystemAudioSender();
     if (sender == null) {
       _systemAudioState = RemoteSystemAudioState.failed;
       _publishHostState();
@@ -6797,6 +6791,20 @@ class RemoteSessionController extends ChangeNotifier
       _publishHostState();
       notifyListeners();
     }
+  }
+
+  Future<RTCRtpSender?> _ensureHostSystemAudioSender() async {
+    final existing = _audioSender;
+    if (existing != null) return existing;
+    if (role != RemoteRole.host || _mediaNegotiationSealed) return null;
+    final peerConnection = _peerConnection;
+    if (peerConnection == null) return null;
+    final transceiver = await peerConnection.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendOnly),
+    );
+    _audioSender = transceiver.sender;
+    return _audioSender;
   }
 
   Future<void> _reconcileHostSystemAudio() async {
@@ -7860,6 +7868,7 @@ class RemoteSessionController extends ChangeNotifier
     _remoteTrackGeneration += 1;
     _presentedVideoFrameSize = null;
     _remoteDescriptionSet = false;
+    _mediaNegotiationSealed = false;
     _pendingCandidates.clear();
     _displaySources = const [];
     _displays = const [];

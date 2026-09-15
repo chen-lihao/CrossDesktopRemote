@@ -2,6 +2,7 @@
 #import "AudioUtils.h"
 #import "CameraUtils.h"
 #import "CrossDesktopVideoKeyFrame.h"
+#import "FlutterRTCAudioEngineBridge.h"
 
 #import "FlutterRTCDataChannel.h"
 #import "FlutterDataPacketCryptor.h"
@@ -245,6 +246,7 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
   BOOL _speakerOnButPreferBluetooth;
   AVAudioSessionPort _preferredInput;
   AudioManager* _audioManager;
+  FlutterRTCAudioEngineBridge* _audioEngineBridge;
 #if TARGET_OS_IPHONE || TARGET_OS_OSX
   FlutterRTCVideoPlatformViewFactory *_platformViewFactory;
 #endif
@@ -356,6 +358,17 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     _speakerOnButPreferBluetooth = NO;
     _eventChannel = eventChannel;
     _audioManager = AudioManager.sharedInstance;
+    __weak FlutterWebRTCPlugin* weakSelf = self;
+    _audioEngineBridge = [[FlutterRTCAudioEngineBridge alloc]
+        initWithSystemAudioCapturerProvider:^FlutterSystemAudioCapturer* _Nullable {
+          return weakSelf.systemAudioCapturer;
+        }
+        deviceChangeHandler:^{
+          FlutterWebRTCPlugin* strongSelf = weakSelf;
+          if (strongSelf != nil && strongSelf.eventSink != nil) {
+            postEvent(strongSelf.eventSink, @{ @"event" : @"onDeviceChange" });
+          }
+        }];
 
 #if TARGET_OS_IPHONE
     _preferredInput = AVAudioSessionPortHeadphones;
@@ -394,9 +407,6 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
                                                name:AVAudioSessionRouteChangeNotification
                                              object:session];
 #endif
-
-  // Observe audio device module events.
-  _peerConnectionFactory.audioDeviceModule.observer = self;
 
   return self;
 }
@@ -504,11 +514,11 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
                                                              decoderFactory:decoderFactory
                                                       audioProcessingModule:_audioManager.audioProcessingModule];
 
-        // The plugin must remain the default audio-device observer so its
-        // system-audio source can route ScreenCaptureKit PCM into WebRTC.
-        // An embedding plugin may explicitly replace that process-wide owner.
+        // Keep the complete delegate contract in a dedicated, strongly-retained
+        // bridge. WebRTC invokes every required selector from its worker thread.
+        // An embedding plugin may explicitly replace this process-wide owner.
         _peerConnectionFactory.audioDeviceModule.observer =
-            gAudioDeviceModuleObserver != nil ? gAudioDeviceModuleObserver : self;
+            gAudioDeviceModuleObserver != nil ? gAudioDeviceModuleObserver : _audioEngineBridge;
 
 #if TARGET_OS_OSX
         // CoreAudio ADM requires explicit device initialization on macOS
@@ -2922,36 +2932,6 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
         }
     }
     return nil;
-}
-
-#pragma mark - RTCAudioDeviceModuleDelegate methods
-
-- (NSInteger)audioDeviceModule:(RTCAudioDeviceModule*)audioDeviceModule
-                        engine:(AVAudioEngine*)engine
-      configureInputFromSource:(AVAudioNode* _Nullable)source
-                 toDestination:(AVAudioNode*)destination
-                    withFormat:(AVAudioFormat*)format
-                       context:(NSDictionary*)context {
-#if TARGET_OS_OSX
-  FlutterSystemAudioCapturer* capturer = self.systemAudioCapturer;
-  if (capturer != nil && capturer.isActive) {
-    return [capturer configureInputForEngine:engine
-                                     source:source
-                                destination:destination
-                                     format:format];
-  }
-#endif
-  if (source != nil) {
-    [engine connect:source to:destination format:format];
-  }
-  return 0;
-}
-
-- (void)audioDeviceModuleDidUpdateDevices:(RTCAudioDeviceModule *)audioDeviceModule {
-    NSLog(@"audioDeviceModule did update devices");
-    if (self.eventSink) {
-      postEvent( self.eventSink, @{@"event" : @"onDeviceChange"});
-    }
 }
 
 @end
