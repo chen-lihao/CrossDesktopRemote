@@ -8,8 +8,6 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 /// per-session boolean is not sufficient when multiple Flutter views exist.
 abstract interface class RemoteAudioPlayoutPlatform {
   Future<void> activateSharedPlayout();
-
-  Future<void> deactivateSharedPlayout();
 }
 
 class FlutterWebRtcRemoteAudioPlayoutPlatform
@@ -20,12 +18,6 @@ class FlutterWebRtcRemoteAudioPlayoutPlatform
   Future<void> activateSharedPlayout() async {
     if (!Platform.isIOS) return;
     await Helper.setAppleAudioIOMode(AppleAudioIOMode.remoteOnly);
-  }
-
-  @override
-  Future<void> deactivateSharedPlayout() async {
-    if (!Platform.isIOS) return;
-    await Helper.deactivateAppleAudioSession();
   }
 }
 
@@ -84,9 +76,10 @@ class RemoteAudioPlayoutCoordinator {
             completer.complete();
             return;
           }
-          if (_owners.isEmpty) {
-            await _platform.deactivateSharedPlayout();
-          }
+          // The WebRTC plugin owns AVAudioSession teardown together with the
+          // final RTCPeerConnection. Releasing a Dart-side policy lease must
+          // never race that native teardown or deactivate audio for another
+          // Flutter view. A later first owner reapplies the playback policy.
           completer.complete();
         })
         .catchError((Object error, StackTrace stackTrace) {

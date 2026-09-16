@@ -37,6 +37,8 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>CrossDesktopRemote 需要连接同一局域网中的 Mac，以建立远程桌面会话。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>WebRTC 音频组件需要初始化系统音频设备以播放远程声音；CrossDesktopRemote 不会在未经你操作和授权时发送麦克风音频。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

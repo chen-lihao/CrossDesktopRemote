@@ -343,6 +343,7 @@ class RemoteSessionController extends ChangeNotifier
   bool _mediaNegotiationSealed = false;
   bool _initialized = false;
   bool _closing = false;
+  Future<void>? _closeSessionFuture;
   bool _connectionEstablished = false;
   bool _trustedInvalidationInProgress = false;
   bool _authorizingPeer = false;
@@ -7832,8 +7833,24 @@ class RemoteSessionController extends ChangeNotifier
     }
   }
 
-  Future<void> _closeSession({required bool notifyPeer}) async {
+  Future<void> _closeSession({required bool notifyPeer}) {
+    final activeClose = _closeSessionFuture;
+    if (activeClose != null) return activeClose;
+
     _closing = true;
+    late final Future<void> closeOperation;
+    closeOperation = _performCloseSession(notifyPeer: notifyPeer)
+        .whenComplete(() {
+          if (identical(_closeSessionFuture, closeOperation)) {
+            _closeSessionFuture = null;
+          }
+          _closing = false;
+        });
+    _closeSessionFuture = closeOperation;
+    return closeOperation;
+  }
+
+  Future<void> _performCloseSession({required bool notifyPeer}) async {
     final trustedRouteSessionId = _trustedRouteSessionId;
     _resetTrustedPairing(notify: false);
     _cancelConnectionRecovery();
@@ -7899,21 +7916,26 @@ class RemoteSessionController extends ChangeNotifier
     _videoSender = null;
     _videoReceiver = null;
     _audioSender = null;
-    _audioReceiver = null;
+    final remoteAudioTrack = _remoteAudioTrack;
     _remoteAudioTrack = null;
-    await _peerConnection?.close();
-    await _peerConnection?.dispose();
-    _peerConnection = null;
-    final remoteAudioPlayoutLease = _remoteAudioPlayoutLease;
-    _remoteAudioPlayoutLease = null;
-    try {
-      await remoteAudioPlayoutLease?.release();
-    } catch (_) {
-      // The media session is already closed. A platform audio-session cleanup
-      // failure must not leave the controller in its closing state.
+    if (remoteAudioTrack != null) {
+      remoteAudioTrack.enabled = false;
     }
+    _audioReceiver = null;
     _remoteVideoBinding = null;
     _remoteTrackGeneration += 1;
+
+    // `dispose()` is the single native terminal operation. flutter_webrtc's
+    // iOS implementation closes the RTCPeerConnection, removes its receivers
+    // and only then releases the final AVAudioSession owner. Calling close()
+    // followed by dispose() performs that teardown twice and races the
+    // process-wide playback policy during disconnect.
+    final peerConnection = _peerConnection;
+    _peerConnection = null;
+    await peerConnection?.dispose();
+    final remoteAudioPlayoutLease = _remoteAudioPlayoutLease;
+    _remoteAudioPlayoutLease = null;
+    await remoteAudioPlayoutLease?.release();
     _presentedVideoFrameSize = null;
     _remoteDescriptionSet = false;
     _mediaNegotiationSealed = false;
@@ -8036,7 +8058,6 @@ class RemoteSessionController extends ChangeNotifier
         ? RemoteSystemAudioState.disabled
         : RemoteSystemAudioState.unsupported;
     _updateClipboardStatus();
-    _closing = false;
   }
 
   Future<void> _releaseHostInputState() async {

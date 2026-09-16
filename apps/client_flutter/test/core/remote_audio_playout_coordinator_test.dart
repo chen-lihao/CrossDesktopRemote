@@ -4,16 +4,10 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 class _FakePlayoutPlatform implements RemoteAudioPlayoutPlatform {
   int activations = 0;
-  int deactivations = 0;
 
   @override
   Future<void> activateSharedPlayout() async {
     activations += 1;
-  }
-
-  @override
-  Future<void> deactivateSharedPlayout() async {
-    deactivations += 1;
   }
 }
 
@@ -49,11 +43,9 @@ void main() {
       expect(coordinator.activeLeaseCount, 2);
 
       await first.release();
-      expect(platform.deactivations, 0);
       expect(coordinator.activeLeaseCount, 1);
 
       await second.release();
-      expect(platform.deactivations, 1);
       expect(coordinator.activeLeaseCount, 0);
     },
   );
@@ -68,9 +60,8 @@ void main() {
     final second = await coordinator.acquire();
 
     expect(platform.activations, 2);
-    expect(platform.deactivations, 1);
 
     await second.release();
-    expect(platform.deactivations, 2);
+    expect(coordinator.activeLeaseCount, 0);
   });
 }
