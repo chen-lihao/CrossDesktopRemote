@@ -138,7 +138,19 @@
     else
       NSLog(@"RTC AudioSession deactive is successful ");
   }
+  BOOL shouldNotifyOthers = error == nil;
   [session unlockForConfiguration];
+  if (shouldNotifyOthers) {
+    // WebRTC's wrapper balances its activation count above. Notify audio
+    // applications that were interrupted before the shared playback policy
+    // became active so they can resume immediately.
+    [session.session setActive:NO
+                   withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                         error:&error];
+    if (error != nil) {
+      NSLog(@"RTC AudioSession notify-others deactivation failed: %@", error);
+    }
+  }
 }
 
 

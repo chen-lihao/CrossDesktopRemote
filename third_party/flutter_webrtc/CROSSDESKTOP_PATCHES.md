@@ -107,6 +107,28 @@ CrossDesktopRemote-specific cross-platform renderer binding changes:
 - keep presentation repair non-destructive: a healthy Texture may be rebound to
   the same exact track for validation but must not be cleared first.
 
+CrossDesktopRemote-specific desktop system-audio changes:
+
+- expose a session-scoped system-output capture API that remains independent of
+  display video tracks and never moves PCM through Dart;
+- capture macOS system output with ScreenCaptureKit and feed it into the pinned
+  WebRTC binary's external AudioDeviceModule instead of routing it through
+  `AVAudioEngine.inputNode` or requesting microphone access;
+- normalize ScreenCaptureKit batches to 48 kHz signed 16-bit stereo PCM and
+  deliver them with the ScreenCaptureKit presentation clock; let WebRTC's
+  FineAudioBuffer produce codec-sized 10 ms blocks instead of introducing a
+  second timer, prebuffer or synthetic silence clock;
+- keep the external audio device full duplex: its output side pulls WebRTC
+  playout through the default macOS AudioUnit, preserving remote audio when a
+  Mac acts as the controller;
+- publish a versioned, microphone-free runtime backend contract before capture
+  starts and fail closed rather than silently falling back to microphone input;
+- expose privacy-safe counters for captured, delivered, timestamp-discontinuous,
+  conversion-failed and delivery-failed frames;
+- configure iOS controller playout as full-band `playback/default` with
+  `mixWithOthers`, reference-count it across Flutter views, and notify other
+  applications when the final remote session releases the audio session.
+
 Do not patch `~/.pub-cache`. Upgrade by importing a reviewed upstream release
 into this directory, reapplying the documented patch, and running every
 platform build before changing the dependency lock file.

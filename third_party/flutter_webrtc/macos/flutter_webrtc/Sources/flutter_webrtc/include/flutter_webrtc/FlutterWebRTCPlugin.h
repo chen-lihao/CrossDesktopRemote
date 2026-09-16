@@ -14,6 +14,7 @@
 @class AudioManager;
 @class FlutterScreenCaptureKitCapturer;
 @class FlutterSystemAudioCapturer;
+@class FlutterRTCExternalAudioDevice;
 
 void postEvent(FlutterEventSink _Nullable sink, id _Nullable event);
 
@@ -47,6 +48,7 @@ typedef void (^CapturerStopHandler)(CompletionHandler _Nonnull handler);
     NSMutableDictionary<NSString*, FlutterScreenCaptureKitCapturer*>* _Nullable
         screenCaptureKitCapturers;
 @property(nonatomic, strong) FlutterSystemAudioCapturer* _Nullable systemAudioCapturer;
+@property(nonatomic, strong) FlutterRTCExternalAudioDevice* _Nullable externalAudioDevice;
 #endif
 
 @property(nonatomic, strong)

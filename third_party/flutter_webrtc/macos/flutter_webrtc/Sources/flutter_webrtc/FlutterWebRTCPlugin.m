@@ -11,6 +11,7 @@
 #import "FlutterRTCPeerConnection.h"
 #import "FlutterRTCVideoRenderer.h"
 #if TARGET_OS_OSX
+#import "FlutterRTCExternalAudioDevice.h"
 #import "FlutterRTCSystemAudioCapturer.h"
 #endif
 #import "FlutterRTCFrameCryptor.h"
@@ -360,10 +361,7 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     _audioManager = AudioManager.sharedInstance;
     __weak FlutterWebRTCPlugin* weakSelf = self;
     _audioEngineBridge = [[FlutterRTCAudioEngineBridge alloc]
-        initWithSystemAudioCapturerProvider:^FlutterSystemAudioCapturer* _Nullable {
-          return weakSelf.systemAudioCapturer;
-        }
-        deviceChangeHandler:^{
+        initWithDeviceChangeHandler:^{
           FlutterWebRTCPlugin* strongSelf = weakSelf;
           if (strongSelf != nil && strongSelf.eventSink != nil) {
             postEvent(strongSelf.eventSink, @{ @"event" : @"onDeviceChange" });
@@ -494,18 +492,18 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
         VideoEncoderFactorySimulcast* simulcastFactory =
             [[VideoEncoderFactorySimulcast alloc] initWithPrimary:encoderFactory fallback:encoderFactory];
 
-        // Use the AVAudioEngine audio device module on both iOS and macOS.
-        //
-        // macOS previously used the CoreAudio ADM (value 0) to avoid an
-        // AVAudioIONodeImpl::SetOutputFormat sample-rate assertion when the
-        // microphone toggled during screen share (#1986, #1990). That crash
-        // predates the audio engine stability fixes shipped in WebRTC-SDK
-        // 144.7559.04+ (webrtc-sdk/webrtc#228: guarded connect:to:format:,
-        // state-based voice-processing checks, engine recreate ordering).
-        // The AudioEngine ADM enables platform voice processing (Apple
-        // AEC/NS/AGC) and the audio processing options API on macOS.
-        // iOS also requires the AudioEngine ADM because the CoreAudio ADM
-        // crashes when NSMicrophoneUsageDescription is absent (#2007, #2009).
+#if TARGET_OS_OSX
+        // System output is not a microphone. Install one full-duplex external
+        // ADM for the lifetime of the factory: ScreenCaptureKit feeds its
+        // recording half and the playout half renders ordinary remote audio.
+        // This avoids AVAudioEngine.inputNode and therefore never requests
+        // microphone permission.
+        self.externalAudioDevice = [[FlutterRTCExternalAudioDevice alloc] init];
+        _peerConnectionFactory =
+            [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:simulcastFactory
+                                                      decoderFactory:decoderFactory
+                                                         audioDevice:self.externalAudioDevice];
+#else
         RTCAudioDeviceModuleType audioDeviceModuleType = RTCAudioDeviceModuleTypeAudioEngine;
         _peerConnectionFactory =
             [[RTCPeerConnectionFactory alloc] initWithAudioDeviceModuleType:audioDeviceModuleType
@@ -513,30 +511,14 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
                                                              encoderFactory:simulcastFactory
                                                              decoderFactory:decoderFactory
                                                       audioProcessingModule:_audioManager.audioProcessingModule];
+#endif
 
+#if !TARGET_OS_OSX
         // Keep the complete delegate contract in a dedicated, strongly-retained
         // bridge. WebRTC invokes every required selector from its worker thread.
         // An embedding plugin may explicitly replace this process-wide owner.
         _peerConnectionFactory.audioDeviceModule.observer =
             gAudioDeviceModuleObserver != nil ? gAudioDeviceModuleObserver : _audioEngineBridge;
-
-#if TARGET_OS_OSX
-        // CoreAudio ADM requires explicit device initialization on macOS
-        RTCAudioDeviceModule* audioDeviceModule = [_peerConnectionFactory audioDeviceModule];
-        if (audioDeviceModule) {
-            NSArray* inputDevices = [audioDeviceModule inputDevices];
-            if (inputDevices.count > 0) {
-                RTCIODevice* defaultInput = inputDevices[0];
-                [audioDeviceModule setInputDevice:defaultInput];
-                NSLog(@"CoreAudio ADM: Selected input device: %@", defaultInput.name);
-            }
-            NSArray* outputDevices = [audioDeviceModule outputDevices];
-            if (outputDevices.count > 0) {
-                RTCIODevice* defaultOutput = outputDevices[0];
-                [audioDeviceModule setOutputDevice:defaultOutput];
-                NSLog(@"CoreAudio ADM: Selected output device: %@", defaultOutput.name);
-            }
-        }
 #endif
 
         RTCPeerConnectionFactoryOptions *options = [[RTCPeerConnectionFactoryOptions alloc] init];
@@ -627,6 +609,16 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     result([FlutterError errorWithCode:@"SystemAudioUnavailable"
                                message:@"System audio capture is not available on this platform"
                                details:nil]);
+#endif
+  } else if ([@"getSystemAudioBackendInfo" isEqualToString:call.method]) {
+#if TARGET_OS_OSX
+    [self getSystemAudioBackendInfo:result];
+#else
+    result(@{
+      @"backend" : @"unsupported",
+      @"version" : @0,
+      @"microphoneFree" : @NO,
+    });
 #endif
   } else if ([@"stopSystemAudio" isEqualToString:call.method]) {
 #if TARGET_OS_OSX
@@ -1400,6 +1392,10 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     if (self.audioSessionManagementEnabled) {
       [AudioUtils setAppleAudioConfiguration:configuration];
     }
+    result(nil);
+  }
+  else if([@"deactivateAppleAudioSession" isEqualToString:call.method]) {
+    [AudioUtils deactiveRtcAudioSession];
     result(nil);
   }
 #endif

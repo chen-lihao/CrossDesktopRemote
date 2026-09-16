@@ -220,6 +220,12 @@ class Helper {
           AppleNativeAudioManagement.getAppleAudioConfigurationForMode(mode,
               preferSpeakerOutput: preferSpeakerOutput));
 
+  /// Release the process-wide iOS playback session after the final WebRTC
+  /// owner has stopped. The native layer notifies interrupted applications so
+  /// their audio can resume.
+  static Future<void> deactivateAppleAudioSession() =>
+      AppleNativeAudioManagement.deactivateAudioSession();
+
   /// Request capture permission for Android/macOS.
   ///
   /// When [fullScreenOnly] is true and running on Android 14+ (API 34), the

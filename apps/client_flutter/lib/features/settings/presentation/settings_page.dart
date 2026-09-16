@@ -314,15 +314,22 @@ class SettingsPage extends StatelessWidget {
                 SwitchListTile(
                   title: const Text('共享本机系统声音'),
                   subtitle: Text(
-                    hostSession!.state == RemoteSessionState.streaming ||
-                            hostSession!.state ==
-                                RemoteSessionState.reconnecting
+                    !hostSession!.systemAudioCaptureSupported
+                        ? '当前平台尚不支持系统声音采集'
+                        : hostSession!.state == RemoteSessionState.streaming ||
+                              hostSession!.state ==
+                                  RemoteSessionState.reconnecting
                         ? hostSession!.systemAudioStatusLabel
                         : '默认关闭；开启后，仅在远程会话中采集并发送系统播放声音',
                   ),
-                  value: settings.systemAudioSharingEnabled,
-                  onChanged: (value) =>
-                      unawaited(settings.setSystemAudioSharingEnabled(value)),
+                  value:
+                      hostSession!.systemAudioCaptureSupported &&
+                      settings.systemAudioSharingEnabled,
+                  onChanged: hostSession!.systemAudioCaptureSupported
+                      ? (value) => unawaited(
+                          settings.setSystemAudioSharingEnabled(value),
+                        )
+                      : null,
                 ),
                 const ListTile(
                   leading: Icon(Icons.privacy_tip_outlined),

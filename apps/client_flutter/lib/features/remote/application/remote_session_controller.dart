@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:cross_desktop_remote/core/audio/system_audio_capture_adapter.dart';
+import 'package:cross_desktop_remote/core/audio/remote_audio_playout_coordinator.dart';
 import 'package:cross_desktop_remote/core/clipboard/clipboard_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
 import 'package:cross_desktop_remote/core/files/explicit_file_transfer_platform_adapter.dart';
@@ -191,6 +192,7 @@ class RemoteSessionController extends ChangeNotifier
     ExplicitFileTransferPlatformAdapter? fileTransferPlatformAdapter,
     FilePasteTargetPlatformAdapter? filePasteTargetPlatformAdapter,
     SystemAudioCaptureAdapter? systemAudioCaptureAdapter,
+    RemoteAudioPlayoutCoordinator? remoteAudioPlayoutCoordinator,
     Stream<DesktopWindowLifecycleEvent>? hostWindowLifecycleEvents,
     RemoteQualityProfile initialQuality = RemoteQualityProfile.automatic,
     RemoteVideoPolicy? initialVideoPolicy,
@@ -213,6 +215,9 @@ class RemoteSessionController extends ChangeNotifier
            createFilePasteTargetPlatformAdapter(),
        _systemAudioCapture =
            systemAudioCaptureAdapter ?? createSystemAudioCaptureAdapter(),
+       _remoteAudioPlayout =
+           remoteAudioPlayoutCoordinator ??
+           RemoteAudioPlayoutCoordinator.instance,
        _selectedQuality = initialQuality,
        _selectedVideoPolicy =
            initialVideoPolicy ?? RemoteVideoPolicy.fromLegacy(initialQuality),
@@ -254,6 +259,8 @@ class RemoteSessionController extends ChangeNotifier
   final ExplicitFileTransferPlatformAdapter _fileTransferPlatform;
   final FilePasteTargetPlatformAdapter _filePasteTargetPlatform;
   final SystemAudioCaptureAdapter _systemAudioCapture;
+  final RemoteAudioPlayoutCoordinator _remoteAudioPlayout;
+  RemoteAudioPlayoutLease? _remoteAudioPlayoutLease;
   final TextClipboardSyncEngine _clipboardSync;
   final ClipboardApplyGate _clipboardApplyGate = ClipboardApplyGate();
   late final ExplicitFileTransferEngine _fileTransfer;
@@ -2364,10 +2371,21 @@ class RemoteSessionController extends ChangeNotifier
   }
 
   Future<void> _createPeerConnection() async {
-    final peerConnection = await createPeerConnection({
-      'iceServers': <Map<String, dynamic>>[],
-      'sdpSemantics': 'unified-plan',
-    });
+    if (role == RemoteRole.controller && _remoteAudioPlayoutLease == null) {
+      _remoteAudioPlayoutLease = await _remoteAudioPlayout.acquire();
+    }
+    late final RTCPeerConnection peerConnection;
+    try {
+      peerConnection = await createPeerConnection({
+        'iceServers': <Map<String, dynamic>>[],
+        'sdpSemantics': 'unified-plan',
+      });
+    } catch (_) {
+      final lease = _remoteAudioPlayoutLease;
+      _remoteAudioPlayoutLease = null;
+      await lease?.release();
+      rethrow;
+    }
     _peerConnection = peerConnection;
 
     bool isCurrentPeerConnection() {
@@ -6782,6 +6800,7 @@ class RemoteSessionController extends ChangeNotifier
       _localAudioStream = stream;
       _systemAudioState = RemoteSystemAudioState.capturing;
       await sender.replaceTrack(tracks.single);
+      await _configureSystemAudioSender(sender);
       _systemAudioState = RemoteSystemAudioState.sending;
       _publishHostState();
       notifyListeners();
@@ -6807,6 +6826,25 @@ class RemoteSessionController extends ChangeNotifier
     );
     _audioSender = transceiver.sender;
     return _audioSender;
+  }
+
+  Future<void> _configureSystemAudioSender(RTCRtpSender sender) async {
+    final parameters = sender.parameters;
+    final encodings = parameters.encodings;
+    if (encodings == null || encodings.isEmpty) return;
+    for (final encoding in encodings) {
+      encoding.maxBitrate = 160000;
+      encoding.priority = RTCPriorityType.high;
+      encoding.networkPriority = RTCPriorityType.high;
+    }
+    // Quality tuning is optional. Some older libwebrtc builds reject one of
+    // these fields even though the negotiated Opus sender is healthy. Falling
+    // back to the negotiated defaults keeps audio available on those clients.
+    try {
+      await sender.setParameters(parameters);
+    } catch (_) {
+      // Keep the active track; WebRTC congestion control remains authoritative.
+    }
   }
 
   Future<void> _reconcileHostSystemAudio() async {
@@ -7866,6 +7904,14 @@ class RemoteSessionController extends ChangeNotifier
     await _peerConnection?.close();
     await _peerConnection?.dispose();
     _peerConnection = null;
+    final remoteAudioPlayoutLease = _remoteAudioPlayoutLease;
+    _remoteAudioPlayoutLease = null;
+    try {
+      await remoteAudioPlayoutLease?.release();
+    } catch (_) {
+      // The media session is already closed. A platform audio-session cleanup
+      // failure must not leave the controller in its closing state.
+    }
     _remoteVideoBinding = null;
     _remoteTrackGeneration += 1;
     _presentedVideoFrameSize = null;

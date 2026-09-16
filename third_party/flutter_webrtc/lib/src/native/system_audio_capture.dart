@@ -9,6 +9,14 @@ import 'utils.dart';
 class SystemAudioCapture {
   const SystemAudioCapture._();
 
+  static Future<Map<String, dynamic>> backendInfo() async {
+    final response = await WebRTC.invokeMethod<Map<dynamic, dynamic>, dynamic>(
+      'getSystemAudioBackendInfo',
+    );
+    return response?.map((key, value) => MapEntry(key.toString(), value)) ??
+        const <String, dynamic>{};
+  }
+
   static Future<MediaStream> start() async {
     final response = await WebRTC.invokeMethod<Map<dynamic, dynamic>, dynamic>(
       'getSystemAudio',

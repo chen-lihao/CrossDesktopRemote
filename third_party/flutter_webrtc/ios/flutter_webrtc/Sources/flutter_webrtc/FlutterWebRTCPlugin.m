@@ -1231,6 +1231,10 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     }
     result(nil);
   }
+  else if([@"deactivateAppleAudioSession" isEqualToString:call.method]) {
+    [AudioUtils deactiveRtcAudioSession];
+    result(nil);
+  }
 #endif
   else if ([@"getLocalDescription" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;

@@ -2,6 +2,33 @@ import 'dart:io';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+enum SystemAudioCaptureBackend {
+  windowsLoopback,
+  appleExternalAdm,
+  unsupported,
+}
+
+/// Static platform routing. macOS performs an additional native runtime
+/// handshake before capture starts, so a stale or incompatible plugin cannot
+/// fall back to microphone input.
+SystemAudioCaptureBackend systemAudioCaptureBackendFor(String operatingSystem) {
+  return switch (operatingSystem.trim().toLowerCase()) {
+    'windows' => SystemAudioCaptureBackend.windowsLoopback,
+    'macos' => SystemAudioCaptureBackend.appleExternalAdm,
+    _ => SystemAudioCaptureBackend.unsupported,
+  };
+}
+
+bool isCompatibleAppleSystemAudioBackendInfo(Map<String, dynamic> info) {
+  final version = info['version'];
+  return info['backend'] == 'screen-capture-kit-external-adm' &&
+      version is num &&
+      version >= 3 &&
+      info['microphoneFree'] == true &&
+      info['deliveryMode'] == 'capture-clock-render-block' &&
+      info['frameDurationMs'] == 10;
+}
+
 enum RemoteSystemAudioState {
   unsupported,
   disabled,
@@ -26,13 +53,22 @@ class FlutterWebRtcSystemAudioCaptureAdapter
     implements SystemAudioCaptureAdapter {
   const FlutterWebRtcSystemAudioCaptureAdapter();
 
-  @override
-  bool get supported => Platform.isWindows || Platform.isMacOS;
+  SystemAudioCaptureBackend get backend =>
+      systemAudioCaptureBackendFor(Platform.operatingSystem);
 
   @override
-  Future<MediaStream> start() {
+  bool get supported => backend != SystemAudioCaptureBackend.unsupported;
+
+  @override
+  Future<MediaStream> start() async {
     if (!supported) {
       throw UnsupportedError('当前平台尚未实现系统声音采集');
+    }
+    if (Platform.isMacOS) {
+      final info = await SystemAudioCapture.backendInfo();
+      if (!isCompatibleAppleSystemAudioBackendInfo(info)) {
+        throw UnsupportedError('macOS 外部系统音频后端未就绪');
+      }
     }
     return SystemAudioCapture.start();
   }

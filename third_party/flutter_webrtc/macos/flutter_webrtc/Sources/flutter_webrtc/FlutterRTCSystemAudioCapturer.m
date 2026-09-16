@@ -4,21 +4,19 @@
 
 #import "LocalAudioTrack.h"
 #import "FlutterRTCMediaStream.h"
+#import "FlutterRTCExternalAudioDevice.h"
 
 #import <CoreMedia/CoreMedia.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
 static NSString* const FlutterSystemAudioErrorDomain = @"FlutterSystemAudioCapture";
-static const NSUInteger FlutterSystemAudioMaximumPendingBuffers = 20;
 
 API_AVAILABLE(macos(13.0))
 @interface FlutterSystemAudioCapturer () <SCStreamOutput>
 
 @property(nonatomic, strong, nullable) SCStream* stream;
-@property(nonatomic, strong, nullable) AVAudioPlayerNode* playerNode;
-@property(nonatomic, weak, nullable) AVAudioEngine* engine;
+@property(nonatomic, weak) FlutterRTCExternalAudioDevice* audioDevice;
 @property(nonatomic, strong) dispatch_queue_t captureQueue;
-@property(nonatomic) NSUInteger pendingBufferCount;
 @property(nonatomic, readwrite, getter=isActive) BOOL active;
 @property(nonatomic) BOOL cancelled;
 
@@ -27,9 +25,10 @@ API_AVAILABLE(macos(13.0))
 
 @implementation FlutterSystemAudioCapturer
 
-- (instancetype)init {
+- (instancetype)initWithAudioDevice:(FlutterRTCExternalAudioDevice*)audioDevice {
   self = [super init];
   if (self) {
+    _audioDevice = audioDevice;
     _captureQueue = dispatch_queue_create("com.crossdesktopremote.system-audio", DISPATCH_QUEUE_SERIAL);
   }
   return self;
@@ -119,15 +118,7 @@ API_AVAILABLE(macos(13.0))
 - (void)stopWithCompletion:(void (^)(void))completion {
   self.cancelled = YES;
   self.active = NO;
-  self.pendingBufferCount = 0;
-  [self.playerNode stop];
-  [self.playerNode reset];
-  if (self.engine != nil && self.playerNode.engine == self.engine) {
-    [self.engine disconnectNodeOutput:self.playerNode];
-    [self.engine detachNode:self.playerNode];
-  }
-  self.playerNode = nil;
-  self.engine = nil;
+  [self.audioDevice detachSystemAudioSource];
 
   if (@available(macOS 12.3, *)) {
     SCStream* stream = self.stream;
@@ -147,31 +138,6 @@ API_AVAILABLE(macos(13.0))
   }
 }
 
-- (NSInteger)configureInputForEngine:(AVAudioEngine*)engine
-                              source:(AVAudioNode* _Nullable)source
-                         destination:(AVAudioNode*)destination
-                              format:(AVAudioFormat*)format {
-  if (!self.active) {
-    if (source != nil) {
-      [engine connect:source to:destination format:format];
-    }
-    return 0;
-  }
-
-  AVAudioPlayerNode* playerNode = [[AVAudioPlayerNode alloc] init];
-  AVAudioFormat* captureFormat = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:48000
-                                                                                channels:2];
-  if (captureFormat == nil) {
-    return -1;
-  }
-  [engine attachNode:playerNode];
-  [engine connect:playerNode to:destination format:captureFormat];
-  self.engine = engine;
-  self.playerNode = playerNode;
-  [playerNode play];
-  return 0;
-}
-
 - (void)stream:(SCStream*)stream
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                    ofType:(SCStreamOutputType)type API_AVAILABLE(macos(13.0)) {
@@ -180,61 +146,7 @@ API_AVAILABLE(macos(13.0))
       !CMSampleBufferDataIsReady(sampleBuffer)) {
     return;
   }
-  AVAudioPlayerNode* playerNode = self.playerNode;
-  if (playerNode == nil) {
-    return;
-  }
-  @synchronized(self) {
-    if (self.pendingBufferCount >= FlutterSystemAudioMaximumPendingBuffers) {
-      return;
-    }
-    self.pendingBufferCount += 1;
-  }
-
-  CMAudioFormatDescriptionRef formatDescription =
-      (CMAudioFormatDescriptionRef)CMSampleBufferGetFormatDescription(sampleBuffer);
-  const AudioStreamBasicDescription* streamDescription =
-      CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription);
-  AVAudioFormat* format = streamDescription == NULL
-                              ? nil
-                              : [[AVAudioFormat alloc] initWithStreamDescription:streamDescription];
-  CMItemCount sampleCount = CMSampleBufferGetNumSamples(sampleBuffer);
-  AVAudioPCMBuffer* pcmBuffer =
-      format == nil || sampleCount <= 0
-          ? nil
-          : [[AVAudioPCMBuffer alloc] initWithPCMFormat:format
-                                         frameCapacity:(AVAudioFrameCount)sampleCount];
-  if (pcmBuffer == nil) {
-    @synchronized(self) {
-      self.pendingBufferCount -= 1;
-    }
-    return;
-  }
-  pcmBuffer.frameLength = (AVAudioFrameCount)sampleCount;
-  OSStatus copyStatus = CMSampleBufferCopyPCMDataIntoAudioBufferList(
-      sampleBuffer,
-      0,
-      (int32_t)sampleCount,
-      pcmBuffer.mutableAudioBufferList);
-  if (copyStatus != noErr) {
-    @synchronized(self) {
-      self.pendingBufferCount -= 1;
-    }
-    return;
-  }
-
-  __weak FlutterSystemAudioCapturer* weakSelf = self;
-  [playerNode scheduleBuffer:pcmBuffer
-      completionCallbackType:AVAudioPlayerNodeCompletionDataConsumed
-           completionHandler:^(AVAudioPlayerNodeCompletionCallbackType callbackType) {
-    FlutterSystemAudioCapturer* strongSelf = weakSelf;
-    if (strongSelf == nil) return;
-    @synchronized(strongSelf) {
-      if (strongSelf.pendingBufferCount > 0) {
-        strongSelf.pendingBufferCount -= 1;
-      }
-    }
-  }];
+  [self.audioDevice consumeSystemAudioSampleBuffer:sampleBuffer];
 }
 
 @end
@@ -243,6 +155,13 @@ API_AVAILABLE(macos(13.0))
 @implementation FlutterWebRTCPlugin (SystemAudioCapturer)
 
 - (void)getSystemAudio:(FlutterResult)result {
+  FlutterRTCExternalAudioDevice* audioDevice = self.externalAudioDevice;
+  if (audioDevice == nil) {
+    result([FlutterError errorWithCode:@"SystemAudioExternalRecordingUnavailable"
+                               message:@"The microphone-free external audio device is unavailable"
+                               details:nil]);
+    return;
+  }
   if (@available(macOS 13.0, *)) {
     if (self.systemAudioCapturer != nil) {
       result([FlutterError errorWithCode:@"SystemAudioAlreadyActive"
@@ -250,8 +169,10 @@ API_AVAILABLE(macos(13.0))
                                  details:nil]);
       return;
     }
-    FlutterSystemAudioCapturer* capturer = [[FlutterSystemAudioCapturer alloc] init];
+    FlutterSystemAudioCapturer* capturer =
+        [[FlutterSystemAudioCapturer alloc] initWithAudioDevice:audioDevice];
     self.systemAudioCapturer = capturer;
+    [audioDevice attachSystemAudioSource];
     __weak FlutterWebRTCPlugin* weakSelf = self;
     [capturer startWithCompletion:^(NSError* _Nullable error) {
       dispatch_async(dispatch_get_main_queue(), ^{
@@ -264,6 +185,7 @@ API_AVAILABLE(macos(13.0))
           return;
         }
         if (error != nil) {
+          [audioDevice detachSystemAudioSource];
           strongSelf.systemAudioCapturer = nil;
           result([FlutterError errorWithCode:@"SystemAudioUnavailable"
                                      message:error.localizedDescription
@@ -279,7 +201,23 @@ API_AVAILABLE(macos(13.0))
             [strongSelf.peerConnectionFactory audioSourceWithConstraints:nil];
         RTCAudioTrack* track =
             [strongSelf.peerConnectionFactory audioTrackWithSource:source trackId:trackId];
-        [track setAudioProcessingOptions:[RTCAudioProcessingOptions rawOptions]];
+        RTCAudioProcessingOptionsResult* processingResult =
+            [track setAudioProcessingOptions:[RTCAudioProcessingOptions rawOptions]];
+        if (!processingResult.isSuccess) {
+          strongSelf.systemAudioCapturer = nil;
+          [capturer stopWithCompletion:^{
+            dispatch_async(dispatch_get_main_queue(), ^{
+              result([FlutterError
+                  errorWithCode:@"SystemAudioRawProcessingRejected"
+                         message:[NSString
+                                     stringWithFormat:
+                                         @"Unable to disable voice processing for system audio: %@",
+                                         processingResult.message]
+                         details:@{@"resultCode" : @(processingResult.code)}]);
+            });
+          }];
+          return;
+        }
         track.settings = @{
           @"deviceId" : @"system-audio",
           @"kind" : @"audioinput",
@@ -313,6 +251,19 @@ API_AVAILABLE(macos(13.0))
   result([FlutterError errorWithCode:@"SystemAudioUnavailable"
                              message:@"System audio capture requires macOS 13 or later"
                              details:nil]);
+}
+
+- (void)getSystemAudioBackendInfo:(FlutterResult)result {
+  FlutterRTCExternalAudioDevice* audioDevice = self.externalAudioDevice;
+  if (audioDevice == nil) {
+    result(@{
+      @"backend" : @"unsupported",
+      @"version" : @0,
+      @"microphoneFree" : @NO,
+    });
+    return;
+  }
+  result([audioDevice backendInfo]);
 }
 
 - (void)stopSystemAudio:(FlutterResult)result {

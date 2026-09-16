@@ -1,9 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <WebRTC/WebRTC.h>
 
-@class FlutterSystemAudioCapturer;
-
-typedef FlutterSystemAudioCapturer* _Nullable (^FlutterRTCSystemAudioCapturerProvider)(void);
 typedef void (^FlutterRTCAudioDeviceChangeHandler)(void);
 
 /// Complete RTCAudioDeviceModuleDelegate implementation used to isolate
@@ -14,9 +11,7 @@ typedef void (^FlutterRTCAudioDeviceChangeHandler)(void);
 /// Objective-C `unrecognized selector` abort when playout or recording starts.
 @interface FlutterRTCAudioEngineBridge : NSObject <RTCAudioDeviceModuleDelegate>
 
-- (nonnull instancetype)initWithSystemAudioCapturerProvider:
-                            (nonnull FlutterRTCSystemAudioCapturerProvider)capturerProvider
-                                      deviceChangeHandler:
+- (nonnull instancetype)initWithDeviceChangeHandler:
                             (nonnull FlutterRTCAudioDeviceChangeHandler)deviceChangeHandler;
 
 @end

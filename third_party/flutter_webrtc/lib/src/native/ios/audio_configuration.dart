@@ -86,7 +86,10 @@ class AppleNativeAudioManagement {
         appleAudioCategoryOptions: {
           AppleAudioCategoryOption.mixWithOthers,
         },
-        appleAudioMode: AppleAudioMode.spokenAudio,
+        // Remote desktop audio may contain music, video and notification
+        // sounds. Keep it out of the voice-processing modes and let iOS mix
+        // it with audio from other applications at full fidelity.
+        appleAudioMode: AppleAudioMode.default_,
       );
     } else if ([
       AppleAudioIOMode.localOnly,
@@ -118,6 +121,13 @@ class AppleNativeAudioManagement {
         'setAppleAudioConfiguration',
         <String, dynamic>{'configuration': config.toMap()},
       );
+    }
+  }
+
+  static Future<void> deactivateAudioSession() async {
+    if (WebRTC.platformIsIOS) {
+      currentMode = AppleAudioIOMode.none;
+      await WebRTC.invokeMethod('deactivateAppleAudioSession');
     }
   }
 }

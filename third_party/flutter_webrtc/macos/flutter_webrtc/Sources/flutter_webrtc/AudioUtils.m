@@ -138,7 +138,16 @@
     else
       NSLog(@"RTC AudioSession deactive is successful ");
   }
+  BOOL shouldNotifyOthers = error == nil;
   [session unlockForConfiguration];
+  if (shouldNotifyOthers) {
+    [session.session setActive:NO
+                   withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                         error:&error];
+    if (error != nil) {
+      NSLog(@"RTC AudioSession notify-others deactivation failed: %@", error);
+    }
+  }
 }
 
 

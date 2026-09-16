@@ -1,10 +1,7 @@
 #import "FlutterRTCAudioEngineBridge.h"
 
-#import "FlutterRTCSystemAudioCapturer.h"
-
 @interface FlutterRTCAudioEngineBridge ()
 
-@property(nonatomic, copy) FlutterRTCSystemAudioCapturerProvider capturerProvider;
 @property(nonatomic, copy) FlutterRTCAudioDeviceChangeHandler deviceChangeHandler;
 
 @end
@@ -13,13 +10,10 @@
 #pragma clang diagnostic error "-Wprotocol"
 @implementation FlutterRTCAudioEngineBridge
 
-- (instancetype)initWithSystemAudioCapturerProvider:
-                    (FlutterRTCSystemAudioCapturerProvider)capturerProvider
-                              deviceChangeHandler:
+- (instancetype)initWithDeviceChangeHandler:
                     (FlutterRTCAudioDeviceChangeHandler)deviceChangeHandler {
   self = [super init];
   if (self) {
-    _capturerProvider = [capturerProvider copy];
     _deviceChangeHandler = [deviceChangeHandler copy];
   }
   return self;
@@ -74,13 +68,6 @@
                  toDestination:(AVAudioNode*)destination
                     withFormat:(AVAudioFormat*)format
                        context:(NSDictionary*)context {
-  FlutterSystemAudioCapturer* capturer = self.capturerProvider();
-  if (capturer != nil && capturer.isActive) {
-    return [capturer configureInputForEngine:engine
-                                     source:source
-                                destination:destination
-                                     format:format];
-  }
   if (source != nil) {
     [engine connect:source to:destination format:format];
   }
