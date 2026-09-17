@@ -16,6 +16,7 @@ class MacHostPlatformAdapter implements HostPlatformAdapter {
     colorDiagnostics: true,
     permissionSettings: true,
     capturePermissionSettings: true,
+    physicalKeyboardInput: true,
   );
 
   @override
@@ -92,6 +93,8 @@ class MacHostPlatformAdapter implements HostPlatformAdapter {
       phase: event.phase,
       key: event.key,
       modifiers: event.modifiers,
+      physicalHidUsage: event.physicalHidUsage,
+      repeat: event.repeat,
     );
   }
 

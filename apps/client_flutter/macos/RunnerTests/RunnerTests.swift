@@ -1,6 +1,7 @@
 import Cocoa
 import FlutterMacOS
 import XCTest
+
 @testable import cross_desktop_remote
 
 class RunnerTests: XCTestCase {
@@ -175,6 +176,40 @@ class RunnerTests: XCTestCase {
         .init(keyCode: 56, keyDown: false, flags: .maskCommand),
         .init(keyCode: 55, keyDown: false, flags: []),
       ]
+    )
+  }
+
+  func testPhysicalHidUsageMapsToMacVirtualKeyCode() {
+    XCTAssertEqual(
+      crossDesktopRemoteMacKeyCode(
+        for: "KeyQ",
+        physicalHidUsage: 0x0007_0004
+      ),
+      0
+    )
+    XCTAssertEqual(
+      crossDesktopRemoteMacKeyCode(
+        for: "KeyQ",
+        physicalHidUsage: 0x0007_001d
+      ),
+      6
+    )
+    XCTAssertEqual(
+      crossDesktopRemoteMacKeyCode(
+        for: "Enter",
+        physicalHidUsage: 0x0007_0028
+      ),
+      36
+    )
+  }
+
+  func testUnknownPhysicalUsageFallsBackToLogicalCode() {
+    XCTAssertEqual(
+      crossDesktopRemoteMacKeyCode(
+        for: "KeyV",
+        physicalHidUsage: 0x000c_00e9
+      ),
+      9
     )
   }
 

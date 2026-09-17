@@ -2,13 +2,15 @@ import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
+import 'package:cross_desktop_remote/features/settings/application/app_settings_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
     'settings remain usable when platform persistence is unavailable',
     () async {
-      final controller = AppSettingsController();
+      final repository = MemoryAppSettingsRepository();
+      final controller = AppSettingsController(repository);
 
       await controller.load();
       expect(controller.systemAudioSharingEnabled, isFalse);
@@ -57,6 +59,32 @@ void main() {
         RemoteDisplayPresentationMode.separateWindows,
       );
       expect(controller.systemAudioSharingEnabled, isTrue);
+
+      final restored = AppSettingsController(repository);
+      await restored.load();
+      expect(
+        restored.signalingServerUrl,
+        'ws://192.168.1.10:8080/ws/signaling',
+      );
+      expect(restored.pointerSensitivity, 2.5);
+      expect(restored.textInputMode, RemoteTextInputMode.remoteIme);
+      expect(restored.systemAudioSharingEnabled, isTrue);
+      expect(
+        restored.displayPresentationMode,
+        RemoteDisplayPresentationMode.separateWindows,
+      );
     },
   );
+
+  test('sqlite settings snapshot is replaced atomically', () async {
+    final repository = await SqliteAppSettingsRepository.open(
+      databasePath: ':memory:',
+    );
+    addTearDown(repository.close);
+
+    await repository.write({'revision': 1, 'server': 'ws://first'});
+    await repository.write({'revision': 2, 'server': 'ws://second'});
+
+    expect(await repository.read(), {'revision': 2, 'server': 'ws://second'});
+  });
 }

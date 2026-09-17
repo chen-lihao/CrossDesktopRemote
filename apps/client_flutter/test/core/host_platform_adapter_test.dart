@@ -46,6 +46,7 @@ void main() {
 
     expect(adapter.type, HostPlatformType.macOS);
     expect(adapter.capabilities.captureFrameReadiness, isTrue);
+    expect(adapter.capabilities.physicalKeyboardInput, isTrue);
     expect(displays.single.id, '42');
     expect(displays.single.pixelWidth, 3024);
     expect(displays.single.isPrimary, isTrue);
@@ -96,6 +97,7 @@ void main() {
     expect((calls[0].arguments as Map)['displayId'], '42');
     expect((calls[0].arguments as Map)['modifiers'], ['command', 'shift']);
     expect((calls[1].arguments as Map)['key'], 'KeyC');
+    expect((calls[1].arguments as Map)['physicalHidUsage'], 0x70006);
     expect((calls[2].arguments as Map)['text'], '你好');
   });
 
@@ -204,6 +206,7 @@ void main() {
 
       expect(adapter.type, HostPlatformType.windows);
       expect(adapter.capabilities.canHostDesktop, isTrue);
+      expect(adapter.capabilities.physicalKeyboardInput, isTrue);
       final permission = await adapter.requestPermissions();
       expect(permission.inputGranted, isTrue);
       expect(permission.limitation, isNull);

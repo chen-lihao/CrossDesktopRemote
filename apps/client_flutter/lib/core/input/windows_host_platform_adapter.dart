@@ -17,6 +17,7 @@ class WindowsHostPlatformAdapter implements HostPlatformAdapter {
     colorDiagnostics: false,
     permissionSettings: false,
     capturePermissionSettings: false,
+    physicalKeyboardInput: true,
   );
 
   @override

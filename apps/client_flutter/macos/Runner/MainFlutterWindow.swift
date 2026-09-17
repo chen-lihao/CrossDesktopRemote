@@ -18,6 +18,59 @@ func crossDesktopRemoteAbsolutePointerPosition(
   )
 }
 
+func crossDesktopRemoteMacKeyCode(
+  for key: String,
+  physicalHidUsage: Int? = nil
+) -> CGKeyCode? {
+  if let physicalHidUsage {
+    let usagePage = physicalHidUsage >> 16
+    let usage = physicalHidUsage & 0xffff
+    if usagePage == 0 || usagePage == 0x07 {
+      let physicalCodes: [Int: CGKeyCode] = [
+        0x04: 0, 0x05: 11, 0x06: 8, 0x07: 2, 0x08: 14, 0x09: 3,
+        0x0a: 5, 0x0b: 4, 0x0c: 34, 0x0d: 38, 0x0e: 40, 0x0f: 37,
+        0x10: 46, 0x11: 45, 0x12: 31, 0x13: 35, 0x14: 12, 0x15: 15,
+        0x16: 1, 0x17: 17, 0x18: 32, 0x19: 9, 0x1a: 13, 0x1b: 7,
+        0x1c: 16, 0x1d: 6,
+        0x1e: 18, 0x1f: 19, 0x20: 20, 0x21: 21, 0x22: 23,
+        0x23: 22, 0x24: 26, 0x25: 28, 0x26: 25, 0x27: 29,
+        0x28: 36, 0x29: 53, 0x2a: 51, 0x2b: 48, 0x2c: 49,
+        0x2d: 27, 0x2e: 24, 0x2f: 33, 0x30: 30, 0x31: 42,
+        0x33: 41, 0x34: 39, 0x35: 50, 0x36: 43, 0x37: 47,
+        0x38: 44,
+        0x3a: 122, 0x3b: 120, 0x3c: 99, 0x3d: 118, 0x3e: 96,
+        0x3f: 97, 0x40: 98, 0x41: 100, 0x42: 101, 0x43: 109,
+        0x44: 103, 0x45: 111,
+        0x49: 114, 0x4a: 115, 0x4b: 116, 0x4c: 117, 0x4d: 119,
+        0x4e: 121,
+        0x4f: 124, 0x50: 123, 0x51: 125, 0x52: 126,
+      ]
+      if let code = physicalCodes[usage] {
+        return code
+      }
+    }
+  }
+
+  let logicalCodes: [String: CGKeyCode] = [
+    "KeyA": 0, "KeyS": 1, "KeyD": 2, "KeyF": 3, "KeyH": 4, "KeyG": 5,
+    "KeyZ": 6, "KeyX": 7, "KeyC": 8, "KeyV": 9, "KeyB": 11, "KeyQ": 12,
+    "KeyW": 13, "KeyE": 14, "KeyR": 15, "KeyY": 16, "KeyT": 17,
+    "Digit1": 18, "Digit2": 19, "Digit3": 20, "Digit4": 21, "Digit6": 22,
+    "Digit5": 23, "Equal": 24, "Digit9": 25, "Digit7": 26, "Minus": 27,
+    "Digit8": 28, "Digit0": 29, "BracketRight": 30, "KeyO": 31, "KeyU": 32,
+    "BracketLeft": 33, "KeyI": 34, "KeyP": 35, "Enter": 36, "KeyL": 37,
+    "KeyJ": 38, "Quote": 39, "KeyK": 40, "Semicolon": 41, "Backslash": 42,
+    "Comma": 43, "Slash": 44, "KeyN": 45, "KeyM": 46, "Period": 47,
+    "Tab": 48, "Space": 49, "Backquote": 50, "Backspace": 51, "Escape": 53,
+    "F5": 96, "F6": 97, "F7": 98, "F3": 99, "F8": 100, "F9": 101,
+    "F11": 103, "F10": 109, "F12": 111, "Home": 115, "PageUp": 116,
+    "Delete": 117, "F4": 118, "End": 119, "F2": 120, "PageDown": 121,
+    "F1": 122, "ArrowLeft": 123, "ArrowRight": 124, "ArrowDown": 125,
+    "ArrowUp": 126
+  ]
+  return logicalCodes[key]
+}
+
 struct CrossDesktopRemoteSyntheticKeyStroke: Equatable {
   let keyCode: CGKeyCode
   let keyDown: Bool
@@ -583,7 +636,10 @@ class MainFlutterWindow: NSWindow {
 
     guard
       let keyName = values["key"] as? String,
-      let keyCode = macKeyCode(for: keyName),
+      let keyCode = crossDesktopRemoteMacKeyCode(
+        for: keyName,
+        physicalHidUsage: (values["physicalHidUsage"] as? NSNumber)?.intValue
+      ),
       let phase = values["phase"] as? String,
       phase == "down" || phase == "up"
     else {
@@ -708,24 +764,7 @@ class MainFlutterWindow: NSWindow {
   }
 
   private func macKeyCode(for key: String) -> CGKeyCode? {
-    let codes: [String: CGKeyCode] = [
-      "KeyA": 0, "KeyS": 1, "KeyD": 2, "KeyF": 3, "KeyH": 4, "KeyG": 5,
-      "KeyZ": 6, "KeyX": 7, "KeyC": 8, "KeyV": 9, "KeyB": 11, "KeyQ": 12,
-      "KeyW": 13, "KeyE": 14, "KeyR": 15, "KeyY": 16, "KeyT": 17,
-      "Digit1": 18, "Digit2": 19, "Digit3": 20, "Digit4": 21, "Digit6": 22,
-      "Digit5": 23, "Equal": 24, "Digit9": 25, "Digit7": 26, "Minus": 27,
-      "Digit8": 28, "Digit0": 29, "BracketRight": 30, "KeyO": 31, "KeyU": 32,
-      "BracketLeft": 33, "KeyI": 34, "KeyP": 35, "Enter": 36, "KeyL": 37,
-      "KeyJ": 38, "Quote": 39, "KeyK": 40, "Semicolon": 41, "Backslash": 42,
-      "Comma": 43, "Slash": 44, "KeyN": 45, "KeyM": 46, "Period": 47,
-      "Tab": 48, "Space": 49, "Backquote": 50, "Backspace": 51, "Escape": 53,
-      "F5": 96, "F6": 97, "F7": 98, "F3": 99, "F8": 100, "F9": 101,
-      "F11": 103, "F10": 109, "F12": 111, "Home": 115, "PageUp": 116,
-      "Delete": 117, "F4": 118, "End": 119, "F2": 120, "PageDown": 121,
-      "F1": 122, "ArrowLeft": 123, "ArrowRight": 124, "ArrowDown": 125,
-      "ArrowUp": 126
-    ]
-    return codes[key]
+    crossDesktopRemoteMacKeyCode(for: key)
   }
 
   private func activeDisplayIds() -> [CGDirectDisplayID] {

@@ -1472,8 +1472,6 @@ class _RemoteToolbar extends StatelessWidget {
                         ),
                       if (!compact &&
                           (Platform.isMacOS || Platform.isWindows) &&
-                          session.remoteHostPlatform ==
-                              HostPlatformType.windows.name &&
                           session.remoteSupportsPhysicalKeyboard)
                         PopupMenuButton<RemoteTextInputMode>(
                           tooltip: '文字输入：${textInputMode.label}',
@@ -1494,7 +1492,10 @@ class _RemoteToolbar extends StatelessWidget {
                                   title: Text(mode.label),
                                   subtitle: Text(
                                     mode == RemoteTextInputMode.remoteIme
-                                        ? '直接发送物理按键；请在 Windows 用 Win+Space 选择微软拼音'
+                                        ? session.remoteHostPlatform ==
+                                                  HostPlatformType.macOS.name
+                                              ? '直接发送物理按键；输入法与候选词由被控 Mac 处理'
+                                              : '直接发送物理按键；输入法与候选词由被控 Windows 处理'
                                         : mode.description,
                                   ),
                                 ),
@@ -1670,7 +1671,6 @@ class _RemoteDesktopSurfaceState extends State<_RemoteDesktopSurface>
       widget.active &&
       _usesDesktopKeyboard &&
       widget.inputSettings.textInputMode == RemoteTextInputMode.remoteIme &&
-      session.remoteHostPlatform == HostPlatformType.windows.name &&
       session.remoteSupportsPhysicalKeyboard;
 
   bool get _desktopDirectImeAvailable =>

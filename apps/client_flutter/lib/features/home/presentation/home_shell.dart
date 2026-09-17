@@ -19,8 +19,53 @@ import 'package:flutter/material.dart';
 
 enum HomeSection { devices, sessions, settings }
 
+class HomeShellBootstrap extends StatefulWidget {
+  const HomeShellBootstrap({super.key});
+
+  @override
+  State<HomeShellBootstrap> createState() => _HomeShellBootstrapState();
+}
+
+class _HomeShellBootstrapState extends State<HomeShellBootstrap> {
+  late final AppSettingsController _settings = AppSettingsController();
+  late final Future<void> _load = _settings.load();
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<void>(
+      future: _load,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+        if (snapshot.hasError) {
+          return Scaffold(
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text('无法加载本机配置：${snapshot.error}'),
+              ),
+            ),
+          );
+        }
+        return HomeShell(settings: _settings);
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _settings.dispose();
+    super.dispose();
+  }
+}
+
 class HomeShell extends StatefulWidget {
-  const HomeShell({super.key});
+  const HomeShell({super.key, required this.settings});
+
+  final AppSettingsController settings;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -47,7 +92,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   int _selectedIndex = HomeSection.devices.index;
   late final DeviceCapabilities _capabilities;
-  late final AppSettingsController _settings;
+  AppSettingsController get _settings => widget.settings;
   late final DeviceIdentityController _identity;
   late final TrustedDeviceCoordinator _trustedDevices;
   late final SessionHistoryController _history;
@@ -63,7 +108,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _capabilities = DeviceCapabilities.current();
-    _settings = AppSettingsController();
     _identity = DeviceIdentityController();
     _trustedDevices = TrustedDeviceCoordinator(identity: _identity);
     _history = SessionHistoryController(settings: _settings);
@@ -86,7 +130,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       // The dynamic connection-code path remains available when the local
       // encrypted trust store cannot be opened.
     }
-    await _settings.load();
     try {
       // An ad-hoc macOS build deliberately has no protected SecretStore.
       // Session history remains disabled instead of weakening its encryption
@@ -248,7 +291,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _settings.removeListener(_handleSettingsChanged);
     _trustedDevices.dispose();
     _identity.dispose();
-    _settings.dispose();
     super.dispose();
   }
 }

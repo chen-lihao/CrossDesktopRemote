@@ -2155,15 +2155,26 @@ class RemoteSessionController extends ChangeNotifier
     selectVideoPolicy(RemoteVideoPolicy.fromLegacy(profile));
   }
 
-  void setRemoteAudioMuted(bool muted) {
+  Future<void> setRemoteAudioMuted(bool muted) async {
     if (role != RemoteRole.controller || !remoteSystemAudioAvailable) return;
-    _remoteAudioMuted = muted;
     final track = _remoteAudioTrack;
-    if (track != null) track.enabled = !muted;
+    if (track == null) return;
+    try {
+      await _remoteAudioPlayout.setTrackMuted(track, muted);
+    } catch (error) {
+      _emitNotice(
+        '无法${muted ? '静音' : '恢复'}远程声音：$error',
+        level: RemoteNoticeLevel.warning,
+      );
+      return;
+    }
+    if (!identical(track, _remoteAudioTrack)) return;
+    _remoteAudioMuted = muted;
     notifyListeners();
   }
 
-  void toggleRemoteAudioMuted() => setRemoteAudioMuted(!_remoteAudioMuted);
+  void toggleRemoteAudioMuted() =>
+      unawaited(setRemoteAudioMuted(!_remoteAudioMuted));
 
   Future<void> setSystemAudioSharingEnabled(bool enabled) async {
     if (role != RemoteRole.host || _systemAudioSharingEnabled == enabled) {
@@ -2409,7 +2420,16 @@ class RemoteSessionController extends ChangeNotifier
         if (role != RemoteRole.controller) return;
         _audioReceiver = event.receiver;
         _remoteAudioTrack = event.track;
-        event.track.enabled = !_remoteAudioMuted;
+        unawaited(
+          _remoteAudioPlayout
+              .setTrackMuted(event.track, _remoteAudioMuted)
+              .catchError((Object error) {
+                _emitNotice(
+                  '初始化远程声音播放失败：$error',
+                  level: RemoteNoticeLevel.warning,
+                );
+              }),
+        );
         _systemAudioState = RemoteSystemAudioState.receiving;
         notifyListeners();
         return;
@@ -4908,7 +4928,7 @@ class RemoteSessionController extends ChangeNotifier
       'hostPlatform': _hostPlatform.type.name,
       'supportsUnicodeText': true,
       'supportsPhysicalKeyboard':
-          _hostPlatform.type == HostPlatformType.windows,
+          _hostPlatform.capabilities.physicalKeyboardInput,
       'screenCaptureGranted': _screenCaptureGranted,
       'accessibilityGranted': _accessibilityGranted == true,
       'inputReady': _accessibilityGranted == true,

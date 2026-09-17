@@ -10,6 +10,7 @@ class HostPlatformCapabilities {
     required this.colorDiagnostics,
     required this.permissionSettings,
     required this.capturePermissionSettings,
+    this.physicalKeyboardInput = false,
   });
 
   const HostPlatformCapabilities.unsupported()
@@ -17,13 +18,15 @@ class HostPlatformCapabilities {
       captureFrameReadiness = false,
       colorDiagnostics = false,
       permissionSettings = false,
-      capturePermissionSettings = false;
+      capturePermissionSettings = false,
+      physicalKeyboardInput = false;
 
   final bool canHostDesktop;
   final bool captureFrameReadiness;
   final bool colorDiagnostics;
   final bool permissionSettings;
   final bool capturePermissionSettings;
+  final bool physicalKeyboardInput;
 }
 
 @immutable

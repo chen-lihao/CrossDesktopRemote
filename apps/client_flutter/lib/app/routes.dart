@@ -5,6 +5,6 @@ abstract final class AppRoutes {
   static const home = '/';
 
   static final Map<String, WidgetBuilder> routes = {
-    home: (_) => const HomeShell(),
+    home: (_) => const HomeShellBootstrap(),
   };
 }

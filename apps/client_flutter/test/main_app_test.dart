@@ -1,16 +1,31 @@
 import 'package:cross_desktop_remote/main.dart';
+import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
+import 'package:cross_desktop_remote/features/settings/application/app_settings_repository.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+Future<void> _pumpUntilFound(WidgetTester tester, Finder finder) async {
+  for (var attempt = 0; attempt < 100 && finder.evaluate().isEmpty; attempt++) {
+    await tester.pump(const Duration(milliseconds: 10));
+  }
+  expect(finder, findsAtLeastNWidgets(1));
+}
+
 void main() {
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    AppSettingsController.repositoryFactoryOverride = () async =>
+        MemoryAppSettingsRepository();
+  });
+  tearDown(() => AppSettingsController.repositoryFactoryOverride = null);
 
   testWidgets('renders the mobile application shell', (tester) async {
     await tester.binding.setSurfaceSize(const Size(430, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(const MainApp());
+    await _pumpUntilFound(tester, find.byType(NavigationBar));
 
     expect(find.byType(MaterialApp), findsOneWidget);
     expect(find.byType(NavigationBar), findsOneWidget);
@@ -31,6 +46,7 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(const MainApp());
+    await _pumpUntilFound(tester, find.byType(NavigationRail));
 
     expect(find.byType(NavigationRail), findsOneWidget);
     expect(find.byType(NavigationBar), findsNothing);
@@ -42,6 +58,7 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(430, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(const MainApp());
+    await _pumpUntilFound(tester, find.byType(NavigationBar));
 
     final serverFieldFinder = find.byKey(
       const ValueKey('signalingServerField'),
@@ -86,6 +103,7 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1200, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(const MainApp());
+    await _pumpUntilFound(tester, find.byType(NavigationRail));
     final codeFinder = find.byKey(const ValueKey('hostRoomCodeText'));
     if (codeFinder.evaluate().isEmpty) return;
 

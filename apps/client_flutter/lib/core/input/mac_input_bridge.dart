@@ -223,6 +223,8 @@ class MacInputBridge {
     required String phase,
     required String key,
     required List<String> modifiers,
+    int? physicalHidUsage,
+    bool repeat = false,
   }) {
     return _channel.invokeMethod<void>('keyboard', {
       'version': 2,
@@ -230,6 +232,8 @@ class MacInputBridge {
       'phase': phase,
       'key': key,
       'modifiers': modifiers,
+      'physicalHidUsage': ?physicalHidUsage,
+      'repeat': repeat,
     });
   }
 
