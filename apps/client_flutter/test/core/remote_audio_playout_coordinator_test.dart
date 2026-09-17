@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cross_desktop_remote/core/audio/remote_audio_playout_coordinator.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -6,6 +8,7 @@ class _FakePlayoutPlatform implements RemoteAudioPlayoutPlatform {
   int activations = 0;
   int deactivations = 0;
   final List<bool> mutedStates = [];
+  Completer<void>? muteGate;
 
   @override
   Future<void> activateSharedPlayout() async {
@@ -20,8 +23,11 @@ class _FakePlayoutPlatform implements RemoteAudioPlayoutPlatform {
   @override
   Future<void> setTrackMuted(MediaStreamTrack track, bool muted) async {
     mutedStates.add(muted);
+    await muteGate?.future;
   }
 }
+
+class _FakeMediaStreamTrack extends Fake implements MediaStreamTrack {}
 
 void main() {
   test('remote-only Apple policy is playback mixing without voice mode', () {
@@ -80,4 +86,25 @@ void main() {
     expect(coordinator.activeLeaseCount, 0);
     expect(platform.deactivations, 2);
   });
+
+  test(
+    'drain waits for accepted gain changes before native teardown',
+    () async {
+      final platform = _FakePlayoutPlatform();
+      final gate = Completer<void>();
+      platform.muteGate = gate;
+      final coordinator = RemoteAudioPlayoutCoordinator(platform: platform);
+
+      final mutation = coordinator.setTrackMuted(_FakeMediaStreamTrack(), true);
+      var drained = false;
+      final drain = coordinator.drain().then((_) => drained = true);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(drained, isFalse);
+      gate.complete();
+      await mutation;
+      await drain;
+      expect(drained, isTrue);
+    },
+  );
 }

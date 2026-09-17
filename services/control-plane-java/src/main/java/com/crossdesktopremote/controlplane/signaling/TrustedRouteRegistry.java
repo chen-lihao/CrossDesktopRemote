@@ -76,6 +76,16 @@ final class TrustedRouteRegistry {
 		return peer.isOpen() ? Optional.of(peer) : Optional.empty();
 	}
 
+	/** Ends an active route without unregistering the long-lived host socket. */
+	synchronized Optional<WebSocketSession> endSession(WebSocketSession session) {
+		var route = routesBySession.remove(session);
+		arbiter.release(session);
+		if (route == null) return Optional.empty();
+		var peer = route.host() == session ? route.controller() : route.host();
+		routesBySession.remove(peer, route);
+		return peer.isOpen() ? Optional.of(peer) : Optional.empty();
+	}
+
 	record TrustedRoute(
 			String sessionId,
 			String targetMachineCode,

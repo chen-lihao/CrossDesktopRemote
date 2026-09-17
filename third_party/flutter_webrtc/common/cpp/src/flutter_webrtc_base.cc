@@ -51,7 +51,17 @@ void FlutterWebRTCBase::RemovePeerConnectionForId(const std::string& id) {
     peerconnections_.erase(it);
 }
 
-scoped_refptr<RTCMediaTrack> FlutterWebRTCBase ::MediaTrackForId(const std::string& id) {
+scoped_refptr<RTCMediaTrack> FlutterWebRTCBase::MediaTrackForId(
+    const std::string& id,
+    const std::string& peer_connection_id) {
+  // Unified Plan receiver tracks are owned by a peer connection observer and
+  // track ids are not guaranteed to be process-unique. Resolve a remote track
+  // within its peer connection whenever the caller supplies that identity.
+  if (!peer_connection_id.empty()) {
+    auto* observer = PeerConnectionObserversForId(peer_connection_id);
+    return observer == nullptr ? nullptr : observer->MediaTrackForId(id);
+  }
+
   auto it = local_tracks_.find(id);
 
   if (it != local_tracks_.end())

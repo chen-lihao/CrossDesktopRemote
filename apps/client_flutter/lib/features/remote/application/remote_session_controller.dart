@@ -388,6 +388,7 @@ class RemoteSessionController extends ChangeNotifier
   HostInvitationState _hostInvitationState = HostInvitationState.unavailable;
   bool _supportsInvitationRotation = false;
   bool _supportsServerInvitationPush = false;
+  bool _supportsPersistentSignalingSession = false;
   Set<String> _serverCapabilities = const {};
   bool _remoteSupportsVideoPolicyV2 = false;
   bool _remoteSupportsMultiDisplayStreamV1 = false;
@@ -515,6 +516,8 @@ class RemoteSessionController extends ChangeNotifier
   HostInvitationState get hostInvitationState => _hostInvitationState;
   bool get supportsInvitationRotation => _supportsInvitationRotation;
   bool get supportsServerInvitationPush => _supportsServerInvitationPush;
+  bool get supportsPersistentSignalingSession =>
+      _supportsPersistentSignalingSession;
   bool get remoteSupportsMultiDisplayStreamV1 =>
       _remoteSupportsMultiDisplayStreamV1;
   bool get remoteSystemAudioAvailable =>
@@ -1347,10 +1350,42 @@ class RemoteSessionController extends ChangeNotifier
   }
 
   Future<void> disconnect() async {
-    await _closeSession(notifyPeer: true);
+    final keepHostOnline =
+        role == RemoteRole.host &&
+        _supportsPersistentSignalingSession &&
+        _signaling.isConnected &&
+        {
+          RemoteSessionState.connecting,
+          RemoteSessionState.awaitingApproval,
+          RemoteSessionState.streaming,
+          RemoteSessionState.reconnecting,
+        }.contains(state);
+    await _closeSession(notifyPeer: true, closeSignaling: !keepHostOnline);
+    if (keepHostOnline) {
+      await _prepareHostForNextPeer();
+      _emitNotice('远程会话已断开，正在等待下一台设备');
+      return;
+    }
     final message = role == RemoteRole.host ? '已停止接收远程连接' : '远程会话已断开';
     _setState(RemoteSessionState.disconnected, message);
     _emitNotice(message);
+  }
+
+  /// Stops both the active peer session and the long-lived signaling
+  /// registration. Host availability uses this for app shutdown, endpoint
+  /// changes and an explicit "stop receiving connections" action.
+  Future<void> shutdown() async {
+    await _closeSession(notifyPeer: true, closeSignaling: true);
+    final message = role == RemoteRole.host ? '已停止接收远程连接' : '远程会话已断开';
+    _setState(RemoteSessionState.disconnected, message);
+  }
+
+  Future<void> _prepareHostForNextPeer() async {
+    if (role != RemoteRole.host || !_signaling.isConnected) return;
+    if (_peerConnection == null) {
+      await _createPeerConnection();
+    }
+    _setState(RemoteSessionState.waitingForPeer, '已结束上一会话，等待另一台设备');
   }
 
   void _handleTrustedAuthorizationInvalidation(
@@ -2420,16 +2455,23 @@ class RemoteSessionController extends ChangeNotifier
         if (role != RemoteRole.controller) return;
         _audioReceiver = event.receiver;
         _remoteAudioTrack = event.track;
-        unawaited(
-          _remoteAudioPlayout
-              .setTrackMuted(event.track, _remoteAudioMuted)
-              .catchError((Object error) {
+        // An unmuted receiver already starts at gain 1. Avoid an unnecessary
+        // native mutation during onTrack; only restore an explicitly muted
+        // session after the native receiver registry is ready.
+        if (_remoteAudioMuted) {
+          unawaited(
+            _remoteAudioPlayout.setTrackMuted(event.track, true).catchError((
+              Object error,
+            ) {
+              if (identical(event.track, _remoteAudioTrack)) {
                 _emitNotice(
-                  '初始化远程声音播放失败：$error',
+                  '初始化远程声音静音状态失败：$error',
                   level: RemoteNoticeLevel.warning,
                 );
-              }),
-        );
+              }
+            }),
+          );
+        }
         _systemAudioState = RemoteSystemAudioState.receiving;
         notifyListeners();
         return;
@@ -5354,6 +5396,9 @@ class RemoteSessionController extends ChangeNotifier
           _supportsServerInvitationPush = serverCapabilities.contains(
             'server-invitation-push',
           );
+          _supportsPersistentSignalingSession = serverCapabilities.contains(
+            'persistent-signaling-session-v1',
+          );
           _applyHostInvitationSnapshot(message, fallbackGeneration: 1);
         }
         _setState(RemoteSessionState.waitingForPeer, '已进入房间，等待另一台设备');
@@ -5563,8 +5608,20 @@ class RemoteSessionController extends ChangeNotifier
         await _handleTrustedRenewal(message);
       case 'hangup':
       case 'peer-left':
-        await _closeSession(notifyPeer: false);
-        _setState(RemoteSessionState.disconnected, '另一台设备已离开');
+        final keepHostOnline =
+            role == RemoteRole.host &&
+            _supportsPersistentSignalingSession &&
+            _signaling.isConnected;
+        await _closeSession(notifyPeer: false, closeSignaling: !keepHostOnline);
+        if (keepHostOnline) {
+          await _prepareHostForNextPeer();
+        } else {
+          _setState(RemoteSessionState.disconnected, '另一台设备已离开');
+        }
+      case 'session-ended':
+        // Acknowledges end-session. Local teardown owns the media lifecycle;
+        // the host receives peer-left and an authoritative invitation update.
+        return;
       case 'peer-unavailable':
         _setState(RemoteSessionState.waitingForPeer, '另一台设备尚未进入房间');
     }
@@ -7853,14 +7910,20 @@ class RemoteSessionController extends ChangeNotifier
     }
   }
 
-  Future<void> _closeSession({required bool notifyPeer}) {
+  Future<void> _closeSession({
+    required bool notifyPeer,
+    bool closeSignaling = true,
+  }) {
     final activeClose = _closeSessionFuture;
     if (activeClose != null) return activeClose;
 
     _closing = true;
     late final Future<void> closeOperation;
-    closeOperation = _performCloseSession(notifyPeer: notifyPeer)
-        .whenComplete(() {
+    closeOperation =
+        _performCloseSession(
+          notifyPeer: notifyPeer,
+          closeSignaling: closeSignaling,
+        ).whenComplete(() {
           if (identical(_closeSessionFuture, closeOperation)) {
             _closeSessionFuture = null;
           }
@@ -7870,7 +7933,10 @@ class RemoteSessionController extends ChangeNotifier
     return closeOperation;
   }
 
-  Future<void> _performCloseSession({required bool notifyPeer}) async {
+  Future<void> _performCloseSession({
+    required bool notifyPeer,
+    required bool closeSignaling,
+  }) async {
     final trustedRouteSessionId = _trustedRouteSessionId;
     _resetTrustedPairing(notify: false);
     _cancelConnectionRecovery();
@@ -7878,12 +7944,18 @@ class RemoteSessionController extends ChangeNotifier
     _clearRemoteFileClipboardOffer();
     if (notifyPeer && _signaling.isConnected) {
       try {
-        _signaling.send({'type': 'hangup'});
+        _signaling.send({
+          'type': _supportsPersistentSignalingSession
+              ? 'end-session'
+              : 'hangup',
+        });
       } catch (_) {
         // The socket may close between the state check and the send.
       }
     }
-    await _signaling.close();
+    if (closeSignaling) {
+      await _signaling.close();
+    }
     await _releaseHostInputState();
     await _controlChannel?.close();
     _controlChannel = null;
@@ -7936,11 +8008,12 @@ class RemoteSessionController extends ChangeNotifier
     _videoSender = null;
     _videoReceiver = null;
     _audioSender = null;
-    final remoteAudioTrack = _remoteAudioTrack;
     _remoteAudioTrack = null;
-    if (remoteAudioTrack != null) {
-      remoteAudioTrack.enabled = false;
-    }
+    // A queued gain change references the receiver owned by this peer
+    // connection. Drain it before native disposal removes that registry. Do
+    // not mutate receiver.enabled here: its setter is fire-and-forget and can
+    // otherwise arrive after the peer connection has already been disposed.
+    await _remoteAudioPlayout.drain();
     _audioReceiver = null;
     _remoteVideoBinding = null;
     _remoteTrackGeneration += 1;
@@ -7966,7 +8039,9 @@ class RemoteSessionController extends ChangeNotifier
     _renderedDisplayId = null;
     _remoteDeviceId = null;
     _remoteHostPlatform = null;
-    _localNetworkAddress = null;
+    if (closeSignaling) {
+      _localNetworkAddress = null;
+    }
     _remoteNetworkAddress = null;
     _remoteSupportsPhysicalKeyboard = false;
     _remoteSupportsActiveContentGeometry = false;
@@ -7983,7 +8058,9 @@ class RemoteSessionController extends ChangeNotifier
     _remoteSupportsTrustedDeviceAuthentication = false;
     _remoteSupportsTransactionalTrustedPairing = false;
     _remoteSupportsHostOwnedTrustedPolicy = false;
-    _localCapabilities = const {};
+    if (closeSignaling) {
+      _localCapabilities = const {};
+    }
     _remoteClipboardSupportsApplied = false;
     _remoteClipboardMode = null;
     _queuedClipboardOffer = null;
@@ -7996,14 +8073,17 @@ class RemoteSessionController extends ChangeNotifier
     _acceptingFileClipboardTransfers.clear();
     _appliedFileClipboardTransfers.clear();
     _lastHostCaptureFrameState = null;
-    _hostInvitationExpiresAt = null;
-    _hostInvitationCode = null;
-    _hostInvitationLeaseId = null;
-    _hostInvitationGeneration = 0;
-    _hostInvitationState = HostInvitationState.unavailable;
-    _supportsInvitationRotation = false;
-    _supportsServerInvitationPush = false;
-    _serverCapabilities = const {};
+    if (closeSignaling) {
+      _hostInvitationExpiresAt = null;
+      _hostInvitationCode = null;
+      _hostInvitationLeaseId = null;
+      _hostInvitationGeneration = 0;
+      _hostInvitationState = HostInvitationState.unavailable;
+      _supportsInvitationRotation = false;
+      _supportsServerInvitationPush = false;
+      _supportsPersistentSignalingSession = false;
+      _serverCapabilities = const {};
+    }
     _decoderOutputColorDiagnostics = null;
     _renderOutputColorDiagnostics = null;
     _receiverColorConversion = null;

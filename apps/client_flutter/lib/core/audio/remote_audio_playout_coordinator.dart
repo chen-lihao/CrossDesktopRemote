@@ -16,11 +16,7 @@ abstract interface class RemoteAudioPlayoutPlatform {
 
 class FlutterWebRtcRemoteAudioPlayoutPlatform
     implements RemoteAudioPlayoutPlatform {
-  FlutterWebRtcRemoteAudioPlayoutPlatform();
-
-  Function(dynamic)? _previousDeviceChangeHandler;
-  bool _followingWindowsDefaultOutput = false;
-  Future<void> _outputMutation = Future<void>.value();
+  const FlutterWebRtcRemoteAudioPlayoutPlatform();
 
   @override
   Future<void> activateSharedPlayout() async {
@@ -28,19 +24,9 @@ class FlutterWebRtcRemoteAudioPlayoutPlatform
       await Helper.setAppleAudioIOMode(AppleAudioIOMode.remoteOnly);
       return;
     }
-    if (!Platform.isWindows || _followingWindowsDefaultOutput) return;
-    _followingWindowsDefaultOutput = true;
-    _previousDeviceChangeHandler = navigator.mediaDevices.ondevicechange;
-    navigator.mediaDevices.ondevicechange = (event) {
-      _previousDeviceChangeHandler?.call(event);
-      unawaited(
-        _scheduleWindowsDefaultOutputSelection().catchError((_) {
-          // Device removal can race libwebrtc teardown. The next device event
-          // or session activation resolves the current system default again.
-        }),
-      );
-    };
-    await _scheduleWindowsDefaultOutputSelection();
+    // Windows playout routing is owned by the native ADM. Switching its device
+    // from Dart while playout is active races peer connection teardown and can
+    // crash the process. The ADM follows the Windows default render endpoint.
   }
 
   @override
@@ -58,35 +44,8 @@ class FlutterWebRtcRemoteAudioPlayoutPlatform
 
   @override
   Future<void> releaseSharedPlayoutPolicy() async {
-    if (!Platform.isWindows || !_followingWindowsDefaultOutput) return;
-    navigator.mediaDevices.ondevicechange = _previousDeviceChangeHandler;
-    _previousDeviceChangeHandler = null;
-    _followingWindowsDefaultOutput = false;
-    await _outputMutation;
-  }
-
-  Future<void> _scheduleWindowsDefaultOutputSelection() {
-    final completion = Completer<void>();
-    _outputMutation = _outputMutation
-        .catchError((_) {})
-        .then((_) => _selectWindowsDefaultOutput())
-        .then((_) => completion.complete())
-        .catchError((Object error, StackTrace stackTrace) {
-          if (!completion.isCompleted) {
-            completion.completeError(error, stackTrace);
-          }
-        });
-    return completion.future;
-  }
-
-  Future<void> _selectWindowsDefaultOutput() async {
-    if (!_followingWindowsDefaultOutput) return;
-    final outputs = await Helper.audiooutputs;
-    if (!_followingWindowsDefaultOutput || outputs.isEmpty) return;
-    // libwebrtc exposes the system-default render endpoint as the first
-    // playout device. Re-resolving it after onDeviceChange avoids persisting a
-    // stale speaker GUID when the user connects headphones.
-    await Helper.selectAudioOutput(outputs.first.deviceId);
+    // No process-wide Windows policy is retained. iOS teardown remains owned
+    // by flutter_webrtc together with the final peer connection.
   }
 }
 
@@ -106,7 +65,7 @@ class RemoteAudioPlayoutLease {
 
 class RemoteAudioPlayoutCoordinator {
   RemoteAudioPlayoutCoordinator({RemoteAudioPlayoutPlatform? platform})
-    : _platform = platform ?? FlutterWebRtcRemoteAudioPlayoutPlatform();
+    : _platform = platform ?? const FlutterWebRtcRemoteAudioPlayoutPlatform();
 
   static final RemoteAudioPlayoutCoordinator instance =
       RemoteAudioPlayoutCoordinator();
@@ -120,6 +79,10 @@ class RemoteAudioPlayoutCoordinator {
 
   Future<void> setTrackMuted(MediaStreamTrack track, bool muted) =>
       _enqueue(() => _platform.setTrackMuted(track, muted));
+
+  /// Waits until all already accepted playout mutations have completed.
+  /// Callers use this before disposing the peer connection that owns a track.
+  Future<void> drain() => _enqueue(() async {});
 
   Future<RemoteAudioPlayoutLease> acquire() {
     final completer = Completer<RemoteAudioPlayoutLease>();

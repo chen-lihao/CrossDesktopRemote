@@ -141,7 +141,7 @@ class HostAvailabilityController extends ChangeNotifier {
         RemoteSessionState.disconnected,
         RemoteSessionState.failed,
       }.contains(session.state)) {
-        await session.disconnect();
+        await session.shutdown();
       }
       _connectedEndpoint = null;
       _reconnectAttempt = 0;
@@ -159,7 +159,7 @@ class HostAvailabilityController extends ChangeNotifier {
     } catch (_) {
       // A stale or expired lease cannot be reused. Re-register the host to
       // obtain a fresh one instead of leaving an apparently valid dead code.
-      await session.disconnect();
+      await session.shutdown();
       _connectedEndpoint = null;
       await ensureOnline();
       rethrow;
@@ -178,14 +178,14 @@ class HostAvailabilityController extends ChangeNotifier {
       await ensureOnline();
     } else {
       invitationLease.cancel();
-      await session.disconnect();
+      await session.shutdown();
     }
     notifyListeners();
   }
 
   Future<void> refreshRegistration() async {
     if (_disposed || !_desiredOnline || busy) return;
-    await session.disconnect();
+    await session.shutdown();
     _connectedEndpoint = null;
     _reconnectAttempt = 0;
     await ensureOnline();

@@ -212,6 +212,37 @@ DWORD ButtonFlag(const std::string& button, bool key_up) {
   return key_up ? MOUSEEVENTF_LEFTUP : MOUSEEVENTF_LEFTDOWN;
 }
 
+bool IsWindowCommandHitTest(LRESULT hit_test) {
+  return hit_test == HTMINBUTTON || hit_test == HTMAXBUTTON ||
+         hit_test == HTCLOSE;
+}
+
+UINT SystemCommandForHitTest(HWND window, LRESULT hit_test) {
+  if (hit_test == HTMINBUTTON) {
+    return SC_MINIMIZE;
+  }
+  if (hit_test == HTMAXBUTTON) {
+    return IsZoomed(window) ? SC_RESTORE : SC_MAXIMIZE;
+  }
+  return hit_test == HTCLOSE ? SC_CLOSE : 0;
+}
+
+HWND RootWindowAtPoint(const POINT& point) {
+  const HWND target = WindowFromPoint(point);
+  return target == nullptr ? nullptr : GetAncestor(target, GA_ROOT);
+}
+
+bool IsCurrentProcessWindow(HWND window) {
+  DWORD process_id = 0;
+  GetWindowThreadProcessId(window, &process_id);
+  return process_id == GetCurrentProcessId();
+}
+
+LRESULT HitTestWindow(HWND window, const POINT& point) {
+  return SendMessageW(window, WM_NCHITTEST, 0,
+                      MAKELPARAM(point.x, point.y));
+}
+
 INPUT ScanCodeInput(UINT scan_code, bool extended, bool key_up) {
   INPUT input{};
   input.type = INPUT_KEYBOARD;
@@ -476,6 +507,8 @@ bool WindowsHostBridge::HandlePointer(const EncodableMap& arguments,
                                       std::string* error) {
   const std::string phase = StringValue(arguments, "phase", "move");
   std::vector<INPUT> inputs;
+  POINT screen_point{};
+  bool has_screen_point = false;
 
   if (arguments.find(EncodableValue("modifiers")) != arguments.end()) {
     if (!SetSyntheticModifiers(
@@ -531,6 +564,8 @@ bool WindowsHostBridge::HandlePointer(const EncodableMap& arguments,
                          static_cast<LONG>(std::lround(
                              y * static_cast<double>(
                                      std::max<LONG>(1, display_height - 1))));
+    screen_point = {pixel_x, pixel_y};
+    has_screen_point = true;
 
     const LONG virtual_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const LONG virtual_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -555,12 +590,33 @@ bool WindowsHostBridge::HandlePointer(const EncodableMap& arguments,
   bool pressed = false;
   bool released = false;
   if (phase == "down") {
+    // Injecting a raw non-client mouse-down into this process can enter
+    // DefWindowProc's modal caption-button loop before Flutter can deliver the
+    // corresponding remote mouse-up. Represent those actions as a native
+    // down/up transaction and post the resulting system command on release.
+    if (button == "left" && has_screen_point &&
+        BeginOwnWindowCommand(screen_point)) {
+      return SendInputs(&inputs, error);
+    }
+    CancelOwnWindowCommand();
     // Controllers send the real first and second down/up sequences. Windows
     // derives a double click from their timing and location; synthesizing an
     // extra click for clickCount=2 turns a valid double click into a triple.
     inputs.push_back(MouseInput(ButtonFlag(button, false)));
     pressed = true;
   } else if (phase == "up") {
+    if (button == "left" && pending_command_window_ != nullptr) {
+      if (!SendInputs(&inputs, error)) {
+        CancelOwnWindowCommand();
+        return false;
+      }
+      if (has_screen_point) {
+        CompleteOwnWindowCommand(screen_point);
+      } else {
+        CancelOwnWindowCommand();
+      }
+      return true;
+    }
     inputs.push_back(MouseInput(ButtonFlag(button, true)));
     released = true;
   }
@@ -573,6 +629,43 @@ bool WindowsHostBridge::HandlePointer(const EncodableMap& arguments,
     pressed_mouse_buttons_.erase(button);
   }
   return true;
+}
+
+bool WindowsHostBridge::BeginOwnWindowCommand(const POINT& screen_point) {
+  const HWND window = RootWindowAtPoint(screen_point);
+  if (window == nullptr || !IsCurrentProcessWindow(window)) {
+    return false;
+  }
+  const LRESULT hit_test = HitTestWindow(window, screen_point);
+  if (!IsWindowCommandHitTest(hit_test)) {
+    return false;
+  }
+  pending_command_window_ = window;
+  pending_command_hit_test_ = hit_test;
+  return true;
+}
+
+bool WindowsHostBridge::CompleteOwnWindowCommand(const POINT& screen_point) {
+  const HWND pending_window = pending_command_window_;
+  const LRESULT pending_hit_test = pending_command_hit_test_;
+  CancelOwnWindowCommand();
+  if (pending_window == nullptr || !IsWindow(pending_window)) {
+    return false;
+  }
+  const HWND release_window = RootWindowAtPoint(screen_point);
+  if (release_window != pending_window ||
+      HitTestWindow(pending_window, screen_point) != pending_hit_test) {
+    return false;
+  }
+  const UINT command = SystemCommandForHitTest(pending_window, pending_hit_test);
+  return command != 0 &&
+         PostMessageW(pending_window, WM_SYSCOMMAND, command,
+                      MAKELPARAM(screen_point.x, screen_point.y)) != FALSE;
+}
+
+void WindowsHostBridge::CancelOwnWindowCommand() {
+  pending_command_window_ = nullptr;
+  pending_command_hit_test_ = HTNOWHERE;
 }
 
 bool WindowsHostBridge::HandleKeyboard(const EncodableMap& arguments,
@@ -749,6 +842,7 @@ void WindowsHostBridge::ReleaseKeyboardInput() {
 }
 
 void WindowsHostBridge::ReleasePointerButtons() {
+  CancelOwnWindowCommand();
   std::vector<INPUT> inputs;
   for (const auto& button : pressed_mouse_buttons_) {
     inputs.push_back(MouseInput(ButtonFlag(button, true)));

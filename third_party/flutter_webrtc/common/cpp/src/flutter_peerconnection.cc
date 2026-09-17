@@ -1293,6 +1293,7 @@ void FlutterPeerConnectionObserver::OnAddTrack(
     vector<scoped_refptr<RTCMediaStream>> streams,
     scoped_refptr<RTCRtpReceiver> receiver) {
   auto track = receiver->track();
+  remote_tracks_[track->id().std_string()] = track;
 
   std::vector<scoped_refptr<RTCMediaStream>> mediaStreams;
   for (scoped_refptr<RTCMediaStream> stream : streams.std_vector()) {
@@ -1322,6 +1323,10 @@ void FlutterPeerConnectionObserver::OnAddTrack(
 void FlutterPeerConnectionObserver::OnTrack(
     scoped_refptr<RTCRtpTransceiver> transceiver) {
   auto receiver = transceiver->receiver();
+  auto track = receiver->track();
+  // Register before notifying Dart. Calls such as setRemoteTrackGain may be
+  // issued immediately from the onTrack callback.
+  remote_tracks_[track->id().std_string()] = track;
   EncodableMap params;
   EncodableList streams_info;
   auto streams = receiver->streams();
@@ -1351,6 +1356,7 @@ void FlutterPeerConnectionObserver::OnRemoveTrack(
   params[EncodableValue("receiver")] =
       EncodableValue(rtpReceiverToMap(receiver));
   event_channel_->Success(EncodableValue(params));
+  remote_tracks_.erase(track->id().std_string());
 }
 
 // void FlutterPeerConnectionObserver::OnRemoveTrack(
@@ -1417,6 +1423,10 @@ scoped_refptr<RTCMediaStream> FlutterPeerConnectionObserver::MediaStreamForId(
 
 scoped_refptr<RTCMediaTrack> FlutterPeerConnectionObserver::MediaTrackForId(
     const std::string& id) {
+  auto direct = remote_tracks_.find(id);
+  if (direct != remote_tracks_.end()) {
+    return direct->second;
+  }
   for (auto it = remote_streams_.begin(); it != remote_streams_.end(); it++) {
     auto remoteStream = (*it).second;
     auto audio_tracks = remoteStream->audio_tracks();

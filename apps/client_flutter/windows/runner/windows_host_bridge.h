@@ -48,11 +48,16 @@ class WindowsHostBridge {
   bool SetSyntheticModifiers(const std::set<UINT>& requested,
                              std::string* error);
   bool SendInputs(std::vector<INPUT>* inputs, std::string* error);
+  bool BeginOwnWindowCommand(const POINT& screen_point);
+  bool CompleteOwnWindowCommand(const POINT& screen_point);
+  void CancelOwnWindowCommand();
 
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
   std::set<std::string> pressed_mouse_buttons_;
   std::map<std::string, KeyDescriptor> pressed_keys_;
   std::set<UINT> pressed_modifiers_;
+  HWND pending_command_window_ = nullptr;
+  LRESULT pending_command_hit_test_ = HTNOWHERE;
 };
 
 #endif  // RUNNER_WINDOWS_HOST_BRIDGE_H_

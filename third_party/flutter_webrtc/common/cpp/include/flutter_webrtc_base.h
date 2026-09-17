@@ -53,7 +53,9 @@ class FlutterWebRTCBase {
     return audio_processing_;
   }
 
-  virtual scoped_refptr<RTCMediaTrack> MediaTrackForId(const std::string& id);
+  virtual scoped_refptr<RTCMediaTrack> MediaTrackForId(
+      const std::string& id,
+      const std::string& peer_connection_id = std::string());
 
   std::string GenerateUUID();
 

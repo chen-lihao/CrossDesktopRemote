@@ -204,6 +204,31 @@ final class SignalingRoomRegistry {
 		});
 	}
 
+	/**
+	 * Ends one controller session while keeping the host socket registered and
+	 * atomically issuing its next one-time invitation.
+	 */
+	synchronized Optional<ServerInvitationRotation> rearmAfterControllerLeaves(
+			String roomCode,
+			WebSocketSession controller) {
+		var room = rooms.get(roomCode);
+		if (room == null || !room.contains(SignalingRole.CONTROLLER, controller)) {
+			return Optional.empty();
+		}
+		var host = room.hostSession().orElse(null);
+		arbiter.release(controller);
+		rooms.remove(roomCode, room);
+		if (host == null || !host.isOpen()) {
+			return Optional.empty();
+		}
+		var invitation = createHostInvitation(host, room.generation() + 1);
+		return Optional.of(new ServerInvitationRotation(
+				roomCode,
+				invitation,
+				host,
+				"session-ended"));
+	}
+
 	private JoinResult registerHost(String roomCode, WebSocketSession session) {
 		var result = new AtomicReference<>(JoinResult.ROLE_OCCUPIED);
 		var now = currentTimeMillis.getAsLong();

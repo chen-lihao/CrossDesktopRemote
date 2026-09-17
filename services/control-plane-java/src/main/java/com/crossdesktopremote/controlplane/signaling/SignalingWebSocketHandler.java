@@ -31,6 +31,7 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			"approve",
 			"answer",
 			"candidate",
+			"end-session",
 			"hangup",
 			"offer",
 			"rotate-invitation",
@@ -162,6 +163,7 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 				"server-invitations",
 				"invitation-rotation",
 				"server-invitation-push",
+				"persistent-signaling-session-v1",
 				"trusted-routing-v1"));
 		ready.put("serverTimeUnixMillis", System.currentTimeMillis());
 		ready.put("clientAddress", clientAddress(session));
@@ -242,6 +244,11 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			return;
 		}
 
+		if (messageType.equals("end-session")) {
+			endPeerSession(session, roomCode, role, trustedRoute.isPresent());
+			return;
+		}
+
 		var peer = trustedRoutes.peer(session);
 		if (peer.isEmpty() && roomCode != null) peer = rooms.peer(roomCode, role);
 		if (peer.isEmpty()) {
@@ -280,8 +287,54 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		}
 
 		var peer = rooms.peer(roomCode, role);
+		if (role == SignalingRole.CONTROLLER) {
+			var rotation = rooms.rearmAfterControllerLeaves(roomCode, session);
+			peer.ifPresent(value -> sendJsonQuietly(value, Map.of("type", "peer-left")));
+			rotation.ifPresent(this::pushInvitationRotation);
+			return;
+		}
 		rooms.leave(roomCode, role, session);
 		peer.ifPresent(value -> sendJsonQuietly(value, Map.of("type", "peer-left")));
+	}
+
+	private void endPeerSession(
+			WebSocketSession session,
+			String roomCode,
+			SignalingRole role,
+			boolean trusted) {
+		if (trusted) {
+			var peer = trustedRoutes.endSession(session);
+			session.getAttributes().remove(TRUSTED_ROUTE_ATTRIBUTE);
+			peer.ifPresent(value -> {
+				value.getAttributes().remove(TRUSTED_ROUTE_ATTRIBUTE);
+				sendJsonQuietly(value, Map.of("type", "peer-left"));
+			});
+			sendJsonQuietly(session, Map.of("type", "session-ended"));
+			return;
+		}
+
+		var peer = rooms.peer(roomCode, role);
+		var controller = role == SignalingRole.CONTROLLER
+				? session
+				: peer.filter(value -> role(value) == SignalingRole.CONTROLLER).orElse(null);
+		if (controller == null) {
+			sendJsonQuietly(session, Map.of("type", "session-ended"));
+			return;
+		}
+		var rotation = rooms.rearmAfterControllerLeaves(roomCode, controller);
+		controller.getAttributes().remove(ROOM_ATTRIBUTE);
+		peer.filter(value -> value != session)
+				.ifPresent(value -> sendJsonQuietly(value, Map.of("type", "peer-left")));
+		sendJsonQuietly(session, Map.of("type", "session-ended"));
+		rotation.ifPresent(this::pushInvitationRotation);
+	}
+
+	private void pushInvitationRotation(SignalingRoomRegistry.ServerInvitationRotation rotation) {
+		var host = rotation.hostSession();
+		host.getAttributes().put(ROOM_ATTRIBUTE, rotation.invitation().roomCode());
+		var payload = invitationPayload("invitation-updated", rotation.invitation());
+		payload.put("reason", rotation.reason());
+		sendJsonQuietly(host, payload);
 	}
 
 	@Override

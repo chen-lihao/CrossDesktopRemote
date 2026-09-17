@@ -430,8 +430,10 @@ void FlutterWebRTC::HandleMethodCall(
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string track_id = findString(params, "trackId");
+    const std::string peer_connection_id =
+        findString(params, "peerConnectionId");
     const EncodableValue enable = findEncodableValue(params, "enabled");
-    RTCMediaTrack* track = MediaTrackForId(track_id);
+    RTCMediaTrack* track = MediaTrackForId(track_id, peer_connection_id);
     if (track != nullptr) {
       track->set_enabled(GetValue<bool>(enable));
     }
@@ -542,6 +544,8 @@ void FlutterWebRTC::HandleMethodCall(
 
     const EncodableMap params = GetValue<EncodableMap>(*args);
     const std::string trackId = findString(params, "trackId");
+    const std::string peerConnectionId =
+        findString(params, "peerConnectionId");
     const std::optional<double> volume = maybeFindDouble(params, "volume");
 
     if (trackId.empty()) {
@@ -559,7 +563,7 @@ void FlutterWebRTC::HandleMethodCall(
       return;
     }
 
-    RTCMediaTrack* track = MediaTrackForId(trackId);
+    RTCMediaTrack* track = MediaTrackForId(trackId, peerConnectionId);
     if (nullptr == track) {
       result->Error("setVolume", "setVolume() Unable to find provided track");
       return;

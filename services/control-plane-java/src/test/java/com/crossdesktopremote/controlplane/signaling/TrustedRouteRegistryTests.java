@@ -44,6 +44,22 @@ class TrustedRouteRegistryTests {
 	}
 
 	@Test
+	void endsOnlyTheActiveRouteAndKeepsTheTrustedHostRegistered() {
+		var registry = new TrustedRouteRegistry(new HostSessionArbiter());
+		var host = openSession();
+		var controller = openSession();
+		var nextController = openSession();
+		var machineCode = "CDR2-1234-5678-9ABC-DEFG-HJKM-NPQR";
+		assertThat(registry.registerHost(machineCode, host)).isTrue();
+		assertThat(registry.joinController(machineCode, controller)).isPresent();
+
+		assertThat(registry.endSession(controller)).contains(host);
+		assertThat(registry.route(host)).isEmpty();
+		assertThat(registry.route(controller)).isEmpty();
+		assertThat(registry.joinController(machineCode, nextController)).isPresent();
+	}
+
+	@Test
 	void arbitratesConnectionCodeAndTrustedControllersAsOneHostSession() {
 		var arbiter = new HostSessionArbiter();
 		var trusted = new TrustedRouteRegistry(arbiter);

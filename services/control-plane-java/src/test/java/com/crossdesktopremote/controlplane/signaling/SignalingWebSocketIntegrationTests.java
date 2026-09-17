@@ -75,6 +75,42 @@ class SignalingWebSocketIntegrationTests {
 	}
 
 	@Test
+	void endsAPeerSessionAndReusesTheHostSocketWithANewInvitation() throws Exception {
+		var hostMessages = new RecordingListener();
+		var controllerMessages = new RecordingListener();
+		var nextControllerMessages = new RecordingListener();
+		var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+
+		var host = connectHost(client, hostMessages);
+		var initialReady = hostMessages.next();
+		assertThat(initialReady).contains("persistent-signaling-session-v1");
+		var controller = connect(
+				client, roomCode(initialReady), "controller", controllerMessages);
+		assertThat(controllerMessages.next()).contains("\"type\":\"ready\"");
+		assertThat(hostMessages.next()).contains("\"type\":\"peer-joined\"");
+		assertThat(controllerMessages.next()).contains("\"type\":\"peer-joined\"");
+
+		controller.sendText("{\"type\":\"end-session\"}", true).join();
+
+		assertThat(hostMessages.next()).contains("\"type\":\"peer-left\"");
+		var rotated = hostMessages.next();
+		assertThat(rotated)
+				.contains("\"type\":\"invitation-updated\"")
+				.contains("\"reason\":\"session-ended\"");
+		assertThat(controllerMessages.next()).contains("\"type\":\"session-ended\"");
+
+		var nextController = connect(
+				client, roomCode(rotated), "controller", nextControllerMessages);
+		assertThat(nextControllerMessages.next()).contains("\"type\":\"ready\"");
+		assertThat(hostMessages.next()).contains("\"type\":\"peer-joined\"");
+		assertThat(nextControllerMessages.next()).contains("\"type\":\"peer-joined\"");
+
+		nextController.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+		controller.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+		host.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+	}
+
+	@Test
 	void announcesControllerPlatformCapabilitiesBeforeHostCaptureStarts() throws Exception {
 		var hostMessages = new RecordingListener();
 		var controllerMessages = new RecordingListener();
@@ -215,6 +251,47 @@ class SignalingWebSocketIntegrationTests {
 	}
 
 	@Test
+	void endsATrustedRouteWithoutUnregisteringTheHost() throws Exception {
+		var hostMessages = new RecordingListener();
+		var controllerMessages = new RecordingListener();
+		var nextControllerMessages = new RecordingListener();
+		var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+		var machineCode = "CDR2-ABCD-EFGH-JKMN-PQRS";
+		var capabilities = List.of(
+				"device-identity-v1",
+				"trusted-device-auth-v1",
+				"signed-webrtc-binding-v1");
+
+		var host = client.newWebSocketBuilder()
+				.connectTimeout(Duration.ofSeconds(5))
+				.buildAsync(URI.create("ws://127.0.0.1:" + port
+						+ "/ws/signaling?role=host&trustedMachineCode=" + machineCode
+						+ capabilityQuery(capabilities)), hostMessages)
+				.join();
+		assertThat(hostMessages.next()).contains("\"type\":\"ready\"");
+		var controller = connectTrustedController(
+				client, machineCode, capabilities, controllerMessages);
+		assertThat(controllerMessages.next()).contains("\"type\":\"ready\"");
+		assertThat(hostMessages.next()).contains("\"type\":\"peer-joined\"");
+		assertThat(controllerMessages.next()).contains("\"type\":\"peer-joined\"");
+
+		controller.sendText("{\"type\":\"end-session\"}", true).join();
+
+		assertThat(hostMessages.next()).contains("\"type\":\"peer-left\"");
+		assertThat(controllerMessages.next()).contains("\"type\":\"session-ended\"");
+
+		var nextController = connectTrustedController(
+				client, machineCode, capabilities, nextControllerMessages);
+		assertThat(nextControllerMessages.next()).contains("\"type\":\"ready\"");
+		assertThat(hostMessages.next()).contains("\"type\":\"peer-joined\"");
+		assertThat(nextControllerMessages.next()).contains("\"type\":\"peer-joined\"");
+
+		nextController.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+		controller.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+		host.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+	}
+
+	@Test
 	void rejectsAnOversizedCapabilityManifestWithoutPartialNegotiation() throws Exception {
 		var messages = new RecordingListener();
 		var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
@@ -297,6 +374,19 @@ class SignalingWebSocketIntegrationTests {
 		return client.newWebSocketBuilder()
 				.connectTimeout(Duration.ofSeconds(5))
 				.buildAsync(URI.create("ws://127.0.0.1:" + port + "/ws/signaling?role=host&protocol=2"), listener)
+				.join();
+	}
+
+	private WebSocket connectTrustedController(
+			HttpClient client,
+			String machineCode,
+			List<String> capabilities,
+			RecordingListener listener) {
+		return client.newWebSocketBuilder()
+				.connectTimeout(Duration.ofSeconds(5))
+				.buildAsync(URI.create("ws://127.0.0.1:" + port
+						+ "/ws/signaling?role=controller&trustedTarget=" + machineCode
+						+ capabilityQuery(capabilities)), listener)
 				.join();
 	}
 

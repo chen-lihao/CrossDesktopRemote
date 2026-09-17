@@ -49,6 +49,32 @@ class SignalingRoomRegistryTests {
 	}
 
 	@Test
+	void reArmsAConsumedInvitationWithoutDisconnectingTheHost() {
+		var registry = new SignalingRoomRegistry(new HostSessionArbiter());
+		var host = openSession("host", "192.168.1.10");
+		var controller = openSession("controller", "192.168.1.20");
+		var nextController = openSession("next-controller", "192.168.1.21");
+		var invitation = registry.createHostInvitation(host);
+
+		assertThat(registry.join(invitation.roomCode(), SignalingRole.CONTROLLER, controller))
+				.isEqualTo(SignalingRoomRegistry.JoinResult.JOINED);
+
+		var rotation = registry.rearmAfterControllerLeaves(
+				invitation.roomCode(), controller).orElseThrow();
+
+		assertThat(rotation.hostSession()).isSameAs(host);
+		assertThat(rotation.previousRoomCode()).isEqualTo(invitation.roomCode());
+		assertThat(rotation.invitation().generation()).isEqualTo(invitation.generation() + 1);
+		assertThat(rotation.invitation().roomCode()).isNotEqualTo(invitation.roomCode());
+		assertThat(registry.join(invitation.roomCode(), SignalingRole.CONTROLLER, nextController))
+				.isEqualTo(SignalingRoomRegistry.JoinResult.INVALID_ROOM);
+		assertThat(registry.join(
+				rotation.invitation().roomCode(),
+				SignalingRole.CONTROLLER,
+				nextController)).isEqualTo(SignalingRoomRegistry.JoinResult.JOINED);
+	}
+
+	@Test
 	void rejectsAStaleInvitationLeaseRotation() {
 		var registry = new SignalingRoomRegistry(new HostSessionArbiter());
 		var host = openSession("host", "192.168.1.10");
