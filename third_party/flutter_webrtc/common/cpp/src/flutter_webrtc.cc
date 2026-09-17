@@ -471,11 +471,8 @@ void FlutterWebRTC::HandleMethodCall(
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string peerConnectionId = findString(params, "peerConnectionId");
     RTCPeerConnection* pc = PeerConnectionForId(peerConnectionId);
-    if (pc == nullptr) {
-      result->Error("peerConnectionCloseFailed",
-                    "peerConnectionClose() peerConnection is null");
-      return;
-    }
+    // close() is intentionally idempotent. dispose() may already have
+    // completed the single native terminal transaction.
     RTCPeerConnectionClose(pc, peerConnectionId, std::move(result));
   } else if (method_call.method_name().compare("peerConnectionDispose") == 0) {
     if (!method_call.arguments()) {
@@ -486,10 +483,8 @@ void FlutterWebRTC::HandleMethodCall(
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string peerConnectionId = findString(params, "peerConnectionId");
     RTCPeerConnection* pc = PeerConnectionForId(peerConnectionId);
-    if (pc == nullptr) {
-      result->Success();
-      return;
-    }
+    // Even if close() removed the connection, dispose() must still remove its
+    // observer and event channel.
     RTCPeerConnectionDispose(pc, peerConnectionId, std::move(result));
   } else if (method_call.method_name().compare("createVideoRenderer") == 0) {
     CreateVideoRendererTexture(std::move(result));
@@ -544,8 +539,7 @@ void FlutterWebRTC::HandleMethodCall(
 
     const EncodableMap params = GetValue<EncodableMap>(*args);
     const std::string trackId = findString(params, "trackId");
-    const std::string peerConnectionId =
-        findString(params, "peerConnectionId");
+    const std::string peerConnectionId = findString(params, "peerConnectionId");
     const std::optional<double> volume = maybeFindDouble(params, "volume");
 
     if (trackId.empty()) {

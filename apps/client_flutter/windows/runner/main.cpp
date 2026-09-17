@@ -6,8 +6,10 @@
 #include "flutter_window.h"
 #include "utils.h"
 
-int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
-                      _In_ wchar_t *command_line, _In_ int show_command) {
+int APIENTRY wWinMain(_In_ HINSTANCE instance,
+                      _In_opt_ HINSTANCE prev,
+                      _In_ wchar_t* command_line,
+                      _In_ int show_command) {
   // Attach to console when present (e.g., 'flutter run') or create a
   // new console when running with a debugger.
   if (!::AttachConsole(ATTACH_PARENT_PROCESS) && ::IsDebuggerPresent()) {
@@ -21,8 +23,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   flutter::DartProject project(L"data");
 
-  std::vector<std::string> command_line_arguments =
-      GetCommandLineArguments();
+  std::vector<std::string> command_line_arguments = GetCommandLineArguments();
 
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
@@ -32,6 +33,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   if (!window.Create(L"cross_desktop_remote", origin, size)) {
     return EXIT_FAILURE;
   }
+  // Flutter and native plugins may install their own unhandled filter while
+  // the engine is created. Reinstall ours after plugin registration; the
+  // vectored handler also covers fatal exceptions raised by Win32 callbacks.
+  InstallCrashDiagnostics();
   window.SetQuitOnClose(true);
 
   ::MSG msg;

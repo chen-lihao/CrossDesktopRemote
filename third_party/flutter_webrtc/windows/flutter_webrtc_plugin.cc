@@ -32,7 +32,17 @@ class FlutterWebRTCPluginImpl : public FlutterWebRTCPlugin {
     registrar->AddPlugin(std::move(plugin));
   }
 
-  virtual ~FlutterWebRTCPluginImpl() {}
+  ~FlutterWebRTCPluginImpl() override {
+    // Prevent new Dart calls first, then destroy every native WebRTC object
+    // while its platform task runner and Flutter messenger still exist.
+    channel_->SetMethodCallHandler(nullptr);
+    if (g_shared_instance == webrtc_.get()) {
+      g_shared_instance = nullptr;
+    }
+    webrtc_.reset();
+    task_runner_->Shutdown();
+    task_runner_.reset();
+  }
 
   BinaryMessenger* messenger() { return messenger_; }
 
@@ -57,20 +67,20 @@ class FlutterWebRTCPluginImpl : public FlutterWebRTCPlugin {
                         std::unique_ptr<MethodResult> result) {
     // handle method call and forward to webrtc native sdk.
     auto method_call_proxy = MethodCallProxy::Create(method_call);
-    webrtc_->HandleMethodCall(*method_call_proxy.get(),
-                              MethodResultProxy::Create(std::move(result)));
+    webrtc_->HandleMethodCall(
+        *method_call_proxy.get(),
+        MethodResultProxy::Create(std::move(result), task_runner_.get()));
   }
 
  private:
   std::unique_ptr<MethodChannel> channel_;
-  std::unique_ptr<FlutterWebRTC> webrtc_;
   BinaryMessenger* messenger_;
   TextureRegistrar* textures_;
-  std::unique_ptr<TaskRunner> task_runner_;
+  std::unique_ptr<TaskRunnerWindows> task_runner_;
+  std::unique_ptr<FlutterWebRTC> webrtc_;
 };
 
 }  // namespace flutter_webrtc_plugin
-
 
 void FlutterWebRTCPluginRegisterWithRegistrar(
     FlutterDesktopPluginRegistrarRef registrar) {
@@ -81,4 +91,4 @@ void FlutterWebRTCPluginRegisterWithRegistrar(
 
 flutter_webrtc_plugin::FlutterWebRTC* FlutterWebRTCPluginSharedInstance() {
   return g_shared_instance;
-} 
+}

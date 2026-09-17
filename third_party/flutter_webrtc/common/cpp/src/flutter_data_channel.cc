@@ -14,7 +14,18 @@ FlutterRTCDataChannelObserver::FlutterRTCDataChannelObserver(
   data_channel_->RegisterObserver(this);
 }
 
-FlutterRTCDataChannelObserver::~FlutterRTCDataChannelObserver() {}
+FlutterRTCDataChannelObserver::~FlutterRTCDataChannelObserver() {
+  BeginClose();
+}
+
+void FlutterRTCDataChannelObserver::BeginClose() {
+  bool expected = false;
+  if (!closing_.compare_exchange_strong(expected, true)) {
+    return;
+  }
+  event_channel_->Deactivate();
+  data_channel_->UnregisterObserver();
+}
 
 void FlutterDataChannel::CreateDataChannel(
     const std::string& peerConnectionId,
@@ -98,8 +109,11 @@ void FlutterDataChannel::DataChannelClose(
     RTCDataChannel* data_channel,
     const std::string& data_channel_uuid,
     std::unique_ptr<MethodResultProxy> result) {
-  data_channel->Close();
   auto it = base_->data_channel_observers_.find(data_channel_uuid);
+  if (it != base_->data_channel_observers_.end()) {
+    it->second->BeginClose();
+  }
+  data_channel->Close();
   if (it != base_->data_channel_observers_.end())
     base_->data_channel_observers_.erase(it);
   result->Success();
@@ -131,6 +145,9 @@ static const char* DataStateString(RTCDataChannelState state) {
 }
 
 void FlutterRTCDataChannelObserver::OnStateChange(RTCDataChannelState state) {
+  if (closing_.load()) {
+    return;
+  }
   EncodableMap params;
   params[EncodableValue("event")] = EncodableValue("dataChannelStateChanged");
   params[EncodableValue("id")] = EncodableValue(data_channel_->id());
@@ -142,6 +159,9 @@ void FlutterRTCDataChannelObserver::OnStateChange(RTCDataChannelState state) {
 void FlutterRTCDataChannelObserver::OnMessage(const char* buffer,
                                               int length,
                                               bool binary) {
+  if (closing_.load()) {
+    return;
+  }
   EncodableMap params;
   params[EncodableValue("event")] = EncodableValue("dataChannelReceiveMessage");
 

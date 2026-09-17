@@ -182,6 +182,11 @@ class EventChannelProxy {
 
   virtual ~EventChannelProxy() = default;
 
+  // Stops accepting native events and invalidates all events already queued
+  // for the Flutter platform thread. This must be called before the native
+  // object producing those events is closed.
+  virtual void Deactivate() = 0;
+
   virtual void Success(const EncodableValue& event,
                        bool cache_event = true) = 0;
 };

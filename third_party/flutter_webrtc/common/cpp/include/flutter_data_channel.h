@@ -4,6 +4,8 @@
 #include "flutter_common.h"
 #include "flutter_webrtc_base.h"
 
+#include <atomic>
+
 namespace flutter_webrtc_plugin {
 
 class FlutterRTCDataChannelObserver : public RTCDataChannelObserver {
@@ -18,9 +20,14 @@ class FlutterRTCDataChannelObserver : public RTCDataChannelObserver {
 
   virtual void OnMessage(const char* buffer, int length, bool binary) override;
 
+  // Stops native callbacks before the observer and its Flutter EventChannel
+  // are destroyed. Safe to call more than once.
+  void BeginClose();
+
   scoped_refptr<RTCDataChannel> data_channel() { return data_channel_; }
 
  private:
+  std::atomic<bool> closing_{false};
   std::unique_ptr<EventChannelProxy> event_channel_;
   scoped_refptr<RTCDataChannel> data_channel_;
 };

@@ -1,6 +1,8 @@
 #include "flutter_common.h"
 #include "task_runner.h"
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 
@@ -114,92 +116,164 @@ std::unique_ptr<MethodResultProxy> MethodResultProxy::Create(
 }
 
 class EventChannelProxyImpl : public EventChannelProxy {
-  public:
-   EventChannelProxyImpl(BinaryMessenger* messenger,
-                         TaskRunner* task_runner,
-                         const std::string& channelName)
-       : channel_(std::make_unique<EventChannel>(
-             messenger,
-             channelName,
-             &flutter::StandardMethodCodec::GetInstance())),
-             task_runner_(task_runner) {
-     auto handler = std::make_unique<
-         flutter::StreamHandlerFunctions<EncodableValue>>(
-         [&](const EncodableValue* arguments,
-             std::unique_ptr<flutter::EventSink<EncodableValue>>&& events)
-             -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
-           std::list<EncodableValue> pending_events;
-           std::weak_ptr<EventSink> weak_sink;
-           {
-             std::lock_guard<std::mutex> lock(mutex_);
-             sink_ = std::move(events);
-             weak_sink = sink_;
-             pending_events.swap(event_queue_);
-             on_listen_called_ = true;
-           }
-           for (const auto& event : pending_events) {
-             DispatchEvent(weak_sink, event);
-           }
-           return nullptr;
-         },
-         [&](const EncodableValue* arguments)
-             -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
-           std::lock_guard<std::mutex> lock(mutex_);
-           on_listen_called_ = false;
-           sink_.reset();
-           return nullptr;
-         });
- 
-     channel_->SetStreamHandler(std::move(handler));
-   }
+ public:
+  EventChannelProxyImpl(BinaryMessenger* messenger,
+                        TaskRunner* task_runner,
+                        const std::string& channelName)
+      : channel_(std::make_unique<EventChannel>(
+            messenger,
+            channelName,
+            &flutter::StandardMethodCodec::GetInstance())),
+        state_(std::make_shared<DispatchState>(task_runner)) {
+    std::weak_ptr<DispatchState> weak_state = state_;
+    auto handler = std::make_unique<
+        flutter::StreamHandlerFunctions<EncodableValue>>(
+        [weak_state](
+            const EncodableValue* arguments,
+            std::unique_ptr<flutter::EventSink<EncodableValue>>&& events)
+            -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
+          auto state = weak_state.lock();
+          if (!state || !state->active.load()) {
+            return nullptr;
+          }
 
-   virtual ~EventChannelProxyImpl() { channel_->SetStreamHandler(nullptr); }
+          std::list<EncodableValue> pending_events;
+          std::weak_ptr<EventSink> weak_sink;
+          uint64_t generation = 0;
+          {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if (!state->active.load()) {
+              return nullptr;
+            }
+            state->sink = std::move(events);
+            weak_sink = state->sink;
+            pending_events.swap(state->event_queue);
+            state->on_listen_called = true;
+            generation = state->generation;
+          }
+          for (const auto& event : pending_events) {
+            DispatchEvent(weak_state, weak_sink, generation, event);
+          }
+          return nullptr;
+        },
+        [weak_state](const EncodableValue* arguments)
+            -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
+          auto state = weak_state.lock();
+          if (!state) {
+            return nullptr;
+          }
+          std::lock_guard<std::mutex> lock(state->mutex);
+          state->on_listen_called = false;
+          state->sink.reset();
+          ++state->generation;
+          return nullptr;
+        });
 
-   void Success(const EncodableValue& event, bool cache_event = true) override {
-     std::weak_ptr<EventSink> weak_sink;
-     {
-       std::lock_guard<std::mutex> lock(mutex_);
-       if (on_listen_called_ && sink_) {
-         weak_sink = sink_;
-       } else if (cache_event) {
-         event_queue_.push_back(event);
-         return;
-       }
-     }
-     if (!weak_sink.expired()) {
-       DispatchEvent(weak_sink, event);
-     }
-   }
+    channel_->SetStreamHandler(std::move(handler));
+  }
 
-   void DispatchEvent(std::weak_ptr<EventSink> weak_sink,
-                      const EncodableValue& event) {
-     if (task_runner_) {
-       task_runner_->EnqueueTask([weak_sink, event]() {
-         auto sink = weak_sink.lock();
-         if (sink) {
-           sink->Success(event);
-         }
-       });
-     } else {
-       auto sink = weak_sink.lock();
-       if (sink) {
-         sink->Success(event);
-       }
-     }
-   }
- 
-  private:
-   std::unique_ptr<EventChannel> channel_;
-   std::shared_ptr<flutter::EventSink<flutter::EncodableValue>> sink_;
-   std::list<EncodableValue> event_queue_;
-   bool on_listen_called_ = false;
-   TaskRunner* task_runner_;
-   std::mutex mutex_;
- };
+  ~EventChannelProxyImpl() override {
+    Deactivate();
+    channel_->SetStreamHandler(nullptr);
+  }
+
+  void Deactivate() override {
+    auto state = state_;
+    if (!state || !state->active.exchange(false)) {
+      return;
+    }
+    // Wait until a platform-thread send already in progress has completed.
+    // After this lock is acquired no queued callback can enter EventSink.
+    std::lock_guard<std::mutex> dispatch_lock(state->dispatch_mutex);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    ++state->generation;
+    state->on_listen_called = false;
+    state->sink.reset();
+    state->event_queue.clear();
+  }
+
+  void Success(const EncodableValue& event, bool cache_event = true) override {
+    auto state = state_;
+    if (!state || !state->active.load()) {
+      return;
+    }
+
+    std::weak_ptr<EventSink> weak_sink;
+    uint64_t generation = 0;
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      if (!state->active.load()) {
+        return;
+      }
+      generation = state->generation;
+      if (state->on_listen_called && state->sink) {
+        weak_sink = state->sink;
+      } else if (cache_event) {
+        state->event_queue.push_back(event);
+        return;
+      }
+    }
+    if (!weak_sink.expired()) {
+      DispatchEvent(state, weak_sink, generation, event);
+    }
+  }
+
+ private:
+  struct DispatchState {
+    explicit DispatchState(TaskRunner* runner) : task_runner(runner) {}
+
+    std::atomic<bool> active{true};
+    std::mutex dispatch_mutex;
+    std::mutex mutex;
+    std::shared_ptr<EventSink> sink;
+    std::list<EncodableValue> event_queue;
+    bool on_listen_called = false;
+    uint64_t generation = 0;
+    TaskRunner* task_runner;
+  };
+
+  static void DispatchEvent(std::weak_ptr<DispatchState> weak_state,
+                            std::weak_ptr<EventSink> weak_sink,
+                            uint64_t generation,
+                            const EncodableValue& event) {
+    auto dispatch = [weak_state, weak_sink, generation, event]() {
+      auto state = weak_state.lock();
+      if (!state || !state->active.load()) {
+        return;
+      }
+
+      std::lock_guard<std::mutex> dispatch_lock(state->dispatch_mutex);
+      if (!state->active.load()) {
+        return;
+      }
+      {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (!state->active.load() || state->generation != generation) {
+          return;
+        }
+      }
+      auto sink = weak_sink.lock();
+      if (sink) {
+        sink->Success(event);
+      }
+    };
+
+    auto state = weak_state.lock();
+    if (state && state->task_runner) {
+      state->task_runner->EnqueueTask(std::move(dispatch));
+    } else {
+      dispatch();
+    }
+  }
+
+  std::unique_ptr<EventChannel> channel_;
+  std::shared_ptr<DispatchState> state_;
+};
 
 std::unique_ptr<EventChannelProxy> EventChannelProxy::Create(
     BinaryMessenger* messenger,
     TaskRunner* task_runner,
     const std::string& channelName) {
-  return std::make_unique<EventChannelProxyImpl>(messenger, task_runner, channelName);
+  return std::make_unique<EventChannelProxyImpl>(messenger, task_runner,
+                                                 channelName);
 }

@@ -4,6 +4,9 @@
 #include "flutter_common.h"
 #include "flutter_webrtc_base.h"
 
+#include <atomic>
+#include <mutex>
+
 namespace flutter_webrtc_plugin {
 
 class FlutterPeerConnectionObserver : public RTCPeerConnectionObserver {
@@ -14,6 +17,10 @@ class FlutterPeerConnectionObserver : public RTCPeerConnectionObserver {
                                 TaskRunner* task_runner,
                                 const std::string& channel_name,
                                 std::string& peerConnectionId);
+
+  // Invalidates the Dart event channel while keeping this observer alive for
+  // the synchronous callbacks emitted by RTCPeerConnection::Close().
+  void BeginClose();
 
   virtual void OnSignalingState(RTCSignalingState state) override;
   virtual void OnPeerConnectionState(RTCPeerConnectionState state) override;
@@ -39,10 +46,14 @@ class FlutterPeerConnectionObserver : public RTCPeerConnectionObserver {
   void RemoveStreamForId(const std::string& id);
 
  private:
+  bool IsClosing() const { return closing_.load(); }
+
   std::unique_ptr<EventChannelProxy> event_channel_;
   scoped_refptr<RTCPeerConnection> peerconnection_;
   std::map<std::string, scoped_refptr<RTCMediaStream>> remote_streams_;
   std::map<std::string, scoped_refptr<RTCMediaTrack>> remote_tracks_;
+  mutable std::mutex remote_media_mutex_;
+  std::atomic<bool> closing_{false};
   FlutterWebRTCBase* base_;
   std::string id_;
 };

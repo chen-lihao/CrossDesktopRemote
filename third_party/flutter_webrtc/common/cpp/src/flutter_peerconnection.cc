@@ -109,34 +109,49 @@ const char* iceGatheringStateString(RTCIceGatheringState state) {
 }
 
 double stringToBitratePriority(const std::string& priority) {
-  if (priority == "very-low") return 0.5;
-  if (priority == "low") return 1.0;
-  if (priority == "medium") return 2.0;
-  if (priority == "high") return 4.0;
+  if (priority == "very-low")
+    return 0.5;
+  if (priority == "low")
+    return 1.0;
+  if (priority == "medium")
+    return 2.0;
+  if (priority == "high")
+    return 4.0;
   return 1.0;
 }
 
 std::string bitratePriorityToString(double bitratePriority) {
-  if (bitratePriority <= 0.5) return "very-low";
-  if (bitratePriority <= 1.0) return "low";
-  if (bitratePriority <= 2.0) return "medium";
+  if (bitratePriority <= 0.5)
+    return "very-low";
+  if (bitratePriority <= 1.0)
+    return "low";
+  if (bitratePriority <= 2.0)
+    return "medium";
   return "high";
 }
 
 libwebrtc::RTCPriority stringToRTCPriority(const std::string& priority) {
-  if (priority == "very-low") return libwebrtc::RTCPriority::kVeryLow;
-  if (priority == "low") return libwebrtc::RTCPriority::kLow;
-  if (priority == "medium") return libwebrtc::RTCPriority::kMedium;
-  if (priority == "high") return libwebrtc::RTCPriority::kHigh;
+  if (priority == "very-low")
+    return libwebrtc::RTCPriority::kVeryLow;
+  if (priority == "low")
+    return libwebrtc::RTCPriority::kLow;
+  if (priority == "medium")
+    return libwebrtc::RTCPriority::kMedium;
+  if (priority == "high")
+    return libwebrtc::RTCPriority::kHigh;
   return libwebrtc::RTCPriority::kLow;
 }
 
 std::string rtcPriorityToString(libwebrtc::RTCPriority priority) {
   switch (priority) {
-    case libwebrtc::RTCPriority::kVeryLow: return "very-low";
-    case libwebrtc::RTCPriority::kLow: return "low";
-    case libwebrtc::RTCPriority::kMedium: return "medium";
-    case libwebrtc::RTCPriority::kHigh: return "high";
+    case libwebrtc::RTCPriority::kVeryLow:
+      return "very-low";
+    case libwebrtc::RTCPriority::kLow:
+      return "low";
+    case libwebrtc::RTCPriority::kMedium:
+      return "medium";
+    case libwebrtc::RTCPriority::kHigh:
+      return "high";
   }
   return "low";
 }
@@ -375,8 +390,8 @@ void FlutterPeerConnection::CreateRTCPeerConnection(
 
   std::unique_ptr<FlutterPeerConnectionObserver> observer(
       new FlutterPeerConnectionObserver(base_, pc, base_->messenger_,
-                                        base_->task_runner_,
-                                        event_channel, uuid));
+                                        base_->task_runner_, event_channel,
+                                        uuid));
 
   base_->peerconnection_observers_[uuid] = std::move(observer);
 
@@ -389,10 +404,12 @@ void FlutterPeerConnection::RTCPeerConnectionClose(
     RTCPeerConnection* pc,
     const std::string& uuid,
     std::unique_ptr<MethodResultProxy> result) {
-  auto it2 = base_->peerconnections_.find(uuid);
-  if (it2 != base_->peerconnections_.end()) {
-    it2->second->Close();
-    base_->peerconnections_.erase(it2);
+  auto peer_connection = base_->peerconnections_.find(uuid);
+  if (peer_connection != base_->peerconnections_.end()) {
+    // The observer must remain alive while Close() emits its terminal stream
+    // and track callbacks. dispose() will deactivate and remove it later.
+    peer_connection->second->Close();
+    base_->peerconnections_.erase(peer_connection);
   }
 
   result->Success();
@@ -402,9 +419,26 @@ void FlutterPeerConnection::RTCPeerConnectionDispose(
     RTCPeerConnection* pc,
     const std::string& uuid,
     std::unique_ptr<MethodResultProxy> result) {
-  auto it = base_->peerconnection_observers_.find(uuid);
-  if (it != base_->peerconnection_observers_.end())
-    base_->peerconnection_observers_.erase(it);
+  auto observer = base_->peerconnection_observers_.find(uuid);
+  if (observer != base_->peerconnection_observers_.end()) {
+    // First stop native-to-Dart dispatch. Keep the observer object alive until
+    // the native PeerConnection has emitted all synchronous Close callbacks.
+    observer->second->BeginClose();
+  }
+
+  auto peer_connection = base_->peerconnections_.find(uuid);
+  if (peer_connection != base_->peerconnections_.end()) {
+    peer_connection->second->Close();
+    base_->peerconnections_.erase(peer_connection);
+  } else if (pc != nullptr) {
+    // Compatibility for callers holding a connection that has already been
+    // removed from the registry by close(). Close() is idempotent in WebRTC.
+    pc->Close();
+  }
+
+  if (observer != base_->peerconnection_observers_.end()) {
+    base_->peerconnection_observers_.erase(observer);
+  }
 
   result->Success();
 }
@@ -603,12 +637,14 @@ FlutterPeerConnection::mapToEncoding(const EncodableMap& params) {
 
   value = findEncodableValue(params, "priority");
   if (!value.IsNull()) {
-    encoding->set_bitrate_priority(stringToBitratePriority(GetValue<std::string>(value)));
+    encoding->set_bitrate_priority(
+        stringToBitratePriority(GetValue<std::string>(value)));
   }
 
   value = findEncodableValue(params, "networkPriority");
   if (!value.IsNull()) {
-    encoding->set_network_priority(stringToRTCPriority(GetValue<std::string>(value)));
+    encoding->set_network_priority(
+        stringToRTCPriority(GetValue<std::string>(value)));
   }
 
   return encoding;
@@ -785,11 +821,13 @@ scoped_refptr<RTCRtpParameters> FlutterPeerConnection::updateRtpParameters(
       }
       value = findEncodableValue(map, "priority");
       if (!value.IsNull()) {
-        param->set_bitrate_priority(stringToBitratePriority(GetValue<std::string>(value)));
+        param->set_bitrate_priority(
+            stringToBitratePriority(GetValue<std::string>(value)));
       }
       value = findEncodableValue(map, "networkPriority");
       if (!value.IsNull()) {
-        param->set_network_priority(stringToRTCPriority(GetValue<std::string>(value)));
+        param->set_network_priority(
+            stringToRTCPriority(GetValue<std::string>(value)));
       }
       encoding++;
     }
@@ -1179,15 +1217,29 @@ FlutterPeerConnectionObserver::FlutterPeerConnectionObserver(
     TaskRunner* task_runner,
     const std::string& channel_name,
     std::string& peerConnectionId)
-    : event_channel_(EventChannelProxy::Create(messenger, task_runner, channel_name)),
+    : event_channel_(
+          EventChannelProxy::Create(messenger, task_runner, channel_name)),
       peerconnection_(peerconnection),
       base_(base),
       id_(peerConnectionId) {
   peerconnection->RegisterRTCPeerConnectionObserver(this);
 }
 
+void FlutterPeerConnectionObserver::BeginClose() {
+  bool expected = false;
+  if (!closing_.compare_exchange_strong(expected, true)) {
+    return;
+  }
+  event_channel_->Deactivate();
+  std::lock_guard<std::mutex> lock(remote_media_mutex_);
+  remote_tracks_.clear();
+  remote_streams_.clear();
+}
 
 void FlutterPeerConnectionObserver::OnSignalingState(RTCSignalingState state) {
+  if (IsClosing()) {
+    return;
+  }
   EncodableMap params;
   params[EncodableValue("event")] = "signalingState";
   params[EncodableValue("state")] = signalingStateString(state);
@@ -1196,15 +1248,20 @@ void FlutterPeerConnectionObserver::OnSignalingState(RTCSignalingState state) {
 
 void FlutterPeerConnectionObserver::OnPeerConnectionState(
     RTCPeerConnectionState state) {
+  if (IsClosing()) {
+    return;
+  }
   EncodableMap params;
   params[EncodableValue("event")] = "peerConnectionState";
   params[EncodableValue("state")] = peerConnectionStateString(state);
   event_channel_->Success(EncodableValue(params));
 }
 
-
 void FlutterPeerConnectionObserver::OnIceGatheringState(
     RTCIceGatheringState state) {
+  if (IsClosing()) {
+    return;
+  }
   EncodableMap params;
   params[EncodableValue("event")] = "iceGatheringState";
   params[EncodableValue("state")] = iceGatheringStateString(state);
@@ -1213,6 +1270,9 @@ void FlutterPeerConnectionObserver::OnIceGatheringState(
 
 void FlutterPeerConnectionObserver::OnIceConnectionState(
     RTCIceConnectionState state) {
+  if (IsClosing()) {
+    return;
+  }
   EncodableMap params;
   params[EncodableValue("event")] = "iceConnectionState";
   params[EncodableValue("state")] = iceConnectionStateString(state);
@@ -1221,6 +1281,9 @@ void FlutterPeerConnectionObserver::OnIceConnectionState(
 
 void FlutterPeerConnectionObserver::OnIceCandidate(
     scoped_refptr<RTCIceCandidate> candidate) {
+  if (IsClosing()) {
+    return;
+  }
   EncodableMap params;
   params[EncodableValue("event")] = "onCandidate";
   EncodableMap cand;
@@ -1236,6 +1299,9 @@ void FlutterPeerConnectionObserver::OnIceCandidate(
 
 void FlutterPeerConnectionObserver::OnAddStream(
     scoped_refptr<RTCMediaStream> stream) {
+  if (IsClosing()) {
+    return;
+  }
   std::string streamId = stream->id().std_string();
 
   EncodableMap params;
@@ -1274,7 +1340,13 @@ void FlutterPeerConnectionObserver::OnAddStream(
 
     videoTracks.push_back(EncodableValue(videoTrack));
   }
-  remote_streams_[streamId] = scoped_refptr<RTCMediaStream>(stream);
+  {
+    std::lock_guard<std::mutex> lock(remote_media_mutex_);
+    if (IsClosing()) {
+      return;
+    }
+    remote_streams_[streamId] = scoped_refptr<RTCMediaStream>(stream);
+  }
   params[EncodableValue("videoTracks")] = EncodableValue(videoTracks);
 
   event_channel_->Success(EncodableValue(params));
@@ -1282,18 +1354,34 @@ void FlutterPeerConnectionObserver::OnAddStream(
 
 void FlutterPeerConnectionObserver::OnRemoveStream(
     scoped_refptr<RTCMediaStream> stream) {
+  if (IsClosing()) {
+    return;
+  }
+  const std::string stream_id = stream->id().std_string();
+  {
+    std::lock_guard<std::mutex> lock(remote_media_mutex_);
+    remote_streams_.erase(stream_id);
+  }
   EncodableMap params;
   params[EncodableValue("event")] = "onRemoveStream";
-  params[EncodableValue("streamId")] =
-      EncodableValue(stream->label().std_string());
+  params[EncodableValue("streamId")] = EncodableValue(stream_id);
   event_channel_->Success(EncodableValue(params));
 }
 
 void FlutterPeerConnectionObserver::OnAddTrack(
     vector<scoped_refptr<RTCMediaStream>> streams,
     scoped_refptr<RTCRtpReceiver> receiver) {
+  if (IsClosing()) {
+    return;
+  }
   auto track = receiver->track();
-  remote_tracks_[track->id().std_string()] = track;
+  {
+    std::lock_guard<std::mutex> lock(remote_media_mutex_);
+    if (IsClosing()) {
+      return;
+    }
+    remote_tracks_[track->id().std_string()] = track;
+  }
 
   std::vector<scoped_refptr<RTCMediaStream>> mediaStreams;
   for (scoped_refptr<RTCMediaStream> stream : streams.std_vector()) {
@@ -1322,11 +1410,20 @@ void FlutterPeerConnectionObserver::OnAddTrack(
 
 void FlutterPeerConnectionObserver::OnTrack(
     scoped_refptr<RTCRtpTransceiver> transceiver) {
+  if (IsClosing()) {
+    return;
+  }
   auto receiver = transceiver->receiver();
   auto track = receiver->track();
   // Register before notifying Dart. Calls such as setRemoteTrackGain may be
   // issued immediately from the onTrack callback.
-  remote_tracks_[track->id().std_string()] = track;
+  {
+    std::lock_guard<std::mutex> lock(remote_media_mutex_);
+    if (IsClosing()) {
+      return;
+    }
+    remote_tracks_[track->id().std_string()] = track;
+  }
   EncodableMap params;
   EncodableList streams_info;
   auto streams = receiver->streams();
@@ -1347,6 +1444,9 @@ void FlutterPeerConnectionObserver::OnTrack(
 
 void FlutterPeerConnectionObserver::OnRemoveTrack(
     scoped_refptr<RTCRtpReceiver> receiver) {
+  if (IsClosing()) {
+    return;
+  }
   auto track = receiver->track();
 
   EncodableMap params;
@@ -1356,6 +1456,7 @@ void FlutterPeerConnectionObserver::OnRemoveTrack(
   params[EncodableValue("receiver")] =
       EncodableValue(rtpReceiverToMap(receiver));
   event_channel_->Success(EncodableValue(params));
+  std::lock_guard<std::mutex> lock(remote_media_mutex_);
   remote_tracks_.erase(track->id().std_string());
 }
 
@@ -1383,6 +1484,9 @@ void FlutterPeerConnectionObserver::OnRemoveTrack(
 
 void FlutterPeerConnectionObserver::OnDataChannel(
     scoped_refptr<RTCDataChannel> data_channel) {
+  if (IsClosing()) {
+    return;
+  }
   int channel_id = data_channel->id();
   std::string channel_uuid = base_->GenerateUUID();
 
@@ -1391,8 +1495,7 @@ void FlutterPeerConnectionObserver::OnDataChannel(
 
   std::unique_ptr<FlutterRTCDataChannelObserver> observer(
       new FlutterRTCDataChannelObserver(data_channel, base_->messenger_,
-                                        base_->task_runner_,
-                                        event_channel));
+                                        base_->task_runner_, event_channel));
 
   base_->lock();
   base_->data_channel_observers_[channel_uuid] = std::move(observer);
@@ -1408,6 +1511,9 @@ void FlutterPeerConnectionObserver::OnDataChannel(
 }
 
 void FlutterPeerConnectionObserver::OnRenegotiationNeeded() {
+  if (IsClosing()) {
+    return;
+  }
   EncodableMap params;
   params[EncodableValue("event")] = "onRenegotiationNeeded";
   event_channel_->Success(EncodableValue(params));
@@ -1415,6 +1521,10 @@ void FlutterPeerConnectionObserver::OnRenegotiationNeeded() {
 
 scoped_refptr<RTCMediaStream> FlutterPeerConnectionObserver::MediaStreamForId(
     const std::string& id) {
+  if (IsClosing()) {
+    return nullptr;
+  }
+  std::lock_guard<std::mutex> lock(remote_media_mutex_);
   auto it = remote_streams_.find(id);
   if (it != remote_streams_.end())
     return (*it).second;
@@ -1423,6 +1533,10 @@ scoped_refptr<RTCMediaStream> FlutterPeerConnectionObserver::MediaStreamForId(
 
 scoped_refptr<RTCMediaTrack> FlutterPeerConnectionObserver::MediaTrackForId(
     const std::string& id) {
+  if (IsClosing()) {
+    return nullptr;
+  }
+  std::lock_guard<std::mutex> lock(remote_media_mutex_);
   auto direct = remote_tracks_.find(id);
   if (direct != remote_tracks_.end()) {
     return direct->second;
@@ -1446,6 +1560,7 @@ scoped_refptr<RTCMediaTrack> FlutterPeerConnectionObserver::MediaTrackForId(
 }
 
 void FlutterPeerConnectionObserver::RemoveStreamForId(const std::string& id) {
+  std::lock_guard<std::mutex> lock(remote_media_mutex_);
   auto it = remote_streams_.find(id);
   if (it != remote_streams_.end())
     remote_streams_.erase(it);

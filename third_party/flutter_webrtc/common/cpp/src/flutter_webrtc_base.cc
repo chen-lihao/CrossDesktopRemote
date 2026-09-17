@@ -24,6 +24,38 @@ FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
 }
 
 FlutterWebRTCBase::~FlutterWebRTCBase() {
+  // Native producers must be stopped while the Flutter messenger, platform
+  // task runner and libwebrtc factory are all still alive. Relying on member
+  // destruction after Terminate() leaves observers callable through freed
+  // EventChannels during engine shutdown.
+  if (event_channel_) {
+    event_channel_->Deactivate();
+  }
+  for (auto& entry : data_channel_observers_) {
+    entry.second->BeginClose();
+  }
+  for (auto& entry : peerconnection_observers_) {
+    entry.second->BeginClose();
+  }
+  for (auto& entry : peerconnections_) {
+    entry.second->Close();
+  }
+
+  peerconnections_.clear();
+  peerconnection_observers_.clear();
+  data_channel_observers_.clear();
+  renders_.clear();
+  video_capturers_.clear();
+  local_tracks_.clear();
+  local_streams_.clear();
+  key_providers_.clear();
+  event_channel_.reset();
+
+  audio_processing_ = scoped_refptr<RTCAudioProcessing>();
+  desktop_device_ = scoped_refptr<RTCDesktopDevice>();
+  video_device_ = scoped_refptr<RTCVideoDevice>();
+  audio_device_ = scoped_refptr<RTCAudioDevice>();
+  factory_ = scoped_refptr<RTCPeerConnectionFactory>();
   LibWebRTC::Terminate();
 }
 
