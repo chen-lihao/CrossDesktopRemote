@@ -1,3 +1,5 @@
+import 'package:cross_desktop_remote/app/design_system/app_components.dart';
+import 'package:cross_desktop_remote/app/design_system/app_design_tokens.dart';
 import 'package:flutter/material.dart';
 
 enum AppLayoutSize { compact, medium, expanded }
@@ -14,14 +16,14 @@ abstract final class AppLayoutBreakpoints {
 }
 
 abstract final class AppLayoutTokens {
-  static const sectionSpacing = 16.0;
-  static const headerSpacing = 24.0;
+  static const sectionSpacing = AppSpacing.md;
+  static const headerSpacing = AppSpacing.lg;
   static const maxContentWidth = 1160.0;
 
   static double pagePadding(AppLayoutSize size) => switch (size) {
-    AppLayoutSize.compact => 16,
-    AppLayoutSize.medium => 20,
-    AppLayoutSize.expanded => 24,
+    AppLayoutSize.compact => AppSpacing.md,
+    AppLayoutSize.medium => AppSpacing.lg,
+    AppLayoutSize.expanded => AppSpacing.xl,
   };
 }
 
@@ -63,10 +65,29 @@ class AdaptiveAppShell extends StatelessWidget {
         final scopedBody = AppLayoutScope(size: size, child: body);
         if (size == AppLayoutSize.compact) {
           return Scaffold(
+            backgroundColor: Colors.transparent,
             appBar: AppBar(
-              title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              titleSpacing: AppSpacing.md,
+              title: Row(
+                children: [
+                  const AppBrandMark(size: 34),
+                  const SizedBox(width: AppSpacing.sm),
+                  Expanded(
+                    child: Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
             ),
-            body: SafeArea(child: scopedBody),
+            body: Stack(
+              children: [
+                const Positioned.fill(child: AppAmbientBackground()),
+                SafeArea(top: false, child: scopedBody),
+              ],
+            ),
             bottomNavigationBar: NavigationBar(
               selectedIndex: selectedIndex,
               onDestinationSelected: onDestinationSelected,
@@ -76,34 +97,43 @@ class AdaptiveAppShell extends StatelessWidget {
         }
 
         return Scaffold(
-          body: SafeArea(
-            child: Row(
-              children: [
-                NavigationRail(
-                  extended: size == AppLayoutSize.expanded,
-                  selectedIndex: selectedIndex,
-                  onDestinationSelected: onDestinationSelected,
-                  leading: const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 20),
-                    child: Tooltip(
-                      message: 'CrossDesktopRemote',
-                      child: Icon(Icons.desktop_windows_outlined),
-                    ),
-                  ),
-                  destinations: destinations
-                      .map(
-                        (destination) => NavigationRailDestination(
-                          icon: destination.icon,
-                          selectedIcon: destination.selectedIcon,
-                          label: Text(destination.label),
+          backgroundColor: Colors.transparent,
+          body: Stack(
+            children: [
+              const Positioned.fill(child: AppAmbientBackground()),
+              SafeArea(
+                child: Row(
+                  children: [
+                    NavigationRail(
+                      extended: size == AppLayoutSize.expanded,
+                      selectedIndex: selectedIndex,
+                      onDestinationSelected: onDestinationSelected,
+                      leading: const Padding(
+                        padding: EdgeInsets.symmetric(vertical: AppSpacing.lg),
+                        child: Tooltip(
+                          message: 'CrossDesktopRemote',
+                          child: AppBrandMark(
+                            size: 42,
+                            semanticLabel: 'CrossDesktopRemote',
+                          ),
                         ),
-                      )
-                      .toList(growable: false),
+                      ),
+                      destinations: destinations
+                          .map(
+                            (destination) => NavigationRailDestination(
+                              icon: destination.icon,
+                              selectedIcon: destination.selectedIcon,
+                              label: Text(destination.label),
+                            ),
+                          )
+                          .toList(growable: false),
+                    ),
+                    const VerticalDivider(width: 1),
+                    Expanded(child: scopedBody),
+                  ],
                 ),
-                const VerticalDivider(width: 1),
-                Expanded(child: scopedBody),
-              ],
-            ),
+              ),
+            ],
           ),
         );
       },
@@ -119,12 +149,16 @@ class AppPageScaffold extends StatelessWidget {
     required this.subtitle,
     required this.children,
     this.maxWidth = AppLayoutTokens.maxContentWidth,
+    this.icon,
+    this.trailing,
   });
 
   final String title;
   final String subtitle;
   final List<Widget> children;
   final double maxWidth;
+  final IconData? icon;
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -139,9 +173,12 @@ class AppPageScaffold extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(title, style: Theme.of(context).textTheme.headlineMedium),
-                const SizedBox(height: 6),
-                Text(subtitle, style: Theme.of(context).textTheme.bodyLarge),
+                AppPageHeader(
+                  title: title,
+                  subtitle: subtitle,
+                  icon: icon,
+                  trailing: trailing,
+                ),
                 const SizedBox(height: AppLayoutTokens.headerSpacing),
                 ...children,
               ],

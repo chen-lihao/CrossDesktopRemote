@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cross_desktop_remote/app/design_system/app_components.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/core/presentation/adaptive_layout.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
@@ -50,6 +51,7 @@ class _SessionsPageState extends State<SessionsPage> {
         return AppPageScaffold(
           title: '会话',
           subtitle: '查看当前连接质量、分页会话与文件传输审计记录。',
+          icon: Icons.monitor_heart_outlined,
           maxWidth: 980,
           children: [
             if (session != null) _buildActiveSession(context, session),
@@ -72,17 +74,10 @@ class _SessionsPageState extends State<SessionsPage> {
             ),
             const SizedBox(height: 8),
             if (widget.history.records.isEmpty)
-              const Card(
-                child: Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Row(
-                    children: [
-                      Icon(Icons.history),
-                      SizedBox(width: 16),
-                      Expanded(child: Text('暂无会话记录；这里只保存连接元数据。')),
-                    ],
-                  ),
-                ),
+              const AppEmptyState(
+                icon: Icons.history_outlined,
+                title: '暂无会话记录',
+                message: '建立远程连接后，这里会保存经过加密处理的连接与文件传输元数据。',
               )
             else
               for (final record in widget.history.records)
@@ -178,8 +173,8 @@ class _SessionsPageState extends State<SessionsPage> {
                 Container(
                   width: 10,
                   height: 10,
-                  decoration: const BoxDecoration(
-                    color: Colors.green,
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.secondary,
                     shape: BoxShape.circle,
                   ),
                 ),
@@ -297,18 +292,11 @@ class _DiagnosticChip extends StatelessWidget {
   final String value;
 
   @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-        child: Text('$label  $value'),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => AppStatusPill(
+    label: label,
+    value: value,
+    color: Theme.of(context).colorScheme.primary,
+  );
 }
 
 class _HistoryTile extends StatelessWidget {

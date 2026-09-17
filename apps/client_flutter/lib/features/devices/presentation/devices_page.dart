@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cross_desktop_remote/app/design_system/app_components.dart';
 import 'package:cross_desktop_remote/core/discovery/lan_discovery_service.dart';
 import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/network/lan_address_service.dart';
@@ -823,16 +824,17 @@ class _DevicesPageState extends State<DevicesPage> {
               sliver: SliverToBoxAdapter(
                 child: Center(
                   child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 1160),
+                    constraints: const BoxConstraints(
+                      maxWidth: AppLayoutTokens.maxContentWidth,
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          '设备',
-                          style: Theme.of(context).textTheme.headlineMedium,
+                        const AppPageHeader(
+                          title: '设备',
+                          subtitle: '本机在线与控制其他设备相互独立；只有连接码验证成功后才开始屏幕采集。',
+                          icon: Icons.devices_outlined,
                         ),
-                        const SizedBox(height: 8),
-                        const Text('本机在线与控制其他设备相互独立；只有连接码验证成功后才开始屏幕采集。'),
                         const SizedBox(height: 16),
                         _DeviceIdentityCard(identity: widget.identity),
                       ],
@@ -851,7 +853,9 @@ class _DevicesPageState extends State<DevicesPage> {
               sliver: SliverToBoxAdapter(
                 child: Center(
                   child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 1160),
+                    constraints: const BoxConstraints(
+                      maxWidth: AppLayoutTokens.maxContentWidth,
+                    ),
                     child: Column(
                       children: [
                         _buildTrustedDevicesCard(),
@@ -1871,7 +1875,7 @@ class _DeviceIdentityCard extends StatelessWidget {
       builder: (context, _) => Card(
         margin: EdgeInsets.zero,
         child: ListTile(
-          leading: const Icon(Icons.badge_outlined),
+          leading: const AppBrandMark(size: 42, semanticLabel: '本机设备身份'),
           title: const Text('本机机器码'),
           subtitle: SelectableText(
             identity.loaded ? identity.machineCode : '正在创建设备身份',

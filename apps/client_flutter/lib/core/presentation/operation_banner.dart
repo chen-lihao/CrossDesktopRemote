@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cross_desktop_remote/app/design_system/app_design_tokens.dart';
 import 'package:flutter/material.dart';
 
 /// Persistent operation feedback that is independent from transient messages.
@@ -92,16 +93,38 @@ class _OperationBannerState extends State<OperationBanner> {
         constraints: const BoxConstraints(maxWidth: 720),
         child: Material(
           key: const ValueKey('operation-banner-expanded'),
-          color: colorScheme.primaryContainer,
-          elevation: 4,
-          borderRadius: BorderRadius.circular(14),
+          color: colorScheme.surfaceContainerHigh,
+          elevation: 3,
+          shadowColor: colorScheme.primary.withValues(alpha: .16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadii.inner),
+            side: BorderSide(color: colorScheme.primary.withValues(alpha: .24)),
+          ),
           clipBehavior: Clip.antiAlias,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.sm,
+              AppSpacing.xs,
+              AppSpacing.xs,
+              AppSpacing.xs,
+            ),
             child: Row(
               children: [
-                const Icon(Icons.content_paste_go_outlined, size: 20),
-                const SizedBox(width: 10),
+                Container(
+                  width: 36,
+                  height: 36,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: colorScheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(AppRadii.control),
+                  ),
+                  child: Icon(
+                    Icons.content_paste_go_outlined,
+                    size: AppIconSizes.small,
+                    color: colorScheme.onPrimaryContainer,
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.sm),
                 Expanded(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -112,11 +135,11 @@ class _OperationBannerState extends State<OperationBanner> {
                         style: Theme.of(context).textTheme.titleSmall,
                       ),
                       if (widget.details != null) ...[
-                        const SizedBox(height: 2),
+                        const SizedBox(height: AppSpacing.xxs),
                         Text(widget.details!),
                       ],
                       if (widget.progress != null) ...[
-                        const SizedBox(height: 8),
+                        const SizedBox(height: AppSpacing.xs),
                         LinearProgressIndicator(value: widget.progress),
                       ],
                     ],

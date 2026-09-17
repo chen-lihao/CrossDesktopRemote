@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cross_desktop_remote/app/appearance/app_appearance_controller.dart';
+import 'package:cross_desktop_remote/app/design_system/app_components.dart';
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
 import 'package:cross_desktop_remote/core/presentation/adaptive_layout.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
@@ -57,14 +59,83 @@ class SettingsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final appearance = AppAppearanceController.instance;
     return AnimatedBuilder(
-      animation: Listenable.merge([settings, session, ?hostSession]),
+      animation: Listenable.merge([
+        appearance,
+        settings,
+        session,
+        ?hostSession,
+      ]),
       builder: (context, _) => AppPageScaffold(
         title: '设置',
         subtitle: '这些选项会保存在本机，并作为后续远程会话的默认值。',
+        icon: Icons.tune_outlined,
         maxWidth: 920,
         children: [
-          _SettingsSection(
+          AppSectionCard(
+            title: '界面外观',
+            subtitle: '亮色与暗色使用同一套夜航蓝视觉语言',
+            icon: Icons.palette_outlined,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    if (constraints.maxWidth < 500) {
+                      return DropdownButtonFormField<ThemeMode>(
+                        initialValue: appearance.themeMode,
+                        decoration: const InputDecoration(labelText: '颜色模式'),
+                        items: [
+                          for (final mode in ThemeMode.values)
+                            DropdownMenuItem(
+                              value: mode,
+                              child: Row(
+                                children: [
+                                  Icon(mode.icon, size: 20),
+                                  const SizedBox(width: 10),
+                                  Text(mode.label),
+                                ],
+                              ),
+                            ),
+                        ],
+                        onChanged: (mode) {
+                          if (mode != null) {
+                            unawaited(appearance.setThemeMode(mode));
+                          }
+                        },
+                      );
+                    }
+                    return SegmentedButton<ThemeMode>(
+                      showSelectedIcon: false,
+                      segments: [
+                        for (final mode in ThemeMode.values)
+                          ButtonSegment(
+                            value: mode,
+                            icon: Icon(mode.icon),
+                            label: Text(mode.label),
+                            tooltip: mode.description,
+                          ),
+                      ],
+                      selected: {appearance.themeMode},
+                      onSelectionChanged: (selection) {
+                        if (selection.isNotEmpty) {
+                          unawaited(appearance.setThemeMode(selection.first));
+                        }
+                      },
+                    );
+                  },
+                ),
+              ),
+              ListTile(
+                leading: Icon(appearance.themeMode.icon),
+                title: Text(appearance.themeMode.label),
+                subtitle: Text(appearance.themeMode.description),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          AppSectionCard(
             title: '画质与性能',
             icon: Icons.high_quality_outlined,
             children: [
@@ -126,7 +197,7 @@ class SettingsPage extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 16),
-          _SettingsSection(
+          AppSectionCard(
             title: '远程桌面窗口',
             icon: Icons.window_outlined,
             children: [
@@ -161,7 +232,7 @@ class SettingsPage extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 16),
-          _SettingsSection(
+          AppSectionCard(
             title: '远程输入',
             icon: Icons.touch_app_outlined,
             children: [
@@ -239,7 +310,7 @@ class SettingsPage extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           if (_dataSession.clipboardSupported) ...[
-            _SettingsSection(
+            AppSectionCard(
               title: '数据交换',
               icon: Icons.content_paste_go_outlined,
               children: [
@@ -307,7 +378,7 @@ class SettingsPage extends StatelessWidget {
           ],
           if (hostSession != null &&
               (Platform.isMacOS || Platform.isWindows)) ...[
-            _SettingsSection(
+            AppSectionCard(
               title: '远程声音',
               icon: Icons.volume_up_outlined,
               children: [
@@ -340,7 +411,7 @@ class SettingsPage extends StatelessWidget {
             ),
             const SizedBox(height: 16),
           ],
-          _SettingsSection(
+          AppSectionCard(
             title: '连接与发现',
             icon: Icons.lan_outlined,
             children: [
@@ -372,7 +443,7 @@ class SettingsPage extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 16),
-          _SettingsSection(
+          AppSectionCard(
             title: '安全与权限',
             icon: Icons.security_outlined,
             children: [
@@ -551,44 +622,6 @@ class _SignalingServerDialogState extends State<_SignalingServerDialog> {
         TextButton(onPressed: _close, child: const Text('取消')),
         FilledButton(onPressed: _save, child: const Text('保存')),
       ],
-    );
-  }
-}
-
-class _SettingsSection extends StatelessWidget {
-  const _SettingsSection({
-    required this.title,
-    required this.icon,
-    required this.children,
-  });
-
-  final String title;
-  final IconData icon;
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(8, 16, 8, 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                children: [
-                  Icon(icon, color: Theme.of(context).colorScheme.primary),
-                  const SizedBox(width: 10),
-                  Text(title, style: Theme.of(context).textTheme.titleMedium),
-                ],
-              ),
-            ),
-            const SizedBox(height: 8),
-            ...children,
-          ],
-        ),
-      ),
     );
   }
 }

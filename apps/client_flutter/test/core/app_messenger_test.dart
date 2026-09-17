@@ -31,7 +31,9 @@ void main() {
     );
   });
 
-  testWidgets('presents application feedback in FIFO order', (tester) async {
+  testWidgets('stacks concurrent feedback near the top without overlap', (
+    tester,
+  ) async {
     await _pumpMessenger(tester);
     expect(
       AppNotificationCenter.instance.hasPresenter(AppNotificationScope.main),
@@ -43,10 +45,14 @@ void main() {
     }
     await tester.pump();
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 250));
     expect(
       AppNotificationCenter.instance.pendingCount(AppNotificationScope.main),
-      2,
+      0,
+    );
+    expect(
+      AppNotificationCenter.instance.activeCount(AppNotificationScope.main),
+      3,
     );
     expect(
       AppNotificationCenter.instance.hasActiveNotification(
@@ -56,15 +62,22 @@ void main() {
     );
 
     expect(find.text('第一条'), findsOneWidget);
+    expect(find.text('第二条'), findsOneWidget);
+    expect(find.text('第三条'), findsOneWidget);
+
+    final first = tester.getRect(find.text('第一条'));
+    final second = tester.getRect(find.text('第二条'));
+    final third = tester.getRect(find.text('第三条'));
+    expect(first.top, greaterThan(0));
+    expect(first.top, lessThan(200));
+    expect(first.bottom, lessThan(second.top));
+    expect(second.bottom, lessThan(third.top));
+
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.text('第一条'), findsNothing);
     expect(find.text('第二条'), findsNothing);
     expect(find.text('第三条'), findsNothing);
-
-    await _finishNotification(tester);
-    expect(find.text('第二条'), findsOneWidget);
-    expect(find.text('第三条'), findsNothing);
-
-    await _finishNotification(tester);
-    expect(find.text('第三条'), findsOneWidget);
   });
 
   testWidgets('deduplicates repeated feedback inside one second', (
@@ -87,8 +100,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('正在恢复连接'), findsOneWidget);
 
-    await _finishNotification(tester);
     await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(milliseconds: 250));
     expect(find.text('正在恢复连接'), findsNothing);
   });
 
@@ -140,11 +153,4 @@ Future<void> _pumpMessenger(WidgetTester tester) async {
     ),
   );
   await tester.pump();
-}
-
-Future<void> _finishNotification(WidgetTester tester) async {
-  AppMessenger.scaffoldMessengerKey.currentState!.removeCurrentSnackBar();
-  await tester.pump();
-  await tester.pump();
-  await tester.pump(const Duration(milliseconds: 250));
 }

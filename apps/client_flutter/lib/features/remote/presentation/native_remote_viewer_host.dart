@@ -4,6 +4,7 @@
 // ignore_for_file: implementation_imports, invalid_use_of_internal_member
 
 import 'package:cross_desktop_remote/app/theme.dart';
+import 'package:cross_desktop_remote/app/appearance/app_appearance_controller.dart';
 import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_viewer_host.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_presentation_controller.dart';
@@ -77,30 +78,36 @@ class NativeRemoteViewerHost implements RemoteViewerHost {
         },
       ),
     );
+    final appearance = AppAppearanceController.instance;
     entry = WindowEntry(
       controller: controller,
-      builder: (_) => MaterialApp(
-        title: _windowTitle(request),
-        debugShowCheckedModeBanner: false,
-        scaffoldMessengerKey: notificationKey,
-        builder: (context, child) => AppNotificationPresenter(
-          scope: notificationScope,
-          messengerKey: notificationKey,
-          clearOnDispose: true,
-          child: child ?? const SizedBox.shrink(),
-        ),
-        theme: CrossDesktopTheme.light(),
-        darkTheme: CrossDesktopTheme.dark(),
-        themeMode: ThemeMode.system,
-        home: RemoteViewerWorkspace(
-          session: request.session,
-          presentation: request.presentation,
-          settings: request.settings,
-          onDesktopFullScreenChanged: (enabled) async {
-            controller.setFullscreen(enabled);
-            return true;
-          },
-          onClose: close,
+      builder: (_) => AnimatedBuilder(
+        animation: appearance,
+        builder: (context, _) => MaterialApp(
+          title: _windowTitle(request),
+          debugShowCheckedModeBanner: false,
+          scaffoldMessengerKey: notificationKey,
+          builder: (context, child) => AppNotificationPresenter(
+            scope: notificationScope,
+            messengerKey: notificationKey,
+            clearOnDispose: true,
+            child: child ?? const SizedBox.shrink(),
+          ),
+          theme: CrossDesktopTheme.light(),
+          darkTheme: CrossDesktopTheme.dark(),
+          themeMode: appearance.themeMode,
+          themeAnimationDuration: const Duration(milliseconds: 220),
+          themeAnimationCurve: Curves.easeOutCubic,
+          home: RemoteViewerWorkspace(
+            session: request.session,
+            presentation: request.presentation,
+            settings: request.settings,
+            onDesktopFullScreenChanged: (enabled) async {
+              controller.setFullscreen(enabled);
+              return true;
+            },
+            onClose: close,
+          ),
         ),
       ),
     );
