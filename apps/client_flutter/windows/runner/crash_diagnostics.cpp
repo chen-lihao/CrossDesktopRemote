@@ -1,8 +1,12 @@
 #include "crash_diagnostics.h"
 
+// DbgHelp and ShlObj consume Win32 base types and SAL annotations. Keep
+// windows.h first; automatic include sorting must not move it below them.
+// clang-format off
+#include <windows.h>
 #include <DbgHelp.h>
 #include <ShlObj.h>
-#include <windows.h>
+// clang-format on
 
 #include <atomic>
 #include <cwchar>
