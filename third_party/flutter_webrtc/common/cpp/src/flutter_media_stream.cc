@@ -1,6 +1,7 @@
 #include "flutter_media_stream.h"
 
 #include "flutter_utf8_sanitize.h"
+#include "task_runner.h"
 
 #if defined(_WIN32)
 #include <mmdeviceapi.h>
