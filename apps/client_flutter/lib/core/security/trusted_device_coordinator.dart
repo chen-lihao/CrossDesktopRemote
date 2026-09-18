@@ -5,6 +5,7 @@ import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_models.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_repository.dart';
 import 'package:cross_desktop_remote/core/security/trusted_security_engine.dart';
+import 'package:cross_desktop_remote/core/security/trusted_webrtc_binding.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
@@ -301,11 +302,30 @@ class TrustedDeviceCoordinator extends ChangeNotifier {
   Set<TrustedPermission> bindWebRtcSession({
     required String sessionId,
     required TrustedSessionBinding binding,
+    required String offerSdp,
+    required String answerSdp,
   }) {
     binding.validateStructure();
     try {
-      return _requireSecuritySession(sessionId)
-          .bindWebRtc(binding: binding, now: _now());
+      return _requireSecuritySession(sessionId).bindWebRtc(
+        binding: binding,
+        offerSdp: offerSdp,
+        answerSdp: answerSdp,
+        now: _now(),
+      );
+    } on TrustedSecurityEngineException catch (error) {
+      throw _authenticationException(error);
+    }
+  }
+
+  void validateSdpManifest({
+    required String sessionId,
+    required TrustedSdpManifest manifest,
+    required String sdp,
+  }) {
+    try {
+      _requireSecuritySession(sessionId)
+          .validateSdpManifest(manifest: manifest, sdp: sdp, now: _now());
     } on TrustedSecurityEngineException catch (error) {
       throw _authenticationException(error);
     }

@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:cross_desktop_remote/core/bridge/native_core_bridge.dart';
 import 'package:cross_desktop_remote/core/security/trusted_device_models.dart';
+import 'package:cross_desktop_remote/core/security/trusted_webrtc_binding.dart';
 import 'package:ffi/ffi.dart';
 
 enum TrustedSecurityPhase {
@@ -121,6 +122,14 @@ abstract interface class TrustedSecuritySession {
 
   Set<TrustedPermission> bindWebRtc({
     required TrustedSessionBinding binding,
+    required String offerSdp,
+    required String answerSdp,
+    required DateTime now,
+  });
+
+  void validateSdpManifest({
+    required TrustedSdpManifest manifest,
+    required String sdp,
     required DateTime now,
   });
 
@@ -500,6 +509,8 @@ class _NativeTrustedSecuritySession implements TrustedSecuritySession {
   @override
   Set<TrustedPermission> bindWebRtc({
     required TrustedSessionBinding binding,
+    required String offerSdp,
+    required String answerSdp,
     required DateTime now,
   }) {
     _ensureOpen();
@@ -507,20 +518,58 @@ class _NativeTrustedSecuritySession implements TrustedSecuritySession {
     final output = calloc<Uint64>();
     try {
       _withBytes(encoded, (pointer, length) {
-        _check(
-          _bindings.bindWebRtc(
-            _handle,
-            pointer,
-            length,
-            now.toUtc().millisecondsSinceEpoch,
-            output,
-          ),
-        );
+        _withBytes(Uint8List.fromList(utf8.encode(offerSdp)), (
+          offerPointer,
+          offerLength,
+        ) {
+          _withBytes(Uint8List.fromList(utf8.encode(answerSdp)), (
+            answerPointer,
+            answerLength,
+          ) {
+            _check(
+              _bindings.bindWebRtcTranscript(
+                _handle,
+                pointer,
+                length,
+                offerPointer,
+                offerLength,
+                answerPointer,
+                answerLength,
+                now.toUtc().millisecondsSinceEpoch,
+                output,
+              ),
+            );
+          });
+        });
       });
       return Set.unmodifiable(trustedPermissionsFromBits(output.value));
     } finally {
       calloc.free(output);
     }
+  }
+
+  @override
+  void validateSdpManifest({
+    required TrustedSdpManifest manifest,
+    required String sdp,
+    required DateTime now,
+  }) {
+    _ensureOpen();
+    final encoded = _encodeSdpManifest(manifest);
+    _withBytes(encoded, (manifestPointer, manifestLength) {
+      _withBytes(Uint8List.fromList(utf8.encode(sdp)), (sdpPointer, sdpLength) {
+        _check(
+          _bindings.validateSdpManifest(
+            _handle,
+            manifestPointer,
+            manifestLength,
+            sdpPointer,
+            sdpLength,
+            now.toUtc().millisecondsSinceEpoch,
+          ),
+        );
+      });
+    });
   }
 
   @override
@@ -753,6 +802,44 @@ typedef _BindWebRtcDart = int Function(
   int,
   Pointer<Uint64>,
 );
+typedef _ValidateSdpManifestNative = Int32 Function(
+  Pointer<Void>,
+  Pointer<Uint8>,
+  IntPtr,
+  Pointer<Uint8>,
+  IntPtr,
+  Uint64,
+);
+typedef _ValidateSdpManifestDart = int Function(
+  Pointer<Void>,
+  Pointer<Uint8>,
+  int,
+  Pointer<Uint8>,
+  int,
+  int,
+);
+typedef _BindWebRtcTranscriptNative = Int32 Function(
+  Pointer<Void>,
+  Pointer<Uint8>,
+  IntPtr,
+  Pointer<Uint8>,
+  IntPtr,
+  Pointer<Uint8>,
+  IntPtr,
+  Uint64,
+  Pointer<Uint64>,
+);
+typedef _BindWebRtcTranscriptDart = int Function(
+  Pointer<Void>,
+  Pointer<Uint8>,
+  int,
+  Pointer<Uint8>,
+  int,
+  Pointer<Uint8>,
+  int,
+  int,
+  Pointer<Uint64>,
+);
 
 class _TrustedSecurityBindings {
   _TrustedSecurityBindings(DynamicLibrary library)
@@ -824,9 +911,15 @@ class _TrustedSecurityBindings {
             _ConfigureWebRtcContextNative,
             _ConfigureWebRtcContextDart
           >('cdr_security_engine_configure_webrtc_context'),
-      bindWebRtc = library.lookupFunction<_BindWebRtcNative, _BindWebRtcDart>(
-        'cdr_security_engine_bind_webrtc',
-      );
+      validateSdpManifest = library
+          .lookupFunction<_ValidateSdpManifestNative, _ValidateSdpManifestDart>(
+            'cdr_security_engine_validate_sdp_manifest',
+          ),
+      bindWebRtcTranscript = library
+          .lookupFunction<
+            _BindWebRtcTranscriptNative,
+            _BindWebRtcTranscriptDart
+          >('cdr_security_engine_bind_webrtc_transcript');
 
   final _CreateDart create;
   final _DestroyDart destroy;
@@ -845,7 +938,8 @@ class _TrustedSecurityBindings {
   final _BindWebRtcDart confirmHostAuthorizationAck;
   final _ValidatePairingGrantDart validatePairingGrant;
   final _ConfigureWebRtcContextDart configureWebRtcContext;
-  final _BindWebRtcDart bindWebRtc;
+  final _ValidateSdpManifestDart validateSdpManifest;
+  final _BindWebRtcTranscriptDart bindWebRtcTranscript;
 }
 
 T _withBytes<T>(
@@ -932,6 +1026,27 @@ Uint8List _encodeBinding(TrustedSessionBinding binding) {
     ..uint64(12, binding.authSuiteVersion)
     ..bytes(13, binding.authorizationSha256)
     ..bytes(14, binding.capabilitySha256);
+  return writer.takeBytes();
+}
+
+Uint8List _encodeSdpManifest(TrustedSdpManifest manifest) {
+  final writer = _ProtoWriter()
+    ..uint64(1, manifest.descriptionType.index + 1)
+    ..string(2, manifest.sessionId)
+    ..bytes(3, manifest.controllerNonce)
+    ..bytes(4, manifest.hostNonce);
+  for (final permission in manifest.requestedPermissions) {
+    writer.uint64(5, permission.index + 1);
+  }
+  writer
+    ..bytes(6, manifest.controllerAuthenticationPublicKey)
+    ..bytes(7, manifest.hostAuthenticationPublicKey)
+    ..bytes(8, manifest.sdpSha256)
+    ..bytes(9, manifest.dtlsFingerprintSha256)
+    ..uint64(10, manifest.expiresAt.millisecondsSinceEpoch)
+    ..uint64(11, manifest.authSuiteVersion)
+    ..bytes(12, manifest.authorizationSha256)
+    ..bytes(13, manifest.capabilitySha256);
   return writer.takeBytes();
 }
 

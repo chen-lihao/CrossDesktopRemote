@@ -62,6 +62,26 @@ message TrustedSessionBinding {
   bytes capability_sha256 = 14;
 }
 
+// Compact, signed description of one SDP document. The SDP itself remains a
+// top-level signaling field so large Windows codec manifests never exceed the
+// signed-envelope limit. Rust verifies this manifest against the exact SDP
+// before the description is installed into WebRTC.
+message TrustedSdpManifest {
+  uint32 description_type = 1;
+  string session_id = 2;
+  bytes controller_nonce = 3;
+  bytes host_nonce = 4;
+  repeated PermissionScope requested_permissions = 5;
+  bytes controller_authentication_public_key = 6;
+  bytes host_authentication_public_key = 7;
+  bytes sdp_sha256 = 8;
+  bytes dtls_fingerprint_sha256 = 9;
+  uint64 expires_at_unix_ms = 10;
+  uint32 auth_suite_version = 11;
+  bytes authorization_sha256 = 12;
+  bytes capability_sha256 = 13;
+}
+
 // Stored only by the host. A trust credential proves device identity; this
 // policy independently controls what that identity may do on a future session.
 message HostAccessPolicy {

@@ -4,16 +4,17 @@ use prost::Message;
 use protocol::v1::{
     DeviceIdentityPublic as ProtoDeviceIdentity, PermissionScope,
     SignedPeerEnvelope as ProtoSignedPeerEnvelope, TrustGrant as ProtoTrustGrant,
+    TrustedSdpManifest as ProtoTrustedSdpManifest,
     TrustedSessionAuthorization as ProtoTrustedSessionAuthorization,
     TrustedSessionAuthorizationAck as ProtoTrustedSessionAuthorizationAck,
     TrustedSessionBinding as ProtoTrustedSessionBinding,
 };
 use security_core::{
     AuthenticationKeyCertificate, PermissionSet, ROOT_FINGERPRINT_BYTES, SecurityError,
-    SessionPermission, SignedPeerEnvelope, TrustGrant, TrustedSecurityEngine,
-    TrustedSessionAuthorization, TrustedSessionAuthorizationAck, TrustedSessionBinding,
-    TrustedSessionMode, machine_code_v2, sas_code, validate_device_identity,
-    verify_p256_signature_der,
+    SessionPermission, SignedPeerEnvelope, TrustGrant, TrustedSdpDescriptionType,
+    TrustedSdpManifest, TrustedSecurityEngine, TrustedSessionAuthorization,
+    TrustedSessionAuthorizationAck, TrustedSessionBinding, TrustedSessionMode, machine_code_v2,
+    sas_code, validate_device_identity, verify_p256_signature_der,
 };
 
 const CDR_OK: i32 = 0;
@@ -606,6 +607,94 @@ pub unsafe extern "C" fn cdr_security_engine_bind_webrtc(
 }
 
 /// # Safety
+/// Manifest, SDP and engine pointers must be valid for their stated lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cdr_security_engine_validate_sdp_manifest(
+    engine: *mut CdrSecurityEngine,
+    manifest_protobuf: *const u8,
+    manifest_protobuf_len: usize,
+    sdp: *const u8,
+    sdp_len: usize,
+    now_unix_ms: u64,
+) -> i32 {
+    let Some(engine) = (unsafe { engine.as_mut() }) else {
+        return CDR_ERROR_NULL_POINTER;
+    };
+    let Ok(manifest_proto) = (unsafe {
+        decode_message::<ProtoTrustedSdpManifest>(manifest_protobuf, manifest_protobuf_len)
+    }) else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    let Ok(manifest) = trusted_sdp_manifest_from_proto(manifest_proto) else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    let Ok(sdp) = (unsafe { read_non_empty(sdp, sdp_len) }) else {
+        return CDR_ERROR_INVALID_ARGUMENT;
+    };
+    let Ok(sdp) = std::str::from_utf8(sdp) else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    map_security_result(
+        engine
+            .core
+            .validate_sdp_manifest(&manifest, sdp, now_unix_ms),
+    )
+}
+
+/// # Safety
+/// Binding, SDP, engine and output pointers must be valid for their stated
+/// lengths. Both SDP documents are copied before this call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cdr_security_engine_bind_webrtc_transcript(
+    engine: *mut CdrSecurityEngine,
+    binding_protobuf: *const u8,
+    binding_protobuf_len: usize,
+    offer_sdp: *const u8,
+    offer_sdp_len: usize,
+    answer_sdp: *const u8,
+    answer_sdp_len: usize,
+    now_unix_ms: u64,
+    out_permission_bits: *mut u64,
+) -> i32 {
+    let Some(engine) = (unsafe { engine.as_mut() }) else {
+        return CDR_ERROR_NULL_POINTER;
+    };
+    let Some(out_permission_bits) = (unsafe { out_permission_bits.as_mut() }) else {
+        return CDR_ERROR_NULL_POINTER;
+    };
+    let Ok(binding_proto) = (unsafe {
+        decode_message::<ProtoTrustedSessionBinding>(binding_protobuf, binding_protobuf_len)
+    }) else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    let Ok(binding) = trusted_binding_from_proto(binding_proto) else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    let (Ok(offer_sdp), Ok(answer_sdp)) = (
+        unsafe { read_non_empty(offer_sdp, offer_sdp_len) },
+        unsafe { read_non_empty(answer_sdp, answer_sdp_len) },
+    ) else {
+        return CDR_ERROR_INVALID_ARGUMENT;
+    };
+    let (Ok(offer_sdp), Ok(answer_sdp)) = (
+        std::str::from_utf8(offer_sdp),
+        std::str::from_utf8(answer_sdp),
+    ) else {
+        return CDR_ERROR_INVALID_MESSAGE;
+    };
+    match engine
+        .core
+        .bind_webrtc_transcript(&binding, offer_sdp, answer_sdp, now_unix_ms)
+    {
+        Ok(permissions) => {
+            *out_permission_bits = permissions.bits();
+            CDR_OK
+        }
+        Err(error) => map_security_error(error),
+    }
+}
+
+/// # Safety
 /// Input pointers must address the stated readable byte lengths. `output_len`
 /// must be writable. `output` may be null only to query the required length.
 #[unsafe(no_mangle)]
@@ -838,6 +927,31 @@ fn trusted_binding_from_proto(
         auth_suite_version,
         authorization_sha256: fixed_or_zero(binding.authorization_sha256)?,
         capability_sha256: fixed_or_zero(binding.capability_sha256)?,
+    })
+}
+
+fn trusted_sdp_manifest_from_proto(
+    manifest: ProtoTrustedSdpManifest,
+) -> Result<TrustedSdpManifest, ()> {
+    let description_type = match manifest.description_type {
+        1 => TrustedSdpDescriptionType::Offer,
+        2 => TrustedSdpDescriptionType::Answer,
+        _ => return Err(()),
+    };
+    Ok(TrustedSdpManifest {
+        description_type,
+        session_id: manifest.session_id,
+        controller_nonce: fixed_vec(manifest.controller_nonce)?,
+        host_nonce: fixed_vec(manifest.host_nonce)?,
+        requested_permissions: permissions_from_proto(&manifest.requested_permissions)?,
+        controller_authentication_public_key: manifest.controller_authentication_public_key,
+        host_authentication_public_key: manifest.host_authentication_public_key,
+        sdp_sha256: fixed_vec(manifest.sdp_sha256)?,
+        dtls_fingerprint_sha256: fixed_vec(manifest.dtls_fingerprint_sha256)?,
+        expires_at_unix_ms: manifest.expires_at_unix_ms,
+        auth_suite_version: manifest.auth_suite_version,
+        authorization_sha256: fixed_vec(manifest.authorization_sha256)?,
+        capability_sha256: fixed_vec(manifest.capability_sha256)?,
     })
 }
 

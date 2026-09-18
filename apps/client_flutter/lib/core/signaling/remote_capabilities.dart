@@ -29,6 +29,7 @@ const hostSessionAuthorizationV1Capability = 'host-session-authorization-v1';
 const directionalFilePermissionsV1Capability =
     'directional-file-permissions-v1';
 const trustedAuthSuiteV2Capability = 'trusted-auth-suite-v2';
+const signedSdpManifestV1Capability = 'signed-sdp-manifest-v1';
 const completeCapabilityManifestV1Capability = 'capability-manifest-v1';
 const iosActiveContentGeometryV3Enabled = bool.fromEnvironment(
   'CDR_IOS_ACTIVE_CONTENT_GEOMETRY_V3',
@@ -101,6 +102,7 @@ List<String> buildRemoteClientCapabilities({
       hostSessionAuthorizationV1Capability,
       directionalFilePermissionsV1Capability,
       trustedAuthSuiteV2Capability,
+      signedSdpManifestV1Capability,
     ]);
   }
   return capabilities;
@@ -132,7 +134,9 @@ bool supportsCompleteTrustedRouteV2({
 }) =>
     serverCapabilities.contains(completeCapabilityManifestV1Capability) &&
     supportsTrustedAuthSuiteV2(localCapabilities) &&
-    supportsTrustedAuthSuiteV2(remoteCapabilities);
+    supportsTrustedAuthSuiteV2(remoteCapabilities) &&
+    localCapabilities.contains(signedSdpManifestV1Capability) &&
+    remoteCapabilities.contains(signedSdpManifestV1Capability);
 
 /// Produces the canonical transcript hash for the capabilities that both
 /// endpoints actually advertised. The same intersection is computed on both

@@ -160,6 +160,16 @@ int32_t cdr_security_engine_bind_webrtc(
     CdrSecurityEngine *engine, const uint8_t *binding_protobuf,
     size_t binding_protobuf_len, uint64_t now_unix_ms,
     uint64_t *out_permission_bits);
+int32_t cdr_security_engine_validate_sdp_manifest(
+    CdrSecurityEngine *engine, const uint8_t *manifest_protobuf,
+    size_t manifest_protobuf_len, const uint8_t *sdp, size_t sdp_len,
+    uint64_t now_unix_ms);
+int32_t cdr_security_engine_bind_webrtc_transcript(
+    CdrSecurityEngine *engine, const uint8_t *binding_protobuf,
+    size_t binding_protobuf_len, const uint8_t *offer_sdp,
+    size_t offer_sdp_len, const uint8_t *answer_sdp,
+    size_t answer_sdp_len, uint64_t now_unix_ms,
+    uint64_t *out_permission_bits);
 
 enum CdrTransferDirection {
   CDR_TRANSFER_DIRECTION_UPLOAD = 1,

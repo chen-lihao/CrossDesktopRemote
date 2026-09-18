@@ -173,6 +173,7 @@ void main() {
           hostSessionAuthorizationV1Capability,
           directionalFilePermissionsV1Capability,
           trustedAuthSuiteV2Capability,
+          signedSdpManifestV1Capability,
         ]),
       );
       expect(supportsTrustedDeviceAuthentication(capabilities), isTrue);
@@ -309,6 +310,16 @@ void main() {
         serverCapabilities: const [],
         localCapabilities: peers,
         remoteCapabilities: peers,
+      ),
+      isFalse,
+    );
+    expect(
+      supportsCompleteTrustedRouteV2(
+        serverCapabilities: const [completeCapabilityManifestV1Capability],
+        localCapabilities: peers,
+        remoteCapabilities: peers.where(
+          (value) => value != signedSdpManifestV1Capability,
+        ),
       ),
       isFalse,
     );

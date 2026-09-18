@@ -420,6 +420,7 @@ class RemoteSessionController extends ChangeNotifier
   Timer? _trustedAuthorizationAckTimer;
   TrustedSessionBinding? _trustedPendingBinding;
   String? _trustedOfferSdp;
+  String? _trustedAnswerSdp;
   TrustedPairingSnapshot? _trustedPairing;
   String? _pairingSessionId;
   TrustedPeerIdentity? _pairingPeerIdentity;
@@ -1270,8 +1271,10 @@ class RemoteSessionController extends ChangeNotifier
             await _handleSignalingMessage(message);
           } catch (error) {
             if (_authenticationMode == RemoteAuthenticationMode.trustedDevice) {
-              await _closeSession(notifyPeer: false);
-              _fail('可信连接已安全终止：$error', announce: announceLifecycle);
+              await _terminateFailedTrustedRoute(
+                error,
+                announce: announceLifecycle,
+              );
             } else {
               _fail('信令处理失败：$error', announce: announceLifecycle);
             }
@@ -1373,6 +1376,25 @@ class RemoteSessionController extends ChangeNotifier
       await _createPeerConnection();
     }
     _setState(RemoteSessionState.waitingForPeer, '已结束上一会话，等待另一台设备');
+  }
+
+  Future<void> _terminateFailedTrustedRoute(
+    Object error, {
+    bool announce = true,
+  }) async {
+    final message = '可信连接已安全终止：$error';
+    final keepHostOnline =
+        role == RemoteRole.host &&
+        _supportsPersistentSignalingSession &&
+        _signaling.isConnected;
+    await _closeSession(notifyPeer: true, closeSignaling: !keepHostOnline);
+    _error = message;
+    if (keepHostOnline) {
+      await _prepareHostForNextPeer();
+      if (announce) _emitNotice(message, level: RemoteNoticeLevel.error);
+      return;
+    }
+    _fail(message, announce: announce);
   }
 
   void _handleTrustedAuthorizationInvalidation(
@@ -6255,17 +6277,30 @@ class RemoteSessionController extends ChangeNotifier
         '可信被控设备身份与本地固定身份不一致',
       );
     }
-    final payload = await coordinator.verifyEnvelope(
+    final sdp = message['sdp'];
+    if (sdp is! String || sdp.isEmpty) {
+      throw const FormatException('Invalid signed WebRTC offer');
+    }
+    final manifest = TrustedSdpManifest.fromJson(
+      _stringMap(message['manifest'], 'manifest'),
+    );
+    final payload = await coordinator.verifyRawEnvelope(
       envelope: SignedTrustedEnvelope.fromJson(
         _stringMap(message['envelope'], 'envelope'),
       ),
       sender: remote,
     );
-    _validateTrustedBindingPayload(payload, expectedKind: 'webrtc-offer');
-    final sdp = payload['sdp'];
-    if (sdp is! String || sdp.isEmpty) {
-      throw const FormatException('Invalid signed WebRTC offer');
+    if (!constantTimeBytesEqual(payload, manifest.signingBytes)) {
+      throw const TrustedAuthenticationException(
+        TrustedAuthenticationFailure.invalidSignature,
+        '签名 Offer 与 SDP 清单不一致',
+      );
     }
+    coordinator.validateSdpManifest(
+      sessionId: _requireTrustedRouteSessionId(),
+      manifest: manifest,
+      sdp: sdp,
+    );
     final peerConnection = _peerConnection;
     if (peerConnection == null) throw StateError('WebRTC 尚未初始化');
     await peerConnection.setRemoteDescription(
@@ -6280,6 +6315,7 @@ class RemoteSessionController extends ChangeNotifier
       throw StateError('WebRTC 未生成有效 Answer');
     }
     _trustedOfferSdp = sdp;
+    _trustedAnswerSdp = answerSdp;
     final binding = _buildTrustedSessionBinding(
       offerSdp: sdp,
       answerSdp: answerSdp,
@@ -6328,11 +6364,6 @@ class RemoteSessionController extends ChangeNotifier
     final binding = TrustedSessionBinding.fromJson(
       _stringMap(message['binding'], 'binding'),
     );
-    _validateTrustedSessionBinding(
-      binding,
-      offerSdp: _trustedOfferSdp,
-      answerSdp: sdp,
-    );
     final verifiedPayload = await coordinator.verifyRawEnvelope(
       envelope: SignedTrustedEnvelope.fromJson(
         _stringMap(message['envelope'], 'envelope'),
@@ -6345,6 +6376,16 @@ class RemoteSessionController extends ChangeNotifier
         '签名 Answer 与 WebRTC 绑定内容不一致',
       );
     }
+    final offerSdp = _trustedOfferSdp;
+    if (offerSdp == null || offerSdp.isEmpty) {
+      throw StateError('本地缺少可信 WebRTC Offer');
+    }
+    final granted = coordinator.bindWebRtcSession(
+      sessionId: _requireTrustedRouteSessionId(),
+      binding: binding,
+      offerSdp: offerSdp,
+      answerSdp: sdp,
+    );
     final peerConnection = _peerConnection;
     if (peerConnection == null) throw StateError('WebRTC 尚未初始化');
     await peerConnection.setRemoteDescription(
@@ -6352,10 +6393,6 @@ class RemoteSessionController extends ChangeNotifier
     );
     _remoteDescriptionSet = true;
     await _flushPendingCandidates();
-    final granted = coordinator.bindWebRtcSession(
-      sessionId: _requireTrustedRouteSessionId(),
-      binding: binding,
-    );
     _trustedPermissions = Set.unmodifiable(granted);
     _trustedPendingBinding = binding;
     _trustedSessionAuthorized = true;
@@ -6415,9 +6452,16 @@ class RemoteSessionController extends ChangeNotifier
         '媒体绑定确认签名无效',
       );
     }
+    final offerSdp = _trustedOfferSdp;
+    final answerSdp = _trustedAnswerSdp;
+    if (offerSdp == null || answerSdp == null) {
+      throw StateError('本地缺少可信 WebRTC Offer/Answer');
+    }
     final granted = coordinator.bindWebRtcSession(
       sessionId: _requireTrustedRouteSessionId(),
       binding: binding,
+      offerSdp: offerSdp,
+      answerSdp: answerSdp,
     );
     _trustedPermissions = Set.unmodifiable(granted);
     _trustedSessionAuthorized = true;
@@ -6478,25 +6522,27 @@ class RemoteSessionController extends ChangeNotifier
     );
   }
 
-  void _validateTrustedSessionBinding(
-    TrustedSessionBinding binding, {
-    required String? offerSdp,
-    required String answerSdp,
+  TrustedSdpManifest _buildTrustedOfferManifest({
+    required String offerSdp,
+    required DateTime expiresAt,
   }) {
-    if (offerSdp == null || offerSdp.isEmpty) {
-      throw StateError('本地缺少已签名的 WebRTC Offer');
-    }
     final local = _requireTrustedCoordinator().localPublicIdentity();
     final remote = _trustedRemoteIdentity;
     final controllerNonce = _trustedControllerNonce;
     final hostNonce = _trustedHostNonce;
-    if (remote == null || controllerNonce == null || hostNonce == null) {
-      throw StateError('可信媒体绑定上下文不完整');
+    final authorizationSha256 = _trustedAuthorizationSha256;
+    final capabilitySha256 = _trustedAuthCapabilitySha256;
+    if (remote == null ||
+        controllerNonce == null ||
+        hostNonce == null ||
+        authorizationSha256 == null ||
+        capabilitySha256 == null ||
+        _trustedAuthSuiteVersion != trustedAuthSuiteV2) {
+      throw StateError('可信 SDP 清单上下文不完整');
     }
     final controller = role == RemoteRole.controller ? local : remote;
     final host = role == RemoteRole.host ? local : remote;
-    if (!_trustedWebRtcBinding.matchesTranscript(
-      binding,
+    return _trustedWebRtcBinding.buildOfferManifest(
       sessionId: _requireTrustedRouteSessionId(),
       controllerNonce: controllerNonce,
       hostNonce: hostNonce,
@@ -6504,16 +6550,10 @@ class RemoteSessionController extends ChangeNotifier
       controllerIdentity: controller,
       hostIdentity: host,
       offerSdp: offerSdp,
-      answerSdp: answerSdp,
-      authSuiteVersion: _trustedAuthSuiteVersion,
-      authorizationSha256: _trustedAuthorizationSha256 ?? Uint8List(32),
-      capabilitySha256: _trustedAuthCapabilitySha256 ?? Uint8List(32),
-    )) {
-      throw const TrustedAuthenticationException(
-        TrustedAuthenticationFailure.invalidSignature,
-        'WebRTC Offer/Answer、DTLS 指纹或授权上下文被篡改',
-      );
-    }
+      expiresAt: expiresAt,
+      authorizationSha256: authorizationSha256,
+      capabilitySha256: capabilitySha256,
+    );
   }
 
   Future<void> _publishTrustedGrantIfNeeded() async {
@@ -6699,17 +6739,20 @@ class RemoteSessionController extends ChangeNotifier
         }
         final coordinator = _requireTrustedCoordinator();
         _trustedOfferSdp = sdp;
-        final envelope = await coordinator.createEnvelope(
+        final manifest = _buildTrustedOfferManifest(
+          offerSdp: sdp,
+          expiresAt: DateTime.now().toUtc().add(const Duration(seconds: 45)),
+        );
+        final envelope = await coordinator.createRawEnvelope(
           sessionId: _requireTrustedRouteSessionId(),
           recipientRootFingerprint: remote.rootFingerprint,
-          payload: _trustedBindingPayload(
-            'webrtc-offer',
-            additionalFields: {'sdp': sdp},
-          ),
+          payload: manifest.signingBytes,
         );
         _signaling.send({
           'type': 'trusted-offer',
           'identity': coordinator.localPublicIdentity().toJson(),
+          'sdp': sdp,
+          'manifest': manifest.toJson(),
           'envelope': envelope.toJson(),
         });
       } else {
@@ -6720,7 +6763,11 @@ class RemoteSessionController extends ChangeNotifier
         trusted ? '已发送签名视频会话，等待控制端响应' : '已自动授权，等待控制端响应',
       );
     } catch (error) {
-      _fail('启动屏幕共享失败：$error');
+      if (_authenticationMode == RemoteAuthenticationMode.trustedDevice) {
+        await _terminateFailedTrustedRoute(error);
+      } else {
+        _fail('启动屏幕共享失败：$error');
+      }
     } finally {
       _authorizingPeer = false;
     }
@@ -8114,6 +8161,7 @@ class RemoteSessionController extends ChangeNotifier
     _trustedAuthorizationAckTimer = null;
     _trustedPendingBinding = null;
     _trustedOfferSdp = null;
+    _trustedAnswerSdp = null;
     _displaySwitch.reset();
     _geometryObservationToken += 1;
     _inputSequence = 0;

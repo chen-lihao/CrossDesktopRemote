@@ -25,6 +25,13 @@ class SignalingClient {
     final socket = await WebSocket.connect(uri.toString());
     socket.pingInterval = const Duration(seconds: 15);
     _socket = socket;
+    var terminalDelivered = false;
+    void deliverTerminal() {
+      if (terminalDelivered || generation != _connectionGeneration) return;
+      terminalDelivered = true;
+      onDone(socket.closeCode, socket.closeReason);
+    }
+
     _subscription = socket.listen(
       (dynamic payload) {
         _messageQueue = _messageQueue
@@ -42,8 +49,8 @@ class SignalingClient {
               }
             });
       },
-      onDone: () => onDone(socket.closeCode, socket.closeReason),
-      onError: (_) => onDone(socket.closeCode, socket.closeReason),
+      onDone: deliverTerminal,
+      onError: (_) => deliverTerminal(),
       cancelOnError: true,
     );
   }

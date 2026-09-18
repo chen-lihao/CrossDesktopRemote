@@ -296,6 +296,30 @@ pub struct TrustedSessionBinding {
     pub capability_sha256: [u8; ROOT_FINGERPRINT_BYTES],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum TrustedSdpDescriptionType {
+    Offer = 1,
+    Answer = 2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedSdpManifest {
+    pub description_type: TrustedSdpDescriptionType,
+    pub session_id: String,
+    pub controller_nonce: [u8; NONCE_BYTES],
+    pub host_nonce: [u8; NONCE_BYTES],
+    pub requested_permissions: PermissionSet,
+    pub controller_authentication_public_key: Vec<u8>,
+    pub host_authentication_public_key: Vec<u8>,
+    pub sdp_sha256: [u8; ROOT_FINGERPRINT_BYTES],
+    pub dtls_fingerprint_sha256: [u8; ROOT_FINGERPRINT_BYTES],
+    pub expires_at_unix_ms: u64,
+    pub auth_suite_version: u32,
+    pub authorization_sha256: [u8; ROOT_FINGERPRINT_BYTES],
+    pub capability_sha256: [u8; ROOT_FINGERPRINT_BYTES],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedSessionAuthorization {
     pub protocol_version: u32,
@@ -505,6 +529,93 @@ impl TrustedSessionBinding {
         }
         Ok(())
     }
+}
+
+impl TrustedSdpManifest {
+    #[must_use]
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut output = Vec::with_capacity(320);
+        append_domain(&mut output, b"CrossDesktopRemote/TrustedSdpManifest/v1");
+        output.extend_from_slice(&(self.description_type as u32).to_be_bytes());
+        append_bytes(&mut output, self.session_id.as_bytes());
+        append_bytes(&mut output, &self.controller_nonce);
+        append_bytes(&mut output, &self.host_nonce);
+        output.extend_from_slice(&self.requested_permissions.bits().to_be_bytes());
+        append_bytes(&mut output, &self.controller_authentication_public_key);
+        append_bytes(&mut output, &self.host_authentication_public_key);
+        append_bytes(&mut output, &self.sdp_sha256);
+        append_bytes(&mut output, &self.dtls_fingerprint_sha256);
+        output.extend_from_slice(&self.expires_at_unix_ms.to_be_bytes());
+        output.extend_from_slice(&self.auth_suite_version.to_be_bytes());
+        append_bytes(&mut output, &self.authorization_sha256);
+        append_bytes(&mut output, &self.capability_sha256);
+        output
+    }
+
+    fn validate_sdp(&self, sdp: &str, now_unix_ms: u64) -> Result<(), SecurityError> {
+        if self.session_id.is_empty()
+            || self.session_id.len() > MAX_SESSION_ID_BYTES
+            || self.requested_permissions.bits() == 0
+            || !self
+                .requested_permissions
+                .contains(SessionPermission::ViewScreen)
+            || self.controller_nonce.iter().all(|byte| *byte == 0)
+            || self.host_nonce.iter().all(|byte| *byte == 0)
+            || self.controller_nonce == self.host_nonce
+            || self.auth_suite_version != TRUSTED_AUTH_SUITE_V2
+            || self.authorization_sha256.iter().all(|byte| *byte == 0)
+            || self.capability_sha256.iter().all(|byte| *byte == 0)
+            || sdp.is_empty()
+        {
+            return Err(SecurityError::InvalidMessage);
+        }
+        validate_p256_public_key(&self.controller_authentication_public_key)?;
+        validate_p256_public_key(&self.host_authentication_public_key)?;
+        if now_unix_ms >= self.expires_at_unix_ms
+            || self.expires_at_unix_ms.saturating_sub(now_unix_ms)
+                > DEFAULT_SESSION_TICKET_LIFETIME_MS
+        {
+            return Err(SecurityError::Expired);
+        }
+        let actual_sdp_sha256: [u8; ROOT_FINGERPRINT_BYTES] = Sha256::digest(sdp.as_bytes()).into();
+        if actual_sdp_sha256 != self.sdp_sha256
+            || sdp_sha256_fingerprint(sdp)? != self.dtls_fingerprint_sha256
+        {
+            return Err(SecurityError::SessionMismatch);
+        }
+        Ok(())
+    }
+}
+
+fn sdp_sha256_fingerprint(sdp: &str) -> Result<[u8; ROOT_FINGERPRINT_BYTES], SecurityError> {
+    let mut expected: Option<[u8; ROOT_FINGERPRINT_BYTES]> = None;
+    for line in sdp.replace("\r\n", "\n").lines() {
+        let line = line.trim();
+        let Some(value) = line.strip_prefix("a=fingerprint:sha-256") else {
+            continue;
+        };
+        let value = value.trim();
+        let parts: Vec<_> = value.split(':').collect();
+        if parts.len() != ROOT_FINGERPRINT_BYTES {
+            return Err(SecurityError::InvalidMessage);
+        }
+        let mut fingerprint = [0_u8; ROOT_FINGERPRINT_BYTES];
+        for (index, part) in parts.iter().enumerate() {
+            if part.len() != 2 {
+                return Err(SecurityError::InvalidMessage);
+            }
+            fingerprint[index] =
+                u8::from_str_radix(part, 16).map_err(|_| SecurityError::InvalidMessage)?;
+        }
+        match expected {
+            Some(previous) if previous != fingerprint => {
+                return Err(SecurityError::InvalidMessage);
+            }
+            None => expected = Some(fingerprint),
+            _ => {}
+        }
+    }
+    expected.ok_or(SecurityError::InvalidMessage)
 }
 
 #[must_use]
@@ -1190,6 +1301,79 @@ impl TrustedSecurityEngine {
         }
         self.phase = TrustedSecurityPhase::Authorized;
         Ok(active.granted_permissions)
+    }
+
+    /// Validates the host's compact signed Offer manifest before WebRTC sees
+    /// the corresponding SDP. This keeps large SDP documents outside the
+    /// signed envelope without moving trust decisions into the UI layer.
+    pub fn validate_sdp_manifest(
+        &mut self,
+        manifest: &TrustedSdpManifest,
+        sdp: &str,
+        now_unix_ms: u64,
+    ) -> Result<(), SecurityError> {
+        if self.paused || self.phase != TrustedSecurityPhase::AwaitingWebRtcBinding {
+            return Err(SecurityError::InvalidState);
+        }
+        let result = (|| {
+            let active = self.active.as_ref().ok_or(SecurityError::InvalidState)?;
+            let context = active
+                .web_rtc_context
+                .as_ref()
+                .ok_or(SecurityError::InvalidState)?;
+            let peer_key = active
+                .peer_authentication_public_key
+                .as_ref()
+                .ok_or(SecurityError::InvalidState)?;
+            if manifest.description_type != TrustedSdpDescriptionType::Offer
+                || manifest.session_id != active.session_id
+                || manifest.auth_suite_version != active.auth_suite_version
+                || manifest.capability_sha256 != active.negotiated_capability_sha256
+                || manifest.requested_permissions != active.requested_permissions
+                || manifest.controller_nonce != context.controller_nonce
+                || manifest.host_nonce != context.host_nonce
+                || manifest.controller_authentication_public_key
+                    != context.controller_authentication_public_key
+                || manifest.host_authentication_public_key != context.host_authentication_public_key
+                || &manifest.host_authentication_public_key != peer_key
+                || active.authorization_sha256 != Some(manifest.authorization_sha256)
+                || active.authorization_capability_sha256 != Some(manifest.capability_sha256)
+                || active.verified_payload.as_deref() != Some(manifest.signing_bytes().as_slice())
+            {
+                return Err(SecurityError::SessionMismatch);
+            }
+            manifest.validate_sdp(sdp, now_unix_ms)
+        })();
+        if let Err(error) = result {
+            self.fail_closed();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Binds authorization to the exact Offer/Answer bytes and DTLS
+    /// fingerprints. Rust performs the transcript comparison immediately
+    /// before committing the session as authorized.
+    pub fn bind_webrtc_transcript(
+        &mut self,
+        binding: &TrustedSessionBinding,
+        offer_sdp: &str,
+        answer_sdp: &str,
+        now_unix_ms: u64,
+    ) -> Result<PermissionSet, SecurityError> {
+        let actual_offer_sha256: [u8; ROOT_FINGERPRINT_BYTES] =
+            Sha256::digest(offer_sdp.as_bytes()).into();
+        let actual_answer_sha256: [u8; ROOT_FINGERPRINT_BYTES] =
+            Sha256::digest(answer_sdp.as_bytes()).into();
+        if actual_offer_sha256 != binding.offer_sha256
+            || actual_answer_sha256 != binding.answer_sha256
+            || sdp_sha256_fingerprint(offer_sdp)? != binding.host_dtls_fingerprint_sha256
+            || sdp_sha256_fingerprint(answer_sdp)? != binding.controller_dtls_fingerprint_sha256
+        {
+            self.fail_closed();
+            return Err(SecurityError::SessionMismatch);
+        }
+        self.bind_webrtc(binding, now_unix_ms)
     }
 
     #[must_use]
@@ -2683,5 +2867,47 @@ mod tests {
         assert_eq!(engine.phase(), TrustedSecurityPhase::Failed);
         engine.end_session();
         assert_eq!(engine.phase(), TrustedSecurityPhase::Idle);
+    }
+
+    #[test]
+    fn compact_sdp_manifest_validates_large_offer_and_rejects_tampering() {
+        let controller_key = key(71)
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        let host_key = key(72)
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        let fingerprint = "11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:\
+            11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11";
+        let mut sdp = format!("v=0\r\na=fingerprint:sha-256 {fingerprint}\r\n");
+        while sdp.len() < 60 * 1_024 {
+            sdp.push_str("a=fmtp:96 x-google-start-bitrate=2500\r\n");
+        }
+        let manifest = TrustedSdpManifest {
+            description_type: TrustedSdpDescriptionType::Offer,
+            session_id: "large-windows-offer".into(),
+            controller_nonce: [3; NONCE_BYTES],
+            host_nonce: [4; NONCE_BYTES],
+            requested_permissions: PermissionSet::default().grant(SessionPermission::ViewScreen),
+            controller_authentication_public_key: controller_key,
+            host_authentication_public_key: host_key,
+            sdp_sha256: Sha256::digest(sdp.as_bytes()).into(),
+            dtls_fingerprint_sha256: [0x11; ROOT_FINGERPRINT_BYTES],
+            expires_at_unix_ms: 45_000,
+            auth_suite_version: TRUSTED_AUTH_SUITE_V2,
+            authorization_sha256: [7; ROOT_FINGERPRINT_BYTES],
+            capability_sha256: [8; ROOT_FINGERPRINT_BYTES],
+        };
+
+        assert!(manifest.signing_bytes().len() < 1_024);
+        assert_eq!(manifest.validate_sdp(&sdp, 1_000), Ok(()));
+        assert_eq!(
+            manifest.validate_sdp(&format!("{sdp}a=x-tampered:1\r\n"), 1_000),
+            Err(SecurityError::SessionMismatch)
+        );
     }
 }

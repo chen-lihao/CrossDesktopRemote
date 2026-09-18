@@ -102,6 +102,30 @@ void main() {
     );
   });
 
+  test('large Windows SDP is represented by a compact signed manifest', () {
+    final largeOffer = StringBuffer(offer);
+    while (utf8.encode(largeOffer.toString()).length < 60 * 1024) {
+      largeOffer.writeln('a=fmtp:96 x-google-start-bitrate=2500');
+    }
+    final manifest = codec.buildOfferManifest(
+      sessionId: 'route-large-windows-offer',
+      controllerNonce: Uint8List.fromList(List.filled(16, 3)),
+      hostNonce: Uint8List.fromList(List.filled(16, 4)),
+      requestedPermissions: defaultHostAccessPermissions,
+      controllerIdentity: controller,
+      hostIdentity: host,
+      offerSdp: largeOffer.toString(),
+      expiresAt: DateTime.utc(2026, 9, 13, 10),
+      authorizationSha256: Uint8List.fromList(List.filled(32, 7)),
+      capabilitySha256: Uint8List.fromList(List.filled(32, 8)),
+    );
+    final restored = TrustedSdpManifest.fromJson(manifest.toJson());
+
+    expect(utf8.encode(largeOffer.toString()).length, greaterThan(32 * 1024));
+    expect(manifest.signingBytes.length, lessThan(1024));
+    expect(restored.signingBytes, orderedEquals(manifest.signingBytes));
+  });
+
   test('suite v2 binds the accepted authorization and capability set', () {
     final authorizationSha256 = Uint8List.fromList(List.filled(32, 7));
     final capabilitySha256 = trustedAuthSuiteCapabilityHash(trustedAuthSuiteV2);
