@@ -387,6 +387,8 @@ class MainFlutterWindow: NSWindow {
         result(self.openScreenCaptureSettings())
       case "listDisplays":
         result(self.listDisplays())
+      case "getHostRuntimeState":
+        result(self.getHostRuntimeState())
       case "getColorDiagnostics":
         result(self.getColorDiagnostics())
       case "getCaptureFrameState":
@@ -777,6 +779,38 @@ class MainFlutterWindow: NSWindow {
       return []
     }
     return Array(displays.prefix(Int(count)))
+  }
+
+  private func getHostRuntimeState() -> [String: Any] {
+    let displayCount = activeDisplayIds().count
+    let session = CGSessionCopyCurrentDictionary() as? [String: Any] ?? [:]
+    let onConsole = session[kCGSessionOnConsoleKey as String] as? Bool ?? true
+    let loginDone = session[kCGSessionLoginDoneKey as String] as? Bool ?? true
+
+    if displayCount == 0 {
+      return [
+        "availability": "noDisplay",
+        "canCapture": false,
+        "canInjectInput": false,
+        "displayCount": 0,
+        "limitation": "macOS 当前没有活动显示器；ScreenCaptureKit 不能创建登录窗口或虚拟显示器"
+      ]
+    }
+    if !onConsole || !loginDone {
+      return [
+        "availability": "locked",
+        "canCapture": false,
+        "canInjectInput": false,
+        "displayCount": displayCount,
+        "limitation": "macOS 当前位于登录窗口或非控制台会话；普通应用不能接管系统认证界面"
+      ]
+    }
+    return [
+      "availability": "interactive",
+      "canCapture": true,
+      "canInjectInput": true,
+      "displayCount": displayCount
+    ]
   }
 
   private func listDisplays() -> [[String: Any]] {

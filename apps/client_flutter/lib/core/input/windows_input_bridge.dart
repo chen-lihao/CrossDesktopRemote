@@ -45,6 +45,8 @@ class WindowsNativeHostCapabilities {
 abstract interface class WindowsInputBridgeApi {
   Future<WindowsNativeHostCapabilities> getHostCapabilities();
 
+  Future<HostRuntimeState> getHostRuntimeState();
+
   Future<List<HostDisplay>> listDisplays();
 
   Future<void> sendPointer(HostPointerEvent event);
@@ -80,6 +82,16 @@ class WindowsInputBridge implements WindowsInputBridgeApi {
         ) ??
         const <Object?, Object?>{};
     return WindowsNativeHostCapabilities.fromMap(value);
+  }
+
+  @override
+  Future<HostRuntimeState> getHostRuntimeState() async {
+    final value =
+        await _channel.invokeMapMethod<Object?, Object?>(
+          'getHostRuntimeState',
+        ) ??
+        const <Object?, Object?>{};
+    return HostRuntimeState.fromMap(value);
   }
 
   @override

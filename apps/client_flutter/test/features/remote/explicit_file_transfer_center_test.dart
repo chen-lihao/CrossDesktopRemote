@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:cross_desktop_remote/core/clipboard/clipboard_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/unsupported_host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
@@ -226,7 +224,6 @@ class _FakeFileTransferSession extends RemoteSessionController {
          role: RemoteRole.host,
          hostPlatformAdapter: const UnsupportedHostPlatformAdapter(),
          clipboardPlatformAdapter: const UnsupportedClipboardPlatformAdapter(),
-         hostWindowLifecycleEvents: const Stream.empty(),
        );
 
   final List<ExplicitFileTransferTaskSnapshot> tasks;

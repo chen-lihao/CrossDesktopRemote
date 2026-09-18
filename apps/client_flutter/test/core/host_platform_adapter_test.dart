@@ -258,6 +258,13 @@ void main() {
               'supportsVirtualDesktop': true,
               'limitation': 'UAC secure desktop is unavailable',
             },
+            'getHostRuntimeState' => {
+              'availability': 'interactive',
+              'canCapture': true,
+              'canInjectInput': true,
+              'displayCount': 1,
+              'desktopName': 'Default',
+            },
             'listDisplays' => [
               {
                 'id': r'\\.\DISPLAY1',
@@ -276,6 +283,7 @@ void main() {
 
     const bridge = WindowsInputBridge();
     final capabilities = await bridge.getHostCapabilities();
+    final runtime = await bridge.getHostRuntimeState();
     final displays = await bridge.listDisplays();
     await bridge.sendPointer(
       const HostPointerEvent(
@@ -301,9 +309,11 @@ void main() {
     await bridge.releaseAllInput();
 
     expect(capabilities.isCompatible, isTrue);
+    expect(runtime.isInteractive, isTrue);
     expect(displays.single.pointPixelScale, 1.25);
     expect(calls.map((call) => call.method), [
       'getHostCapabilities',
+      'getHostRuntimeState',
       'listDisplays',
       'pointer',
       'keyboard',
@@ -312,9 +322,9 @@ void main() {
       'releaseKeyboardState',
       'releaseAllInput',
     ]);
-    expect((calls[3].arguments as Map)['physicalHidUsage'], 0x70006);
-    expect((calls[4].arguments as Map)['text'], '你好');
-    expect((calls[2].arguments as Map)['modifiers'], ['control']);
+    expect((calls[4].arguments as Map)['physicalHidUsage'], 0x70006);
+    expect((calls[5].arguments as Map)['text'], '你好');
+    expect((calls[3].arguments as Map)['modifiers'], ['control']);
   });
 
   test(
@@ -381,6 +391,11 @@ class _FakeWindowsInputBridge implements WindowsInputBridgeApi {
       supportsVirtualDesktop: true,
       limitation: 'UAC secure desktop is unavailable',
     );
+  }
+
+  @override
+  Future<HostRuntimeState> getHostRuntimeState() async {
+    return const HostRuntimeState.interactive(displayCount: 1);
   }
 
   @override

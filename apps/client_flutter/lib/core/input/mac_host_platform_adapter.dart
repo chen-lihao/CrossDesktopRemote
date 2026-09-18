@@ -1,7 +1,8 @@
 import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/mac_input_bridge.dart';
 
-class MacHostPlatformAdapter implements HostPlatformAdapter {
+class MacHostPlatformAdapter
+    implements HostPlatformAdapter, HostRuntimeStateProvider {
   const MacHostPlatformAdapter({this.bridge = const MacInputBridge()});
 
   final MacInputBridge bridge;
@@ -37,6 +38,10 @@ class MacHostPlatformAdapter implements HostPlatformAdapter {
         )
         .toList(growable: false);
   }
+
+  @override
+  Future<HostRuntimeState> getHostRuntimeState() =>
+      bridge.getHostRuntimeState();
 
   @override
   Future<HostPermissionState> checkPermissions() async {

@@ -2,6 +2,11 @@
 
 #include "flutter_utf8_sanitize.h"
 
+#if defined(_WIN32)
+#include <mmdeviceapi.h>
+#include <wrl/client.h>
+#endif
+
 #define DEFAULT_WIDTH 1280
 #define DEFAULT_HEIGHT 720
 #define DEFAULT_FPS 30
@@ -28,14 +33,95 @@ std::string SanitizeDeviceIdFromVideoBuffers(const char* name, const char* guid)
   return SanitizeUtf8ForFlutter(raw);
 }
 
+#if defined(_WIN32)
+std::string Utf8FromWideAudioDeviceId(const wchar_t* value) {
+  if (value == nullptr || value[0] == L'\0') return {};
+  const int length = static_cast<int>(wcslen(value));
+  const int size = WideCharToMultiByte(CP_UTF8, 0, value, length, nullptr, 0,
+                                       nullptr, nullptr);
+  if (size <= 0) return {};
+  std::string result(static_cast<size_t>(size), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, value, length, result.data(), size, nullptr,
+                      nullptr);
+  return result;
+}
+
+std::string SystemDefaultRenderEndpointId() {
+  Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator;
+  if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                              CLSCTX_ALL, IID_PPV_ARGS(&enumerator)))) {
+    return {};
+  }
+  Microsoft::WRL::ComPtr<IMMDevice> endpoint;
+  if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia,
+                                                  &endpoint))) {
+    return {};
+  }
+  LPWSTR endpoint_id = nullptr;
+  if (FAILED(endpoint->GetId(&endpoint_id)) || endpoint_id == nullptr) {
+    return {};
+  }
+  const std::string result = Utf8FromWideAudioDeviceId(endpoint_id);
+  CoTaskMemFree(endpoint_id);
+  return result;
+}
+#endif
+
 }  // namespace
 
-FlutterMediaStream::FlutterMediaStream(FlutterWebRTCBase* base) : base_(base) {
-  base_->audio_device_->OnDeviceChange([&] {
-    EncodableMap info;
-    info[EncodableValue("event")] = "onDeviceChange";
-    base_->event_channel()->Success(EncodableValue(info), false);
+FlutterMediaStream::FlutterMediaStream(FlutterWebRTCBase* base)
+    : base_(base),
+      device_change_alive_(std::make_shared<std::atomic_bool>(true)) {
+  const std::weak_ptr<std::atomic_bool> weak_alive = device_change_alive_;
+  base_->audio_device_->OnDeviceChange([this, weak_alive] {
+    const auto alive = weak_alive.lock();
+    if (!alive || !alive->load()) return;
+    // Device notifications originate on the ADM/device-enumerator thread.
+    // Route changes and peer disposal both touch the same RTCAudioDevice, so
+    // serialize the rebind with Flutter's WebRTC task runner instead of
+    // re-entering the ADM from its callback.
+    base_->task_runner_->EnqueueTask([this, weak_alive] {
+      const auto task_alive = weak_alive.lock();
+      if (!task_alive || !task_alive->load()) return;
+      FollowSystemDefaultAudioOutput();
+      EncodableMap info;
+      info[EncodableValue("event")] = "onDeviceChange";
+      base_->event_channel()->Success(EncodableValue(info), false);
+    });
   });
+}
+
+FlutterMediaStream::~FlutterMediaStream() {
+  if (device_change_alive_) device_change_alive_->store(false);
+  if (base_ && base_->audio_device_) {
+    base_->audio_device_->OnDeviceChange([] {});
+  }
+}
+
+void FlutterMediaStream::FollowSystemDefaultAudioOutput() {
+#if defined(_WIN32)
+  const std::string default_endpoint_id = SystemDefaultRenderEndpointId();
+  if (default_endpoint_id.empty()) return;
+  const int playout_devices = base_->audio_device_->PlayoutDevices();
+  if (playout_devices <= 0) return;
+
+  char device_name[RTCAudioDevice::kAdmMaxDeviceNameSize + 1] = {0};
+  char device_guid[RTCAudioDevice::kAdmMaxGuidSize + 1] = {0};
+  for (uint16_t i = 0; i < playout_devices; ++i) {
+    if (base_->audio_device_->PlayoutDeviceName(i, device_name, device_guid) !=
+        0) {
+      continue;
+    }
+    const std::string candidate =
+        SanitizeDeviceIdFromAudioBuffers(device_name, device_guid);
+    if (_stricmp(candidate.c_str(), default_endpoint_id.c_str()) == 0) {
+      // RTCAudioDevice serializes this on libwebrtc's worker thread and, when
+      // playout is active, performs Stop -> Set -> Init -> Start atomically.
+      base_->audio_device_->SetPlayoutDevice(i);
+      return;
+    }
+  }
+#endif
 }
 
 void FlutterMediaStream::GetUserMedia(

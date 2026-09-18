@@ -2,6 +2,74 @@ import 'package:flutter/foundation.dart';
 
 enum HostPlatformType { macOS, windows, unsupported }
 
+enum HostRuntimeAvailability {
+  interactive,
+  locked,
+  secureDesktop,
+  noDisplay,
+  unavailable,
+  unknown,
+}
+
+@immutable
+class HostRuntimeState {
+  const HostRuntimeState({
+    required this.availability,
+    required this.canCapture,
+    required this.canInjectInput,
+    required this.displayCount,
+    this.desktopName,
+    this.limitation,
+  });
+
+  const HostRuntimeState.interactive({required int displayCount})
+    : this(
+        availability: HostRuntimeAvailability.interactive,
+        canCapture: true,
+        canInjectInput: true,
+        displayCount: displayCount,
+      );
+
+  final HostRuntimeAvailability availability;
+  final bool canCapture;
+  final bool canInjectInput;
+  final int displayCount;
+  final String? desktopName;
+  final String? limitation;
+
+  bool get isInteractive =>
+      availability == HostRuntimeAvailability.interactive &&
+      canCapture &&
+      canInjectInput &&
+      displayCount > 0;
+
+  factory HostRuntimeState.fromMap(Map<Object?, Object?> value) {
+    final wireAvailability = value['availability'] as String? ?? 'unknown';
+    final availability = HostRuntimeAvailability.values.firstWhere(
+      (candidate) => candidate.name == wireAvailability,
+      orElse: () => HostRuntimeAvailability.unknown,
+    );
+    return HostRuntimeState(
+      availability: availability,
+      canCapture: value['canCapture'] == true,
+      canInjectInput: value['canInjectInput'] == true,
+      displayCount: (value['displayCount'] as num?)?.toInt() ?? 0,
+      desktopName: value['desktopName'] as String?,
+      limitation: value['limitation'] as String?,
+    );
+  }
+}
+
+/// Optional runtime-state contract for desktop hosts.
+///
+/// Static permissions are not enough to decide whether capture and input can
+/// start: Windows may currently be on the Winlogon/UAC desktop and a Mac may
+/// have no active display. Keeping this separate from [HostPlatformAdapter]
+/// preserves compatibility with test and future platform adapters.
+abstract interface class HostRuntimeStateProvider {
+  Future<HostRuntimeState> getHostRuntimeState();
+}
+
 @immutable
 class HostPlatformCapabilities {
   const HostPlatformCapabilities({

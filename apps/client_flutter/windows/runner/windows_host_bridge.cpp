@@ -30,6 +30,60 @@ struct DisplayInfo {
   bool primary = false;
 };
 
+std::string Utf8FromWide(const std::wstring& value);
+std::vector<DisplayInfo> EnumerateDisplays();
+
+struct HostRuntimeInfo {
+  std::string availability = "unknown";
+  std::string desktop_name;
+  std::string limitation;
+  bool can_capture = false;
+  bool can_inject_input = false;
+  int32_t display_count = 0;
+};
+
+HostRuntimeInfo QueryHostRuntimeInfo() {
+  HostRuntimeInfo info;
+  info.display_count = static_cast<int32_t>(EnumerateDisplays().size());
+
+  // SendInput and Desktop Duplication only operate on the interactive desktop
+  // that belongs to this user process. Winlogon and UAC secure desktops are
+  // separate security boundaries; treating a static permission check as
+  // sufficient causes the session to fail later with misleading media errors.
+  HDESK input_desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+  if (input_desktop == nullptr) {
+    info.availability = "secureDesktop";
+    info.limitation =
+        "Windows 当前位于锁屏、登录或 UAC 安全桌面；普通用户进程不能采集或注入输入";
+    return info;
+  }
+
+  wchar_t desktop_name[256] = {};
+  DWORD required = 0;
+  if (GetUserObjectInformationW(input_desktop, UOI_NAME, desktop_name,
+                                sizeof(desktop_name), &required)) {
+    info.desktop_name = Utf8FromWide(desktop_name);
+  }
+  CloseDesktop(input_desktop);
+
+  if (_wcsicmp(desktop_name, L"Default") != 0) {
+    info.availability = "secureDesktop";
+    info.limitation =
+        "Windows 当前不在用户 Default 桌面；需要系统服务与 Credential Provider 才能安全控制";
+    return info;
+  }
+  if (info.display_count <= 0) {
+    info.availability = "noDisplay";
+    info.limitation = "Windows 当前没有可采集的活动显示器";
+    return info;
+  }
+
+  info.availability = "interactive";
+  info.can_capture = true;
+  info.can_inject_input = true;
+  return info;
+}
+
 std::string Utf8FromWide(const std::wstring& value) {
   if (value.empty()) {
     return {};
@@ -224,7 +278,15 @@ UINT SystemCommandForHitTest(HWND window, LRESULT hit_test) {
   if (hit_test == HTMAXBUTTON) {
     return IsZoomed(window) ? SC_RESTORE : SC_MAXIMIZE;
   }
-  return hit_test == HTCLOSE ? SC_CLOSE : 0;
+  if (hit_test == HTCLOSE) {
+    // A remote controller may close the visible management window, but must
+    // not terminate the process that owns the active capture/input session.
+    // Until the Windows host is split into a service plus per-user agent,
+    // minimize that UI for remote-originated close commands. A local click is
+    // not routed through this bridge and keeps the normal Windows behaviour.
+    return SC_MINIMIZE;
+  }
+  return 0;
 }
 
 HWND RootWindowAtPoint(const POINT& point) {
@@ -422,6 +484,25 @@ void WindowsHostBridge::HandleMethodCall(
     capabilities[EncodableValue("limitation")] =
         EncodableValue(kUipiLimitation);
     result->Success(EncodableValue(capabilities));
+    return;
+  }
+
+  if (call.method_name() == "getHostRuntimeState") {
+    const HostRuntimeInfo runtime = QueryHostRuntimeInfo();
+    EncodableMap value;
+    value[EncodableValue("availability")] =
+        EncodableValue(runtime.availability);
+    value[EncodableValue("canCapture")] =
+        EncodableValue(runtime.can_capture);
+    value[EncodableValue("canInjectInput")] =
+        EncodableValue(runtime.can_inject_input);
+    value[EncodableValue("displayCount")] =
+        EncodableValue(runtime.display_count);
+    value[EncodableValue("desktopName")] =
+        EncodableValue(runtime.desktop_name);
+    value[EncodableValue("limitation")] =
+        EncodableValue(runtime.limitation);
+    result->Success(EncodableValue(value));
     return;
   }
 

@@ -2,7 +2,8 @@ import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/windows_input_bridge.dart';
 import 'package:flutter/services.dart';
 
-class WindowsHostPlatformAdapter implements HostPlatformAdapter {
+class WindowsHostPlatformAdapter
+    implements HostPlatformAdapter, HostRuntimeStateProvider {
   const WindowsHostPlatformAdapter({this.bridge = const WindowsInputBridge()});
 
   final WindowsInputBridgeApi bridge;
@@ -22,6 +23,10 @@ class WindowsHostPlatformAdapter implements HostPlatformAdapter {
 
   @override
   Future<List<HostDisplay>> listDisplays() => bridge.listDisplays();
+
+  @override
+  Future<HostRuntimeState> getHostRuntimeState() =>
+      bridge.getHostRuntimeState();
 
   @override
   Future<HostPermissionState> checkPermissions() async {

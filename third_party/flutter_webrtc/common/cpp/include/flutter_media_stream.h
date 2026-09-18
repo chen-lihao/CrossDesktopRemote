@@ -4,11 +4,15 @@
 #include "flutter_common.h"
 #include "flutter_webrtc_base.h"
 
+#include <atomic>
+#include <memory>
+
 namespace flutter_webrtc_plugin {
 
 class FlutterMediaStream {
  public:
   FlutterMediaStream(FlutterWebRTCBase* base);
+  ~FlutterMediaStream();
 
   void GetUserMedia(const EncodableMap& constraints,
                     std::unique_ptr<MethodResultProxy> result);
@@ -49,7 +53,10 @@ class FlutterMediaStream {
   void OnDeviceChange();
 
  private:
+  void FollowSystemDefaultAudioOutput();
+
   FlutterWebRTCBase* base_;
+  std::shared_ptr<std::atomic_bool> device_change_alive_;
 };
 
 }  // namespace flutter_webrtc_plugin

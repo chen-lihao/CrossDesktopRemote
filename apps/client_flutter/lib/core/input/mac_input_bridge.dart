@@ -1,4 +1,5 @@
 import 'package:cross_desktop_remote/core/protocol/wire_value_parsers.dart';
+import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:flutter/services.dart';
 
 class MacDisplayInfo {
@@ -164,6 +165,15 @@ class MacInputBridge {
         ) ??
         const [];
     return values.map(MacDisplayInfo.fromMap).toList(growable: false);
+  }
+
+  Future<HostRuntimeState> getHostRuntimeState() async {
+    final value =
+        await _channel.invokeMapMethod<Object?, Object?>(
+          'getHostRuntimeState',
+        ) ??
+        const <Object?, Object?>{};
+    return HostRuntimeState.fromMap(value);
   }
 
   Future<Map<String, dynamic>> getColorDiagnostics() async {

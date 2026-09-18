@@ -15,7 +15,6 @@ import 'package:cross_desktop_remote/core/input/remote_input_reset.dart';
 import 'package:cross_desktop_remote/core/input/remote_shortcut_policy.dart';
 import 'package:cross_desktop_remote/core/protocol/wire_value_parsers.dart';
 import 'package:cross_desktop_remote/core/input/remote_text_chunks.dart';
-import 'package:cross_desktop_remote/core/platform/desktop_window_mode.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_client.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/core/signaling/remote_capabilities.dart';
@@ -193,7 +192,6 @@ class RemoteSessionController extends ChangeNotifier
     FilePasteTargetPlatformAdapter? filePasteTargetPlatformAdapter,
     SystemAudioCaptureAdapter? systemAudioCaptureAdapter,
     RemoteAudioPlayoutCoordinator? remoteAudioPlayoutCoordinator,
-    Stream<DesktopWindowLifecycleEvent>? hostWindowLifecycleEvents,
     RemoteQualityProfile initialQuality = RemoteQualityProfile.automatic,
     RemoteVideoPolicy? initialVideoPolicy,
     ClipboardSyncMode initialClipboardMode = ClipboardSyncMode.bidirectional,
@@ -204,9 +202,6 @@ class RemoteSessionController extends ChangeNotifier
        _hostPlatform = hostPlatformAdapter ?? createHostPlatformAdapter(),
        _clipboardPlatform =
            clipboardPlatformAdapter ?? createClipboardPlatformAdapter(),
-       _hostWindowLifecycleEvents =
-           hostWindowLifecycleEvents ??
-           PlatformDesktopWindowModeController.lifecycleEvents,
        _fileTransferPlatform =
            fileTransferPlatformAdapter ??
            createExplicitFileTransferPlatformAdapter(),
@@ -270,7 +265,6 @@ class RemoteSessionController extends ChangeNotifier
   final Set<String> _acceptingFileClipboardTransfers = {};
   final Set<String> _appliedFileClipboardTransfers = {};
   final Set<String> _retiredFileClipboardTransfers = {};
-  final Stream<DesktopWindowLifecycleEvent> _hostWindowLifecycleEvents;
 
   FileClipboardOfferBroker get _fileClipboardOffers => _fileCopyPaste.offers;
   FilePasteIntentGate get _filePasteIntentGate => _fileCopyPaste.intents;
@@ -324,8 +318,6 @@ class RemoteSessionController extends ChangeNotifier
   List<RemoteDisplay> _displays = const [];
   StreamSubscription<DesktopCapturerSource>? _displayAddedSubscription;
   StreamSubscription<DesktopCapturerSource>? _displayRemovedSubscription;
-  StreamSubscription<DesktopWindowLifecycleEvent>?
-  _hostWindowLifecycleSubscription;
   StreamSubscription<ClipboardSnapshot>? _clipboardSubscription;
   StreamSubscription<String>? _filePasteIntentSubscription;
   StreamSubscription<String>? _fileTransferNoticeSubscription;
@@ -337,7 +329,6 @@ class RemoteSessionController extends ChangeNotifier
   Timer? _displaySwitchRequestTimer;
   Timer? _connectionRecoveryTimer;
   Timer? _mediaStatsTimer;
-  Timer? _windowsCaptureRecoveryTimer;
   final List<RTCIceCandidate> _pendingCandidates = [];
   bool _remoteDescriptionSet = false;
   bool _mediaNegotiationSealed = false;
@@ -775,10 +766,6 @@ class RemoteSessionController extends ChangeNotifier
       _initialized = true;
       if (role == RemoteRole.host &&
           _hostPlatform.capabilities.canHostDesktop) {
-        if (_hostPlatform.type == HostPlatformType.windows) {
-          _hostWindowLifecycleSubscription ??= _hostWindowLifecycleEvents
-              .listen(_handleHostWindowLifecycleEvent);
-        }
         try {
           final permission = await _hostPlatform.checkPermissions();
           _applyHostPermissionState(permission);
@@ -4735,28 +4722,6 @@ class RemoteSessionController extends ChangeNotifier
     }
   }
 
-  void _handleHostWindowLifecycleEvent(DesktopWindowLifecycleEvent event) {
-    _windowsCaptureRecoveryTimer?.cancel();
-    if (!_canRecoverWindowsHostCapture) return;
-    unawaited(_armWindowsCaptureRecovery(event));
-  }
-
-  Future<void> _armWindowsCaptureRecovery(
-    DesktopWindowLifecycleEvent event,
-  ) async {
-    _RtcVideoProgress? baseline;
-    try {
-      baseline = await _readRtcVideoProgress('outbound-rtp');
-    } catch (_) {
-      // Missing counters are handled conservatively by the delayed probe.
-    }
-    if (!_canRecoverWindowsHostCapture) return;
-    _windowsCaptureRecoveryTimer = Timer(
-      const Duration(milliseconds: 650),
-      () => unawaited(_recoverWindowsCaptureIfStalled(baseline, event)),
-    );
-  }
-
   bool get _canRecoverWindowsHostCapture =>
       role == RemoteRole.host &&
       _hostPlatform.type == HostPlatformType.windows &&
@@ -4766,26 +4731,6 @@ class RemoteSessionController extends ChangeNotifier
       _connectionEstablished &&
       _localStream != null &&
       _videoSender != null;
-
-  Future<void> _recoverWindowsCaptureIfStalled(
-    _RtcVideoProgress? baseline,
-    DesktopWindowLifecycleEvent event,
-  ) async {
-    if (!_canRecoverWindowsHostCapture) return;
-    try {
-      final current = await _readRtcVideoProgress('outbound-rtp');
-      if (_videoFramesAdvanced(current, afterFrames: baseline?.frames)) return;
-      final recovered = await _warmRestartWindowsHostCapture();
-      if (!recovered) {
-        _emitNotice(
-          'Windows 窗口状态变化后画面未恢复，可使用“刷新当前画面”重试（${event.name}）',
-          level: RemoteNoticeLevel.warning,
-        );
-      }
-    } catch (_) {
-      // Automatic recovery is best-effort and must never end the session.
-    }
-  }
 
   Future<bool> _warmRestartWindowsHostCapture() async {
     if (!_canRecoverWindowsHostCapture) return false;
@@ -6785,6 +6730,7 @@ class RemoteSessionController extends ChangeNotifier
     if (!_hostPlatform.capabilities.canHostDesktop) {
       throw UnsupportedError('当前版本尚未实现此平台的被控能力');
     }
+    await _awaitHostRuntimeReady();
     var permission = await _hostPlatform.checkPermissions();
     if (!permission.screenCaptureGranted) {
       permission = await _hostPlatform.requestScreenCapturePermission();
@@ -6824,6 +6770,41 @@ class RemoteSessionController extends ChangeNotifier
     _publishDisplayList();
     unawaited(_publishColorDiagnostics());
     notifyListeners();
+  }
+
+  Future<void> _awaitHostRuntimeReady() async {
+    final platform = _hostPlatform;
+    if (platform is! HostRuntimeStateProvider) return;
+    final runtimeProvider = platform as HostRuntimeStateProvider;
+
+    HostRuntimeAvailability? lastAvailability;
+    final deadline = DateTime.now().add(const Duration(minutes: 3));
+    while (!_closing) {
+      final runtime = await runtimeProvider.getHostRuntimeState();
+      if (runtime.isInteractive) return;
+
+      if (runtime.availability != lastAvailability) {
+        lastAvailability = runtime.availability;
+        final limitation =
+            runtime.limitation ??
+            switch (runtime.availability) {
+              HostRuntimeAvailability.locked => '被控端当前处于锁定状态',
+              HostRuntimeAvailability.secureDesktop => '被控端当前处于系统安全桌面',
+              HostRuntimeAvailability.noDisplay => '被控端当前没有活动显示器',
+              _ => '被控端当前不能启动屏幕采集和输入',
+            };
+        _setState(RemoteSessionState.connecting, '$limitation；状态恢复后将自动继续连接');
+        _emitNotice(
+          '$limitation；状态恢复后将自动继续连接',
+          level: RemoteNoticeLevel.warning,
+        );
+      }
+      if (DateTime.now().isAfter(deadline)) {
+        throw StateError(runtime.limitation ?? '等待被控端进入可交互桌面超时，请在本机解锁后重试');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 750));
+    }
+    throw StateError('远程会话已取消');
   }
 
   Future<void> _startHostSystemAudio() async {
@@ -7983,8 +7964,6 @@ class RemoteSessionController extends ChangeNotifier
     _displaySwitchRequestTimer = null;
     _mediaStatsTimer?.cancel();
     _mediaStatsTimer = null;
-    _windowsCaptureRecoveryTimer?.cancel();
-    _windowsCaptureRecoveryTimer = null;
     _windowsCaptureRecoveryGeneration += 1;
     await _displayAddedSubscription?.cancel();
     _displayAddedSubscription = null;
@@ -8217,8 +8196,6 @@ class RemoteSessionController extends ChangeNotifier
   Future<void> _disposeResources() async {
     await _trustedAuthorizationInvalidationSubscription?.cancel();
     _trustedAuthorizationInvalidationSubscription = null;
-    await _hostWindowLifecycleSubscription?.cancel();
-    _hostWindowLifecycleSubscription = null;
     await _clipboardSubscription?.cancel();
     _clipboardSubscription = null;
     await _filePasteIntentSubscription?.cancel();
