@@ -1,12 +1,20 @@
 import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/windows_input_bridge.dart';
+import 'package:cross_desktop_remote/core/privacy/host_privacy_screen.dart';
 import 'package:flutter/services.dart';
 
 class WindowsHostPlatformAdapter
-    implements HostPlatformAdapter, HostRuntimeStateProvider {
-  const WindowsHostPlatformAdapter({this.bridge = const WindowsInputBridge()});
+    implements
+        HostPlatformAdapter,
+        HostRuntimeStateProvider,
+        HostPrivacyScreenProvider {
+  const WindowsHostPlatformAdapter({
+    this.bridge = const WindowsInputBridge(),
+    this.privacyBridge = const MethodChannelHostPrivacyScreenBridge(),
+  });
 
   final WindowsInputBridgeApi bridge;
+  final HostPrivacyScreenBridge privacyBridge;
 
   @override
   HostPlatformType get type => HostPlatformType.windows;
@@ -117,4 +125,24 @@ class WindowsHostPlatformAdapter
 
   @override
   Future<bool> openDisplaySettings() async => false;
+
+  @override
+  Future<HostPrivacyScreenCapabilities> getPrivacyScreenCapabilities() =>
+      privacyBridge.getCapabilities();
+
+  @override
+  Future<HostPrivacyScreenStatus> activatePrivacyScreen({
+    required String sessionId,
+    required String controllerLabel,
+  }) => privacyBridge.activate(
+    sessionId: sessionId,
+    controllerLabel: controllerLabel,
+  );
+
+  @override
+  Future<HostPrivacyScreenStatus> getPrivacyScreenStatus() =>
+      privacyBridge.getStatus();
+
+  @override
+  Future<void> deactivatePrivacyScreen() => privacyBridge.deactivate();
 }

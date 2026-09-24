@@ -54,6 +54,8 @@ Uri buildSignalingUri({
   Iterable<String> clientCapabilities = const [],
   String trustedMachineCode = '',
   String trustedTargetMachineCode = '',
+  String traceId = '',
+  String attemptId = '',
 }) {
   final baseUri = Uri.parse(normalizeSignalingServerUrl(serverUrl));
   final normalizedTrustedMachineCode = trustedMachineCode.trim().toUpperCase();
@@ -93,6 +95,8 @@ Uri buildSignalingUri({
       if (normalizedTrustedMachineCode.isNotEmpty)
         'trustedMachineCode': normalizedTrustedMachineCode,
       if (trustedTarget.isNotEmpty) 'trustedTarget': trustedTarget,
+      if (RegExp(r'^[0-9a-f]{32}$').hasMatch(traceId)) 'traceId': traceId,
+      if (RegExp(r'^[0-9a-f]{32}$').hasMatch(attemptId)) 'attemptId': attemptId,
       // Keep the first capability for servers that only understand the legacy
       // singular value. New servers consume every repeated capability entry,
       // avoiding delimiter encoding differences between Dart and Spring.

@@ -3,6 +3,25 @@ import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('host advertises privacy screen only after native capability check', () {
+    final unavailable = buildRemoteClientCapabilities(
+      role: RemoteRole.host,
+      platform: 'windows',
+      clipboardSupported: false,
+      explicitFileTransferSupported: false,
+    );
+    final available = buildRemoteClientCapabilities(
+      role: RemoteRole.host,
+      platform: 'windows',
+      clipboardSupported: false,
+      explicitFileTransferSupported: false,
+      privacyScreenSupported: true,
+    );
+
+    expect(unavailable, isNot(contains(standardPrivacyScreenV1Capability)));
+    expect(available, contains(standardPrivacyScreenV1Capability));
+  });
+
   test('iOS and Windows controllers share the same switch capabilities', () {
     final capabilities = buildRemoteClientCapabilities(
       role: RemoteRole.controller,

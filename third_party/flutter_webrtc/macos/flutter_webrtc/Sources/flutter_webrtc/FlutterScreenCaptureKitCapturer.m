@@ -14,6 +14,34 @@
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
+static NSString *const CDRPrivacyScreenDefaultsKey =
+    @"CrossDesktopRemotePrivacyScreenActive";
+
+static SCContentFilter *CDRContentFilterForDisplay(
+    SCShareableContent *content,
+    SCDisplay *display) API_AVAILABLE(macos(12.3)) {
+  if (![[NSUserDefaults standardUserDefaults]
+          boolForKey:CDRPrivacyScreenDefaultsKey]) {
+    return [[SCContentFilter alloc] initWithDisplay:display
+                                   excludingWindows:@[]];
+  }
+
+  NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
+  NSMutableArray<SCRunningApplication *> *excludedApplications =
+      [NSMutableArray array];
+  if (bundleIdentifier.length > 0) {
+    for (SCRunningApplication *application in content.applications) {
+      if ([application.bundleIdentifier isEqualToString:bundleIdentifier]) {
+        [excludedApplications addObject:application];
+      }
+    }
+  }
+  return [[SCContentFilter alloc]
+      initWithDisplay:display
+      excludingApplications:excludedApplications
+      exceptingWindows:@[]];
+}
+
 typedef void (^CDRCaptureSwitchCompletion)(
     NSDictionary<NSString *, id> * _Nullable configuration,
     NSError * _Nullable error);
@@ -772,7 +800,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
         return;
       }
 
-      SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+      SCContentFilter *filter = CDRContentFilterForDisplay(content, display);
       SCStreamConfiguration *config =
           [self streamConfigurationForDisplay:display
                                        filter:filter
@@ -868,8 +896,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
             onCompletion(nil, noDisplay);
             return;
           }
-          SCContentFilter *filter =
-              [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+          SCContentFilter *filter = CDRContentFilterForDisplay(content, display);
           SCStreamConfiguration *configuration =
               [self streamConfigurationForDisplay:display
                                            filter:filter
@@ -1197,8 +1224,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
                 onCompletion(nil, noDisplay);
                 return;
               }
-              SCContentFilter *filter =
-                  [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+              SCContentFilter *filter = CDRContentFilterForDisplay(content, display);
               SCStreamConfiguration *configuration =
                   [self streamConfigurationForDisplay:display
                                                filter:filter

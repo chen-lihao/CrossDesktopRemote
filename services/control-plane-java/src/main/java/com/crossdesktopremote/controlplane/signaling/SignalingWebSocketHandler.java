@@ -10,7 +10,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -23,6 +26,8 @@ import tools.jackson.databind.ObjectMapper;
 
 @Component
 final class SignalingWebSocketHandler extends TextWebSocketHandler {
+
+	private static final Logger LOG = LoggerFactory.getLogger(SignalingWebSocketHandler.class);
 
 	private static final int MAX_MESSAGE_BYTES = 64 * 1024;
 	private static final int MAX_CAPABILITY_COUNT = 64;
@@ -52,6 +57,9 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 	private static final String CAPABILITIES_ATTRIBUTE = "crossdesktop.capabilities";
 	private static final String TRUSTED_ROUTE_ATTRIBUTE = "crossdesktop.trusted-route";
 	private static final String TRUSTED_MACHINE_CODE_ATTRIBUTE = "crossdesktop.trusted-machine-code";
+	private static final String TRACE_ATTRIBUTE = "crossdesktop.trace-id";
+	private static final String ATTEMPT_ATTRIBUTE = "crossdesktop.attempt-id";
+	private static final Pattern OPAQUE_DIAGNOSTIC_ID = Pattern.compile("^[0-9a-f]{32}$");
 
 	private final SignalingRoomRegistry rooms;
 	private final TrustedRouteRegistry trustedRoutes;
@@ -83,6 +91,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		var role = SignalingRole.parse(query.getFirst("role"));
 		var platform = normalizedPlatform(query.getFirst("platform"));
 		var deviceId = normalizedDeviceId(query.getFirst("deviceId"), session.getId());
+		var traceId = normalizedDiagnosticId(query.getFirst("traceId"), session.getId());
+		var attemptId = normalizedDiagnosticId(query.getFirst("attemptId"), session.getId());
 		var capabilityValues = new ArrayList<String>();
 		var repeatedCapabilities = query.get("capability");
 		if (repeatedCapabilities != null) capabilityValues.addAll(repeatedCapabilities);
@@ -144,6 +154,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		session.getAttributes().put(PLATFORM_ATTRIBUTE, platform);
 		session.getAttributes().put(DEVICE_ID_ATTRIBUTE, deviceId);
 		session.getAttributes().put(CAPABILITIES_ATTRIBUTE, clientCapabilities);
+		session.getAttributes().put(TRACE_ATTRIBUTE, traceId);
+		session.getAttributes().put(ATTEMPT_ATTRIBUTE, attemptId);
 		if (StringUtils.hasText(trustedMachineCode)) {
 			session.getAttributes().put(TRUSTED_MACHINE_CODE_ATTRIBUTE, trustedMachineCode);
 		}
@@ -181,16 +193,30 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			rooms.invitationRemainingMillis(roomCode, role.get(), session)
 					.ifPresent(value -> ready.put("invitationExpiresInMillis", value));
 		}
+		LOG.info(
+				"signaling_connected traceId={} attemptId={} role={} platform={} trusted={} capabilities={}",
+				traceId,
+				attemptId,
+				role.get().wireName(),
+				platform,
+				trustedController,
+				clientCapabilities.size());
 		sendJson(session, ready);
 		if (trustedRoute != null) {
 			var peer = trustedRoute.host();
-			sendJsonQuietly(peer, peerJoinedPayload(role.get(), session, trustedRoute.sessionId(), true));
-			sendJsonQuietly(session, peerJoinedPayload(role.get().peerRole(), peer, trustedRoute.sessionId(), true));
+			var connectionTraceId = traceId(session);
+			peer.getAttributes().put(TRACE_ATTRIBUTE, connectionTraceId);
+			sendJsonQuietly(peer, peerJoinedPayload(role.get(), session, trustedRoute.sessionId(), true, connectionTraceId));
+			sendJsonQuietly(session, peerJoinedPayload(role.get().peerRole(), peer, trustedRoute.sessionId(), true, connectionTraceId));
 		} else {
 			var joinedRoomCode = roomCode;
 			rooms.peer(joinedRoomCode, role.get()).ifPresent(peer -> {
-				sendJsonQuietly(peer, peerJoinedPayload(role.get(), session, null, false));
-				sendJsonQuietly(session, peerJoinedPayload(role.get().peerRole(), peer, null, false));
+				var controller = role.get() == SignalingRole.CONTROLLER ? session : peer;
+				var connectionTraceId = traceId(controller);
+				session.getAttributes().put(TRACE_ATTRIBUTE, connectionTraceId);
+				peer.getAttributes().put(TRACE_ATTRIBUTE, connectionTraceId);
+				sendJsonQuietly(peer, peerJoinedPayload(role.get(), session, null, false, connectionTraceId));
+				sendJsonQuietly(session, peerJoinedPayload(role.get().peerRole(), peer, null, false, connectionTraceId));
 			});
 		}
 	}
@@ -208,6 +234,12 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			session.close(CloseStatus.BAD_DATA.withReason("Unsupported signaling message"));
 			return;
 		}
+		LOG.debug(
+				"signaling_message traceId={} attemptId={} type={} payloadBytes={}",
+				traceId(session),
+				attemptId(session),
+				messageType,
+				message.getPayloadLength());
 
 		var roomCode = roomCode(session);
 		var role = role(session);
@@ -275,6 +307,12 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 	@Override
 	public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
+		LOG.info(
+				"signaling_closed traceId={} attemptId={} role={} closeCode={}",
+				traceId(session),
+				attemptId(session),
+				role(session) == null ? "unknown" : role(session).wireName(),
+				status.getCode());
 		var trustedPeer = trustedRoutes.leave(session);
 		trustedPeer.ifPresent(value -> {
 			value.getAttributes().remove(TRUSTED_ROUTE_ATTRIBUTE);
@@ -339,6 +377,11 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 	@Override
 	public void handleTransportError(WebSocketSession session, Throwable exception) throws Exception {
+		LOG.warn(
+				"signaling_transport_error traceId={} attemptId={} errorType={}",
+				traceId(session),
+				attemptId(session),
+				exception.getClass().getSimpleName());
 		if (session.isOpen()) {
 			session.close(CloseStatus.SERVER_ERROR);
 		}
@@ -391,7 +434,8 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 			SignalingRole role,
 			WebSocketSession peer,
 			String routeSessionId,
-			boolean trusted) {
+			boolean trusted,
+			String connectionTraceId) {
 		var payload = new HashMap<String, Object>();
 		payload.put("type", "peer-joined");
 		payload.put("role", role.wireName());
@@ -400,8 +444,25 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 		payload.put("peerCapabilities", peer.getAttributes().getOrDefault(CAPABILITIES_ATTRIBUTE, Set.of()));
 		payload.put("peerAddress", clientAddress(peer));
 		payload.put("authenticationMode", trusted ? "trusted" : "connection-code");
+		payload.put("connectionTraceId", connectionTraceId);
 		if (routeSessionId != null) payload.put("routeSessionId", routeSessionId);
 		return payload;
+	}
+
+	private String normalizedDiagnosticId(String value, String fallback) {
+		if (StringUtils.hasText(value)) {
+			var normalized = value.trim().toLowerCase();
+			if (OPAQUE_DIAGNOSTIC_ID.matcher(normalized).matches()) return normalized;
+		}
+		return "legacy-" + Integer.toUnsignedString(fallback.hashCode(), 16);
+	}
+
+	private String traceId(WebSocketSession session) {
+		return (String) session.getAttributes().getOrDefault(TRACE_ATTRIBUTE, "unknown");
+	}
+
+	private String attemptId(WebSocketSession session) {
+		return (String) session.getAttributes().getOrDefault(ATTEMPT_ATTRIBUTE, "unknown");
 	}
 
 	private boolean supportsTrustedAuthentication(Set<String> capabilities) {

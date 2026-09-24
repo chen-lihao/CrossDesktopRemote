@@ -4,7 +4,11 @@ import 'dart:io';
 import 'package:cross_desktop_remote/app/appearance/app_appearance_controller.dart';
 import 'package:cross_desktop_remote/app/design_system/app_components.dart';
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
+import 'package:cross_desktop_remote/core/diagnostics/diagnostic_event.dart';
+import 'package:cross_desktop_remote/core/diagnostics/diagnostic_hub.dart';
 import 'package:cross_desktop_remote/core/presentation/adaptive_layout.dart';
+import 'package:cross_desktop_remote/core/presentation/app_messenger.dart';
+import 'package:cross_desktop_remote/core/privacy/host_privacy_screen.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_server_profile.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
@@ -13,6 +17,7 @@ import 'package:cross_desktop_remote/features/remote/presentation/remote_input_s
 import 'package:cross_desktop_remote/features/remote/presentation/video_policy_dialog.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:flutter/material.dart';
+import 'package:file_selector/file_selector.dart';
 
 class SettingsPage extends StatelessWidget {
   const SettingsPage({
@@ -57,12 +62,74 @@ class SettingsPage extends StatelessWidget {
     if (result != null) unawaited(settings.setDefaultVideoPolicy(result));
   }
 
+  Future<void> _exportDiagnostics(BuildContext context) async {
+    try {
+      final diagnostics = DiagnosticHub.instance;
+      final result = await diagnostics.exportBundle();
+      var finalPath = result.path;
+      if (!Platform.isIOS) {
+        final suggestedName = result.path.split(Platform.pathSeparator).last;
+        final location = await getSaveLocation(
+          suggestedName: suggestedName,
+          acceptedTypeGroups: const [
+            XTypeGroup(
+              label: 'CrossDesktop diagnostics',
+              extensions: ['cdrdiag'],
+            ),
+          ],
+          confirmButtonText: '导出诊断包',
+        );
+        if (location == null) return;
+        await XFile(result.path).saveTo(location.path);
+        finalPath = location.path;
+      }
+      if (context.mounted) {
+        AppMessenger.show(
+          '已导出 ${result.eventCount} 条诊断事件到 $finalPath',
+          level: AppMessageLevel.success,
+          duration: const Duration(seconds: 8),
+        );
+      }
+    } catch (error) {
+      if (context.mounted) {
+        AppMessenger.show('导出诊断包失败：$error', level: AppMessageLevel.error);
+      }
+    }
+  }
+
+  Future<void> _clearDiagnostics(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('清理诊断数据'),
+        content: const Text('将删除本机滚动诊断日志；会话历史和安全审计不会受到影响。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('清理'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await DiagnosticHub.instance.clear();
+    if (context.mounted) {
+      AppMessenger.show('本机诊断日志已清理', level: AppMessageLevel.success);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final appearance = AppAppearanceController.instance;
+    final diagnostics = DiagnosticHub.instance;
     return AnimatedBuilder(
       animation: Listenable.merge([
         appearance,
+        diagnostics,
         settings,
         session,
         ?hostSession,
@@ -379,6 +446,43 @@ class SettingsPage extends StatelessWidget {
           if (hostSession != null &&
               (Platform.isMacOS || Platform.isWindows)) ...[
             AppSectionCard(
+              title: '本机隐私保护',
+              icon: Icons.visibility_off_outlined,
+              children: [
+                SwitchListTile(
+                  title: const Text('连接时启用标准隐私屏'),
+                  subtitle: Text(
+                    settings.hostPrivacyMode == HostPrivacyMode.standardRequired
+                        ? hostSession!.privacyScreenStatus.phase ==
+                                  HostPrivacyScreenPhase.active
+                              ? '已覆盖 ${hostSession!.privacyScreenStatus.coveredDisplayCount} 个显示器；远程画面不会采集遮挡窗口'
+                              : '必须覆盖全部显示器并排除遮挡窗口后才允许开始共享'
+                        : '关闭时，本机显示器会同步显示远程操作内容',
+                  ),
+                  value:
+                      settings.hostPrivacyMode ==
+                      HostPrivacyMode.standardRequired,
+                  onChanged: hostSession!.canChangeHostPrivacyMode
+                      ? (enabled) => unawaited(
+                          settings.setHostPrivacyMode(
+                            enabled
+                                ? HostPrivacyMode.standardRequired
+                                : HostPrivacyMode.disabled,
+                          ),
+                        )
+                      : null,
+                ),
+                const ListTile(
+                  leading: Icon(Icons.info_outline),
+                  title: Text('标准模式的系统边界'),
+                  subtitle: Text(
+                    '覆盖当前用户桌面的全部显示器；Windows 安全桌面/UAC、登录界面和系统级切换不在覆盖范围。覆盖失败会拒绝连接。',
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            AppSectionCard(
               title: '远程声音',
               icon: Icons.volume_up_outlined,
               children: [
@@ -439,6 +543,62 @@ class SettingsPage extends StatelessWidget {
                 value: settings.showAdvancedNetwork,
                 onChanged: (value) =>
                     unawaited(settings.setShowAdvancedNetwork(value)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          AppSectionCard(
+            title: '诊断与日志',
+            subtitle: '本地优先、自动脱敏；不会通过信令服务器自动上传',
+            icon: Icons.troubleshoot_outlined,
+            children: [
+              SwitchListTile(
+                title: const Text('开启15分钟详细诊断'),
+                subtitle: Text(
+                  diagnostics.mode == DiagnosticMode.detailed
+                      ? '已开启，将在15分钟后自动恢复普通级别'
+                      : '普通模式仅记录状态变化；详细模式会增加信令元数据和媒体统计',
+                ),
+                value: diagnostics.mode == DiagnosticMode.detailed,
+                onChanged: (value) =>
+                    unawaited(diagnostics.setDetailedMode(value)),
+              ),
+              ListTile(
+                leading: const Icon(Icons.storage_outlined),
+                title: const Text('本地诊断存储'),
+                subtitle: Text(
+                  '${diagnostics.persistedEventCount} 条事件 · '
+                  '${(diagnostics.storageBytes / (1024 * 1024)).toStringAsFixed(1)} MiB\n'
+                  '${diagnostics.diagnosticDirectory ?? '诊断目录尚未初始化'}',
+                ),
+                isThreeLine: true,
+              ),
+              const ListTile(
+                leading: Icon(Icons.privacy_tip_outlined),
+                title: Text('强制隐私边界'),
+                subtitle: Text(
+                  '不记录连接码、SDP、ICE地址、按键、剪贴板、文件内容和屏幕内容；设备和网络标识会本机伪名化。',
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                child: Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.end,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: () => _clearDiagnostics(context),
+                      icon: const Icon(Icons.delete_outline),
+                      label: const Text('清理本地日志'),
+                    ),
+                    FilledButton.icon(
+                      onPressed: () => _exportDiagnostics(context),
+                      icon: const Icon(Icons.archive_outlined),
+                      label: const Text('导出诊断包'),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),

@@ -461,6 +461,7 @@ WindowsHostBridge::WindowsHostBridge(flutter::BinaryMessenger* messenger) {
 }
 
 WindowsHostBridge::~WindowsHostBridge() {
+  privacy_screen_.Deactivate();
   ReleaseAllInput();
   if (channel_) {
     channel_->SetMethodCallHandler(nullptr);
@@ -503,6 +504,53 @@ void WindowsHostBridge::HandleMethodCall(
     value[EncodableValue("limitation")] =
         EncodableValue(runtime.limitation);
     result->Success(EncodableValue(value));
+    return;
+  }
+
+  if (call.method_name() == "getPrivacyScreenCapabilities") {
+    EncodableMap value;
+    const int display_count = privacy_screen_.DisplayCount();
+    value[EncodableValue("available")] =
+        EncodableValue(display_count > 0);
+    value[EncodableValue("assurance")] = EncodableValue("bestEffort");
+    value[EncodableValue("supportsCaptureExclusion")] =
+        EncodableValue(true);
+    value[EncodableValue("supportsInputSuppression")] =
+        EncodableValue(false);
+    value[EncodableValue("secureDesktopCoverage")] =
+        EncodableValue(false);
+    value[EncodableValue("displayCount")] =
+        EncodableValue(static_cast<int32_t>(display_count));
+    value[EncodableValue("limitation")] = EncodableValue(
+        "标准隐私屏不覆盖登录、锁屏、UAC 安全桌面或其他用户会话");
+    result->Success(EncodableValue(value));
+    return;
+  }
+
+  const auto privacy_status_result =
+      [&result](const WindowsPrivacyScreen::Status& status) {
+        EncodableMap value;
+        value[EncodableValue("phase")] = EncodableValue(status.phase);
+        value[EncodableValue("coveredDisplayCount")] = EncodableValue(
+            static_cast<int32_t>(status.covered_display_count));
+        value[EncodableValue("expectedDisplayCount")] = EncodableValue(
+            static_cast<int32_t>(status.expected_display_count));
+        value[EncodableValue("captureExcluded")] =
+            EncodableValue(status.capture_excluded);
+        if (!status.failure_reason.empty()) {
+          value[EncodableValue("failureReason")] =
+              EncodableValue(status.failure_reason);
+        }
+        result->Success(EncodableValue(value));
+      };
+
+  if (call.method_name() == "getPrivacyScreenStatus") {
+    privacy_status_result(privacy_screen_.GetStatus());
+    return;
+  }
+  if (call.method_name() == "deactivatePrivacyScreen") {
+    privacy_screen_.Deactivate();
+    result->Success();
     return;
   }
 
@@ -564,6 +612,12 @@ void WindowsHostBridge::HandleMethodCall(
     return;
   }
 
+  if (call.method_name() == "activatePrivacyScreen") {
+    privacy_status_result(privacy_screen_.Activate(
+        StringValue(*arguments, "controllerLabel", "Remote device")));
+    return;
+  }
+
   std::string error;
   bool success = false;
   if (call.method_name() == "pointer") {
@@ -582,6 +636,10 @@ void WindowsHostBridge::HandleMethodCall(
     return;
   }
   result->Success();
+}
+
+void WindowsHostBridge::RefreshPrivacyScreen() {
+  privacy_screen_.Refresh();
 }
 
 bool WindowsHostBridge::HandlePointer(const EncodableMap& arguments,

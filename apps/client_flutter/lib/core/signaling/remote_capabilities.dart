@@ -31,6 +31,7 @@ const directionalFilePermissionsV1Capability =
 const trustedAuthSuiteV2Capability = 'trusted-auth-suite-v2';
 const signedSdpManifestV1Capability = 'signed-sdp-manifest-v1';
 const completeCapabilityManifestV1Capability = 'capability-manifest-v1';
+const standardPrivacyScreenV1Capability = 'standard-privacy-screen-v1';
 const iosActiveContentGeometryV3Enabled = bool.fromEnvironment(
   'CDR_IOS_ACTIVE_CONTENT_GEOMETRY_V3',
   defaultValue: true,
@@ -56,6 +57,7 @@ List<String> buildRemoteClientCapabilities({
   bool trustedDeviceAuthenticationSupported = false,
   bool systemAudioCaptureSupported = false,
   bool remoteAudioPlaybackSupported = false,
+  bool privacyScreenSupported = false,
   bool enableIosGeometryV3 = iosActiveContentGeometryV3Enabled,
 }) {
   final capabilities = <String>[];
@@ -90,6 +92,9 @@ List<String> buildRemoteClientCapabilities({
   }
   if (role == RemoteRole.controller && remoteAudioPlaybackSupported) {
     capabilities.add(remoteAudioPlaybackV1Capability);
+  }
+  if (role == RemoteRole.host && privacyScreenSupported) {
+    capabilities.add(standardPrivacyScreenV1Capability);
   }
   if (trustedDeviceAuthenticationSupported) {
     capabilities.addAll(const [

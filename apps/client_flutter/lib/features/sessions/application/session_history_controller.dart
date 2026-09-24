@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:cross_desktop_remote/features/remote/application/remote_session_controller.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_kernel.dart';
+import 'package:cross_desktop_remote/core/diagnostics/diagnostic_event.dart';
+import 'package:cross_desktop_remote/core/diagnostics/diagnostic_hub.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_controller.dart';
 import 'package:cross_desktop_remote/features/sessions/application/session_audit_repository.dart'
     as audit;
@@ -265,6 +267,7 @@ class SessionHistoryController extends ChangeNotifier {
     RemoteSessionController session,
     RemoteSessionDomainEvent event,
   ) {
+    _recordDiagnosticEvent(event);
     if (event is! RemoteTransferChangedEvent ||
         !settings.sessionHistoryEnabled) {
       return;
@@ -292,6 +295,73 @@ class SessionHistoryController extends ChangeNotifier {
       loaded.removeWhere((item) => item.id == record.id);
       loaded.insert(0, record);
       notifyListeners();
+    }
+  }
+
+  void _recordDiagnosticEvent(RemoteSessionDomainEvent event) {
+    final context = DiagnosticContext(
+      traceId: event.traceId,
+      attemptId: event.attemptId,
+      sessionId: event.sessionId,
+      role: event is RemoteSessionOpenedEvent ? event.role : null,
+    );
+    switch (event) {
+      case RemoteSessionOpenedEvent value:
+        DiagnosticHub.instance.record(
+          component: 'session.lifecycle',
+          name: 'attempt_started',
+          context: context,
+          attributes: {
+            'role': value.role,
+            'localDeviceId': value.localDeviceId,
+          },
+        );
+      case RemoteSessionTraceChangedEvent value:
+        DiagnosticHub.instance.record(
+          component: 'session.correlation',
+          name: 'connection_trace_adopted',
+          context: context,
+          attributes: {'previousTraceId': value.previousTraceId},
+        );
+      case RemoteSessionPeerChangedEvent value:
+        DiagnosticHub.instance.record(
+          component: 'session.lifecycle',
+          name: 'peer_changed',
+          context: context,
+          attributes: {'peerDeviceId': value.remoteDeviceId},
+        );
+      case RemoteSessionStateChangedEvent value:
+        DiagnosticHub.instance.record(
+          component: 'session.state',
+          name: value.state,
+          severity: value.state == 'failed'
+              ? DiagnosticSeverity.error
+              : DiagnosticSeverity.info,
+          context: context,
+          attributes: {'message': value.message},
+        );
+      case RemoteSessionClosedEvent value:
+        DiagnosticHub.instance.record(
+          component: 'session.lifecycle',
+          name: 'attempt_finished',
+          severity: value.outcome == 'disconnected'
+              ? DiagnosticSeverity.info
+              : DiagnosticSeverity.warning,
+          context: context,
+          attributes: {'outcome': value.outcome},
+        );
+      case RemoteTransferChangedEvent value:
+        DiagnosticHub.instance.record(
+          component: 'file_transfer.state',
+          name: value.state,
+          context: context,
+          attributes: {
+            'direction': value.direction,
+            'transferredBytes': value.transferredBytes,
+            'totalBytes': value.totalBytes,
+            'itemCount': value.items.length,
+          },
+        );
     }
   }
 

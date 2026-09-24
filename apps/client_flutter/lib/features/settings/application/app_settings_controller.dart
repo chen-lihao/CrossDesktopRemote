@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_server_profile.dart';
+import 'package:cross_desktop_remote/core/privacy/host_privacy_screen.dart';
 import 'package:cross_desktop_remote/features/remote/application/remote_session_models.dart';
 import 'package:cross_desktop_remote/features/remote/presentation/remote_input_settings.dart';
 import 'package:cross_desktop_remote/features/settings/application/app_settings_repository.dart';
@@ -41,6 +42,7 @@ class AppSettingsController extends ChangeNotifier {
   static const _advancedNetworkKey = 'settings.show_advanced_network';
   static const _incomingAccessKey = 'settings.incoming_access_enabled';
   static const _systemAudioSharingKey = 'settings.system_audio_sharing_enabled';
+  static const _hostPrivacyModeKey = 'settings.host_privacy_mode';
   static const _displayPresentationKey = 'settings.remote_display_presentation';
 
   SharedPreferencesAsync? _preferences;
@@ -75,6 +77,7 @@ class AppSettingsController extends ChangeNotifier {
   bool showAdvancedNetwork = false;
   bool incomingAccessEnabled = true;
   bool systemAudioSharingEnabled = false;
+  HostPrivacyMode hostPrivacyMode = HostPrivacyMode.disabled;
   RemoteDisplayPresentationMode displayPresentationMode =
       RemoteDisplayPresentationMode.singleWindow;
   bool loaded = false;
@@ -181,6 +184,11 @@ class AppSettingsController extends ChangeNotifier {
     incomingAccessEnabled = await store.getBool(_incomingAccessKey) ?? true;
     systemAudioSharingEnabled =
         await store.getBool(_systemAudioSharingKey) ?? false;
+    final storedPrivacyMode = await store.getString(_hostPrivacyModeKey);
+    hostPrivacyMode = HostPrivacyMode.values.firstWhere(
+      (value) => value.name == storedPrivacyMode,
+      orElse: () => HostPrivacyMode.disabled,
+    );
     final storedPresentation = await store.getString(_displayPresentationKey);
     displayPresentationMode = RemoteDisplayPresentationMode.values.firstWhere(
       (value) => value.name == storedPresentation,
@@ -286,6 +294,13 @@ class AppSettingsController extends ChangeNotifier {
     await _persistSnapshot();
   }
 
+  Future<void> setHostPrivacyMode(HostPrivacyMode value) async {
+    if (hostPrivacyMode == value) return;
+    hostPrivacyMode = value;
+    notifyListeners();
+    await _persistSnapshot();
+  }
+
   Future<void> setDisplayPresentationMode(
     RemoteDisplayPresentationMode value,
   ) async {
@@ -311,6 +326,7 @@ class AppSettingsController extends ChangeNotifier {
     _advancedNetworkKey: showAdvancedNetwork,
     _incomingAccessKey: incomingAccessEnabled,
     _systemAudioSharingKey: systemAudioSharingEnabled,
+    _hostPrivacyModeKey: hostPrivacyMode.name,
     _displayPresentationKey: displayPresentationMode.name,
   };
 
@@ -361,6 +377,10 @@ class AppSettingsController extends ChangeNotifier {
     showAdvancedNetwork = value[_advancedNetworkKey] as bool? ?? false;
     incomingAccessEnabled = value[_incomingAccessKey] as bool? ?? true;
     systemAudioSharingEnabled = value[_systemAudioSharingKey] as bool? ?? false;
+    hostPrivacyMode = HostPrivacyMode.values.firstWhere(
+      (item) => item.name == value[_hostPrivacyModeKey],
+      orElse: () => HostPrivacyMode.disabled,
+    );
     displayPresentationMode = RemoteDisplayPresentationMode.values.firstWhere(
       (item) => item.name == value[_displayPresentationKey],
       orElse: () => RemoteDisplayPresentationMode.singleWindow,

@@ -3,6 +3,183 @@ import ApplicationServices
 import FlutterMacOS
 import dnssd
 
+private let crossDesktopRemotePrivacyScreenDefaultsKey =
+  "CrossDesktopRemotePrivacyScreenActive"
+
+private final class CrossDesktopRemotePrivacyView: NSView {
+  var controllerLabel = "远程设备"
+
+  override func draw(_ dirtyRect: NSRect) {
+    NSColor(calibratedWhite: 0.035, alpha: 1).setFill()
+    dirtyRect.fill()
+
+    let titleStyle = NSMutableParagraphStyle()
+    titleStyle.alignment = .center
+    let titleAttributes: [NSAttributedString.Key: Any] = [
+      .font: NSFont.systemFont(ofSize: 30, weight: .semibold),
+      .foregroundColor: NSColor.white,
+      .paragraphStyle: titleStyle,
+    ]
+    let detailAttributes: [NSAttributedString.Key: Any] = [
+      .font: NSFont.systemFont(ofSize: 16, weight: .regular),
+      .foregroundColor: NSColor(calibratedWhite: 0.78, alpha: 1),
+      .paragraphStyle: titleStyle,
+    ]
+    let centerY = bounds.midY
+    NSString(string: "此 Mac 正在接受远程协助").draw(
+      in: NSRect(x: 24, y: centerY + 8, width: bounds.width - 48, height: 48),
+      withAttributes: titleAttributes
+    )
+    NSString(string: "连接设备：\(controllerLabel)\n如非本人操作，请按 Command–Option–Escape 结束应用").draw(
+      in: NSRect(x: 24, y: centerY - 64, width: bounds.width - 48, height: 60),
+      withAttributes: detailAttributes
+    )
+  }
+}
+
+private final class CrossDesktopRemotePrivacyScreenCoordinator {
+  private var windows: [NSWindow] = []
+  private var displayObserver: NSObjectProtocol?
+  private var controllerLabel = "远程设备"
+  private(set) var failureReason: String?
+
+  init() {
+    // A privacy window cannot survive process termination. Clearing this flag
+    // prevents a previous unclean exit from excluding the app from capture.
+    UserDefaults.standard.removeObject(
+      forKey: crossDesktopRemotePrivacyScreenDefaultsKey
+    )
+    displayObserver = NotificationCenter.default.addObserver(
+      forName: NSApplication.didChangeScreenParametersNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      guard let self, !self.windows.isEmpty else { return }
+      self.rebuildWindows()
+    }
+  }
+
+  deinit {
+    if let displayObserver {
+      NotificationCenter.default.removeObserver(displayObserver)
+    }
+    deactivate()
+  }
+
+  func capabilities() -> [String: Any] {
+    let captureExclusionAvailable: Bool
+    if #available(macOS 12.3, *) {
+      captureExclusionAvailable = true
+    } else {
+      captureExclusionAvailable = false
+    }
+    return [
+      "available": captureExclusionAvailable && !NSScreen.screens.isEmpty,
+      "assurance": "bestEffort",
+      "supportsCaptureExclusion": captureExclusionAvailable,
+      "supportsInputSuppression": false,
+      "secureDesktopCoverage": false,
+      "displayCount": NSScreen.screens.count,
+      "limitation": "标准隐私屏不覆盖登录窗口、系统授权界面或其他用户会话",
+    ]
+  }
+
+  func activate(controllerLabel: String) -> [String: Any] {
+    guard #available(macOS 12.3, *) else {
+      return [
+        "phase": "failed",
+        "coveredDisplayCount": 0,
+        "expectedDisplayCount": NSScreen.screens.count,
+        "captureExcluded": false,
+        "failureReason": "macOS 12.3 之前无法安全排除隐私屏窗口",
+      ]
+    }
+    self.controllerLabel = String(controllerLabel.prefix(80))
+    failureReason = nil
+    UserDefaults.standard.set(
+      true,
+      forKey: crossDesktopRemotePrivacyScreenDefaultsKey
+    )
+    rebuildWindows()
+    let status = status()
+    if status["phase"] as? String != "active" {
+      deactivate()
+    }
+    return status
+  }
+
+  func deactivate() {
+    UserDefaults.standard.removeObject(
+      forKey: crossDesktopRemotePrivacyScreenDefaultsKey
+    )
+    for window in windows {
+      window.orderOut(nil)
+      window.close()
+    }
+    windows.removeAll()
+    failureReason = nil
+  }
+
+  func status() -> [String: Any] {
+    let expected = NSScreen.screens.count
+    let covered = windows.filter { $0.isVisible }.count
+    let active = expected > 0 && covered == expected && failureReason == nil
+    var value: [String: Any] = [
+      "phase": active ? "active" : windows.isEmpty ? "inactive" : "failed",
+      "coveredDisplayCount": covered,
+      "expectedDisplayCount": expected,
+      "captureExcluded": active,
+    ]
+    if let failureReason {
+      value["failureReason"] = failureReason
+    }
+    return value
+  }
+
+  private func rebuildWindows() {
+    for window in windows {
+      window.orderOut(nil)
+      window.close()
+    }
+    windows.removeAll()
+
+    let screens = NSScreen.screens
+    guard !screens.isEmpty else {
+      failureReason = "没有可覆盖的活动显示器"
+      return
+    }
+    for screen in screens {
+      let window = NSWindow(
+        contentRect: screen.frame,
+        styleMask: .borderless,
+        backing: .buffered,
+        defer: false,
+        screen: screen
+      )
+      window.level = .screenSaver
+      window.backgroundColor = .black
+      window.isOpaque = true
+      window.ignoresMouseEvents = true
+      window.collectionBehavior = [
+        .canJoinAllSpaces,
+        .fullScreenAuxiliary,
+        .stationary,
+        .ignoresCycle,
+      ]
+      let view = CrossDesktopRemotePrivacyView(frame: screen.frame)
+      view.controllerLabel = controllerLabel
+      window.contentView = view
+      window.setFrame(screen.frame, display: true)
+      window.orderFrontRegardless()
+      window.displayIfNeeded()
+      windows.append(window)
+    }
+    if windows.count != screens.count {
+      failureReason = "未能覆盖全部显示器"
+    }
+  }
+}
+
 func crossDesktopRemoteAbsolutePointerPosition(
   normalizedX: Double,
   normalizedY: Double,
@@ -310,6 +487,7 @@ class MainFlutterWindow: NSWindow {
   private var captureFrameState: [String: Any] = [:]
   private var captureFrameGateState: [String: Any] = [:]
   private var grayscaleTestPanel: NSPanel?
+  private let privacyScreen = CrossDesktopRemotePrivacyScreenCoordinator()
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -389,6 +567,17 @@ class MainFlutterWindow: NSWindow {
         result(self.listDisplays())
       case "getHostRuntimeState":
         result(self.getHostRuntimeState())
+      case "getPrivacyScreenCapabilities":
+        result(self.privacyScreen.capabilities())
+      case "activatePrivacyScreen":
+        let arguments = call.arguments as? [String: Any]
+        let controllerLabel = arguments?["controllerLabel"] as? String ?? "远程设备"
+        result(self.privacyScreen.activate(controllerLabel: controllerLabel))
+      case "getPrivacyScreenStatus":
+        result(self.privacyScreen.status())
+      case "deactivatePrivacyScreen":
+        self.privacyScreen.deactivate()
+        result(nil)
       case "getColorDiagnostics":
         result(self.getColorDiagnostics())
       case "getCaptureFrameState":
@@ -424,6 +613,7 @@ class MainFlutterWindow: NSWindow {
   }
 
   deinit {
+    privacyScreen.deactivate()
     if let colorDiagnosticsObserver {
       NotificationCenter.default.removeObserver(colorDiagnosticsObserver)
     }

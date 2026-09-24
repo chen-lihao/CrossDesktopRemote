@@ -25,6 +25,8 @@ Thumbs.db
 *.log
 logs/
 diagnostics/
+!apps/client_flutter/lib/core/diagnostics/
+!apps/client_flutter/lib/core/diagnostics/**
 recordings/
 crash-dumps/
 local-data/

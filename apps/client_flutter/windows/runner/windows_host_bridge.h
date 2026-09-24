@@ -13,6 +13,8 @@
 
 #include <windows.h>
 
+#include "windows_privacy_screen.h"
+
 class WindowsHostBridge {
  public:
   explicit WindowsHostBridge(flutter::BinaryMessenger* messenger);
@@ -27,6 +29,7 @@ class WindowsHostBridge {
   void ReleaseAllInput();
   void ReleaseKeyboardInput();
   void ReleasePointerButtons();
+  void RefreshPrivacyScreen();
 
   struct KeyDescriptor {
     UINT scan_code = 0;
@@ -58,6 +61,7 @@ class WindowsHostBridge {
   std::set<UINT> pressed_modifiers_;
   HWND pending_command_window_ = nullptr;
   LRESULT pending_command_hit_test_ = HTNOWHERE;
+  WindowsPrivacyScreen privacy_screen_;
 };
 
 #endif  // RUNNER_WINDOWS_HOST_BRIDGE_H_

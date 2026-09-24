@@ -17,6 +17,7 @@ add_executable(${BINARY_NAME} WIN32
   "windows_file_paste_target_bridge.cpp"
   "windows_host_bridge.cpp"
   "windows_lan_discovery_bridge.cpp"
+  "windows_privacy_screen.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
   "Runner.rc"
   "runner.exe.manifest"

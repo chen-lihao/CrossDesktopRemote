@@ -31,6 +31,8 @@ void main() {
       expect(sessionId, matches(RegExp(r'^[0-9a-f]{32}$')));
       expect(events, hasLength(5));
       expect(events.map((event) => event.sessionId).toSet(), {sessionId});
+      expect(events.map((event) => event.traceId).toSet(), hasLength(1));
+      expect(events.map((event) => event.attemptId).toSet(), hasLength(1));
       expect(
         events.whereType<RemoteSessionClosedEvent>().single.outcome,
         'disconnected',
@@ -40,6 +42,26 @@ void main() {
       await kernel.dispose();
     },
   );
+
+  test('adopts a server correlation id without changing the attempt', () async {
+    final kernel = RemoteSessionKernel(role: 'host');
+    final events = <RemoteSessionDomainEvent>[];
+    final subscription = kernel.events.listen(events.add);
+    kernel.begin(localDeviceId: 'local-device');
+    final attemptId = kernel.attemptId;
+
+    const sharedTraceId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    kernel.adoptConnectionTraceId(sharedTraceId);
+    kernel.recordState(state: 'connecting', message: 'peer joined');
+
+    expect(kernel.traceId, sharedTraceId);
+    expect(kernel.attemptId, attemptId);
+    expect(events.whereType<RemoteSessionTraceChangedEvent>(), hasLength(1));
+    expect(events.last.traceId, sharedTraceId);
+
+    await subscription.cancel();
+    await kernel.dispose();
+  });
 
   test('begin retires the previous active identity', () async {
     final kernel = RemoteSessionKernel(role: 'host');

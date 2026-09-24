@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cross_desktop_remote/core/discovery/lan_discovery_service.dart';
+import 'package:cross_desktop_remote/core/diagnostics/diagnostic_hub.dart';
 import 'package:cross_desktop_remote/core/identity/device_identity.dart';
 import 'package:cross_desktop_remote/core/platform/device_capabilities.dart';
 import 'package:cross_desktop_remote/core/presentation/adaptive_layout.dart';
@@ -166,6 +167,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         initialClipboardMode: _settings.clipboardSyncMode,
         initialTrustedDevices: _trustedDevices,
         initialSystemAudioSharingEnabled: _settings.systemAudioSharingEnabled,
+        initialHostPrivacyMode: _settings.hostPrivacyMode,
       );
       _hostAvailability = HostAvailabilityController(
         session: _hostSession!,
@@ -208,6 +210,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           ) ??
           Future<void>.value(),
     );
+    unawaited(
+      _hostSession?.setHostPrivacyMode(_settings.hostPrivacyMode) ??
+          Future<void>.value(),
+    );
     final availability = _hostAvailability;
     if (availability != null) {
       unawaited(
@@ -243,6 +249,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (availability != null) {
         unawaited(availability.ensureOnline());
       }
+    }
+    if (state == AppLifecycleState.detached) {
+      unawaited(DiagnosticHub.instance.markCleanShutdown());
     }
   }
 

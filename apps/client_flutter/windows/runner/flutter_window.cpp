@@ -175,6 +175,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_DISPLAYCHANGE:
       ScheduleFlutterRedraw();
       EmitWindowLifecycleEvent("displayChanged");
+      if (host_bridge_) {
+        host_bridge_->RefreshPrivacyScreen();
+      }
       break;
   }
 

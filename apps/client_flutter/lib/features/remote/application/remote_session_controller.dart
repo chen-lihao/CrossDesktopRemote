@@ -7,6 +7,8 @@ import 'package:cross_desktop_remote/core/audio/system_audio_capture_adapter.dar
 import 'package:cross_desktop_remote/core/audio/remote_audio_playout_coordinator.dart';
 import 'package:cross_desktop_remote/core/clipboard/clipboard_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/clipboard/clipboard_sync_mode.dart';
+import 'package:cross_desktop_remote/core/diagnostics/diagnostic_event.dart';
+import 'package:cross_desktop_remote/core/diagnostics/diagnostic_hub.dart';
 import 'package:cross_desktop_remote/core/files/explicit_file_transfer_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/files/file_paste_target_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
@@ -14,6 +16,7 @@ import 'package:cross_desktop_remote/core/input/host_platform_adapter_factory.da
 import 'package:cross_desktop_remote/core/input/remote_input_reset.dart';
 import 'package:cross_desktop_remote/core/input/remote_shortcut_policy.dart';
 import 'package:cross_desktop_remote/core/protocol/wire_value_parsers.dart';
+import 'package:cross_desktop_remote/core/privacy/host_privacy_screen.dart';
 import 'package:cross_desktop_remote/core/input/remote_text_chunks.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_client.dart';
 import 'package:cross_desktop_remote/core/signaling/signaling_endpoint.dart';
@@ -197,6 +200,7 @@ class RemoteSessionController extends ChangeNotifier
     ClipboardSyncMode initialClipboardMode = ClipboardSyncMode.bidirectional,
     TrustedDeviceCoordinator? initialTrustedDevices,
     bool initialSystemAudioSharingEnabled = false,
+    HostPrivacyMode initialHostPrivacyMode = HostPrivacyMode.disabled,
   }) : _localDeviceId = localDeviceId.trim().toLowerCase(),
        _signaling = signalingClient ?? SignalingClient(),
        _hostPlatform = hostPlatformAdapter ?? createHostPlatformAdapter(),
@@ -218,6 +222,7 @@ class RemoteSessionController extends ChangeNotifier
            initialVideoPolicy ?? RemoteVideoPolicy.fromLegacy(initialQuality),
        _clipboardMode = _platformClipboardMode(initialClipboardMode, role),
        _systemAudioSharingEnabled = initialSystemAudioSharingEnabled,
+       _hostPrivacyMode = initialHostPrivacyMode,
        _trustedDevices = initialTrustedDevices,
        _clipboardSync = TextClipboardSyncEngine(
          localIsController: role == RemoteRole.controller,
@@ -329,6 +334,9 @@ class RemoteSessionController extends ChangeNotifier
   Timer? _displaySwitchRequestTimer;
   Timer? _connectionRecoveryTimer;
   Timer? _mediaStatsTimer;
+  int _diagnosticMediaSampleCounter = 0;
+  DateTime? _lastMediaStatsDiagnosticErrorAt;
+  Timer? _privacyScreenHealthTimer;
   final List<RTCIceCandidate> _pendingCandidates = [];
   bool _remoteDescriptionSet = false;
   bool _mediaNegotiationSealed = false;
@@ -346,6 +354,7 @@ class RemoteSessionController extends ChangeNotifier
   bool _samplingMediaStats = false;
   bool _adaptiveQualityUpdateInProgress = false;
   bool _windowsCaptureRecoveryInProgress = false;
+  bool _checkingPrivacyScreenHealth = false;
   int _windowsCaptureRecoveryGeneration = 0;
   int _remoteTrackGeneration = 0;
   int _presentationRefreshGeneration = 0;
@@ -385,6 +394,7 @@ class RemoteSessionController extends ChangeNotifier
   bool _remoteSupportsMultiDisplayStreamV1 = false;
   bool _remoteSupportsSystemAudioCaptureV1 = false;
   bool _remoteSupportsAudioPlaybackV1 = false;
+  bool _remoteSupportsPrivacyScreenV1 = false;
   bool _remoteSupportsActiveContentGeometry = false;
   int _remoteActiveContentGeometryVersion = 0;
   bool _remoteSupportsTextClipboardV1 = false;
@@ -443,6 +453,13 @@ class RemoteSessionController extends ChangeNotifier
   bool _remoteAudioMuted = false;
   int _systemAudioGeneration = 0;
   bool _systemAudioSharingEnabled;
+  HostPrivacyMode _hostPrivacyMode;
+  HostPrivacyScreenCapabilities _privacyScreenCapabilities =
+      const HostPrivacyScreenCapabilities.unavailable();
+  HostPrivacyScreenStatus _privacyScreenStatus =
+      const HostPrivacyScreenStatus.inactive();
+  HostPrivacyScreenStatus _remotePrivacyScreenStatus =
+      const HostPrivacyScreenStatus.inactive();
   Future<void> _systemAudioMutation = Future<void>.value();
   ClipboardSyncMode? _remoteClipboardMode;
   ClipboardOffer? _queuedClipboardOffer;
@@ -512,6 +529,7 @@ class RemoteSessionController extends ChangeNotifier
       _supportsPersistentSignalingSession;
   bool get remoteSupportsMultiDisplayStreamV1 =>
       _remoteSupportsMultiDisplayStreamV1;
+  bool get remoteSupportsPrivacyScreenV1 => _remoteSupportsPrivacyScreenV1;
   bool get remoteSystemAudioAvailable =>
       role == RemoteRole.controller && _remoteSupportsSystemAudioCaptureV1;
   bool get remoteSystemAudioPlaying =>
@@ -524,6 +542,17 @@ class RemoteSessionController extends ChangeNotifier
   bool get systemAudioCaptureSupported =>
       role == RemoteRole.host && _systemAudioCapture.supported;
   bool get systemAudioSharingEnabled => _systemAudioSharingEnabled;
+  HostPrivacyMode get hostPrivacyMode => _hostPrivacyMode;
+  HostPrivacyScreenCapabilities get privacyScreenCapabilities =>
+      _privacyScreenCapabilities;
+  HostPrivacyScreenStatus get privacyScreenStatus => _privacyScreenStatus;
+  HostPrivacyScreenStatus get remotePrivacyScreenStatus =>
+      _remotePrivacyScreenStatus;
+  bool get canChangeHostPrivacyMode =>
+      role == RemoteRole.host &&
+      !_authorizingPeer &&
+      _localStream == null &&
+      !_connectionEstablished;
   String get systemAudioStatusLabel => switch (_systemAudioState) {
     RemoteSystemAudioState.unsupported => '对端不支持系统声音',
     RemoteSystemAudioState.disabled => '系统声音未共享',
@@ -773,6 +802,7 @@ class RemoteSessionController extends ChangeNotifier
         } catch (_) {
           // Native channels are unavailable in widget tests and early startup.
         }
+        await _refreshPrivacyScreenCapabilities();
       }
       await _initializeClipboardMonitoring();
       _setState(RemoteSessionState.idle, '尚未连接');
@@ -1245,6 +1275,9 @@ class RemoteSessionController extends ChangeNotifier
         systemAudioCaptureSupported:
             role == RemoteRole.host && _systemAudioCapture.supported,
         remoteAudioPlaybackSupported: role == RemoteRole.controller,
+        privacyScreenSupported:
+            role == RemoteRole.host &&
+            _privacyScreenCapabilities.canStartStandardPrivacyScreen,
         trustedDeviceAuthenticationSupported:
             _trustedDevices?.supported == true,
       );
@@ -1260,6 +1293,8 @@ class RemoteSessionController extends ChangeNotifier
             ? _trustedDevices!.localPublicIdentity().machineCode
             : '',
         trustedTargetMachineCode: trustedHost?.peerIdentity.machineCode ?? '',
+        traceId: _kernel.traceId ?? '',
+        attemptId: _kernel.attemptId ?? '',
       );
       _signalingServerUrl = serverUrl;
       await _createPeerConnection();
@@ -2235,6 +2270,19 @@ class RemoteSessionController extends ChangeNotifier
     await _serializeSystemAudioMutation(_reconcileHostSystemAudio);
   }
 
+  Future<void> setHostPrivacyMode(HostPrivacyMode mode) async {
+    if (role != RemoteRole.host || _hostPrivacyMode == mode) return;
+    if (!canChangeHostPrivacyMode) {
+      _emitNotice('远程会话期间不能修改隐私屏策略，请断开后重试', level: RemoteNoticeLevel.warning);
+      return;
+    }
+    _hostPrivacyMode = mode;
+    if (mode == HostPrivacyMode.standardRequired) {
+      await _refreshPrivacyScreenCapabilities();
+    }
+    notifyListeners();
+  }
+
   void selectVideoPolicy(RemoteVideoPolicy policy) {
     if (role != RemoteRole.controller) {
       return;
@@ -2668,6 +2716,37 @@ class RemoteSessionController extends ChangeNotifier
       final diagnostics = _mediaStatsAccumulator.update(snapshot);
       if (_closing || !identical(peerConnection, _peerConnection)) return;
       _mediaDiagnostics = diagnostics;
+      _diagnosticMediaSampleCounter += 1;
+      if (_diagnosticMediaSampleCounter % 5 == 0) {
+        DiagnosticHub.instance.record(
+          component: 'webrtc.media_stats',
+          name: 'sample',
+          severity: DiagnosticSeverity.debug,
+          context: DiagnosticContext(
+            traceId: _kernel.traceId,
+            attemptId: _kernel.attemptId,
+            sessionId: _kernel.sessionId,
+            role: role.name,
+          ),
+          attributes: {
+            'fps': diagnostics.framesPerSecond,
+            'bitrateMbps': diagnostics.bitrateMbps,
+            'availableOutgoingBitrateMbps':
+                diagnostics.availableOutgoingBitrateMbps,
+            'packetLossPercent': diagnostics.packetLossPercent,
+            'roundTripMs': diagnostics.networkRoundTripMs,
+            'encodeMsPerFrame': diagnostics.encodeMsPerFrame,
+            'decodeMsPerFrame': diagnostics.decodeMsPerFrame,
+            'jitterBufferMsPerFrame': diagnostics.jitterBufferMsPerFrame,
+            'framesDroppedDelta': diagnostics.framesDroppedDelta,
+            'freezeCountDelta': diagnostics.freezeCountDelta,
+            'codec': diagnostics.codec,
+            'encoder': diagnostics.encoderImplementation,
+            'decoder': diagnostics.decoderImplementation,
+            'qualityLimitationReason': diagnostics.qualityLimitationReason,
+          },
+        );
+      }
       notifyListeners();
       if (role == RemoteRole.host &&
           _selectedVideoPolicy.fullyAutomatic &&
@@ -2679,8 +2758,27 @@ class RemoteSessionController extends ChangeNotifier
           unawaited(_applyAdaptiveVideoTarget(next));
         }
       }
-    } catch (_) {
+    } catch (error, stackTrace) {
       // WebRTC stats are best-effort diagnostics and never affect the session.
+      final now = DateTime.now();
+      if (_lastMediaStatsDiagnosticErrorAt == null ||
+          now.difference(_lastMediaStatsDiagnosticErrorAt!) >=
+              const Duration(seconds: 30)) {
+        _lastMediaStatsDiagnosticErrorAt = now;
+        DiagnosticHub.instance.recordError(
+          component: 'webrtc.media_stats',
+          name: 'sampling_failed',
+          error: error,
+          stackTrace: stackTrace,
+          errorCode: 'CDR-WEBRTC-STATS-001',
+          context: DiagnosticContext(
+            traceId: _kernel.traceId,
+            attemptId: _kernel.attemptId,
+            sessionId: _kernel.sessionId,
+            role: role.name,
+          ),
+        );
+      }
     } finally {
       _samplingMediaStats = false;
     }
@@ -4339,6 +4437,18 @@ class RemoteSessionController extends ChangeNotifier
             orElse: () => RemoteSystemAudioState.disabled,
           );
         }
+        final privacyPhase = message['privacyScreenPhase'] as String?;
+        if (privacyPhase != null) {
+          _remotePrivacyScreenStatus = HostPrivacyScreenStatus.fromMap(
+            <Object?, Object?>{
+              'phase': privacyPhase,
+              'coveredDisplayCount': message['privacyCoveredDisplayCount'],
+              'expectedDisplayCount': message['privacyExpectedDisplayCount'],
+              'captureExcluded': message['privacyCaptureExcluded'],
+              'failureReason': message['privacyFailureReason'],
+            },
+          );
+        }
         if (_authenticationMode == RemoteAuthenticationMode.trustedDevice &&
             _trustedSessionAuthorized) {
           final remoteAuthorized = wireBool(
@@ -4942,6 +5052,11 @@ class RemoteSessionController extends ChangeNotifier
       'accessibilityGranted': _accessibilityGranted == true,
       'inputReady': _accessibilityGranted == true,
       'systemAudioState': _systemAudioState.name,
+      'privacyScreenPhase': _privacyScreenStatus.phase.name,
+      'privacyCoveredDisplayCount': _privacyScreenStatus.coveredDisplayCount,
+      'privacyExpectedDisplayCount': _privacyScreenStatus.expectedDisplayCount,
+      'privacyCaptureExcluded': _privacyScreenStatus.captureExcluded,
+      'privacyFailureReason': _privacyScreenStatus.failureReason,
       'trustedSessionAuthorized': _trustedSessionAuthorized,
       'effectivePermissionBits': trustedPermissionBits(_trustedPermissions),
     });
@@ -5398,6 +5513,7 @@ class RemoteSessionController extends ChangeNotifier
         _hostInvitationState = HostInvitationState.consumed;
         notifyListeners();
       case 'peer-joined':
+        _kernel.adoptConnectionTraceId(message['connectionTraceId'] as String?);
         final trustedRoute = message['authenticationMode'] == 'trusted';
         _authenticationMode = trustedRoute
             ? RemoteAuthenticationMode.trustedDevice
@@ -5446,6 +5562,9 @@ class RemoteSessionController extends ChangeNotifier
         );
         _remoteSupportsAudioPlaybackV1 = peerCapabilities.contains(
           remoteAudioPlaybackV1Capability,
+        );
+        _remoteSupportsPrivacyScreenV1 = peerCapabilities.contains(
+          standardPrivacyScreenV1Capability,
         );
         if (role == RemoteRole.controller &&
             !_remoteSupportsSystemAudioCaptureV1) {
@@ -6803,20 +6922,179 @@ class RemoteSessionController extends ChangeNotifier
     final selectedSource =
         _sourceForId(_selectedDisplayId) ?? _displaySources.first;
     _selectedDisplayId = selectedSource.id;
-    final stream = await _captureDisplay(selectedSource);
-    _localStream = stream;
-    _screenCaptureGranted = true;
-    for (final track in stream.getVideoTracks()) {
-      _videoSender = await _peerConnection!.addTrack(track, stream);
+    if (_hostPrivacyMode == HostPrivacyMode.standardRequired) {
+      await _activateRequiredPrivacyScreen();
     }
-    await _serializeSystemAudioMutation(_startHostSystemAudio);
-    await _applyVideoPolicy(_selectedVideoPolicy);
-    unawaited(_refreshOutboundVideoDiagnostics());
-    _subscribeToDisplayChanges();
-    _publishHostState();
-    _publishDisplayList();
-    unawaited(_publishColorDiagnostics());
+    try {
+      final stream = await _captureDisplay(selectedSource);
+      _localStream = stream;
+      _screenCaptureGranted = true;
+      for (final track in stream.getVideoTracks()) {
+        _videoSender = await _peerConnection!.addTrack(track, stream);
+      }
+      await _serializeSystemAudioMutation(_startHostSystemAudio);
+      await _applyVideoPolicy(_selectedVideoPolicy);
+      unawaited(_refreshOutboundVideoDiagnostics());
+      _subscribeToDisplayChanges();
+      _publishHostState();
+      _publishDisplayList();
+      unawaited(_publishColorDiagnostics());
+      notifyListeners();
+    } catch (_) {
+      await _serializeSystemAudioMutation(_stopHostSystemAudio);
+      final failedStream = _localStream;
+      _localStream = null;
+      _videoSender = null;
+      if (failedStream != null) {
+        await _disposeMediaStream(failedStream);
+      }
+      await _deactivatePrivacyScreen();
+      rethrow;
+    }
+  }
+
+  HostPrivacyScreenProvider? get _privacyScreenProvider {
+    final platform = _hostPlatform;
+    return platform is HostPrivacyScreenProvider
+        ? platform as HostPrivacyScreenProvider
+        : null;
+  }
+
+  Future<void> _refreshPrivacyScreenCapabilities() async {
+    if (role != RemoteRole.host) return;
+    final provider = _privacyScreenProvider;
+    if (provider == null) {
+      _privacyScreenCapabilities =
+          const HostPrivacyScreenCapabilities.unavailable(
+            limitation: '当前平台没有隐私屏后端',
+          );
+      return;
+    }
+    try {
+      _privacyScreenCapabilities = await provider
+          .getPrivacyScreenCapabilities();
+    } on MissingPluginException {
+      _privacyScreenCapabilities =
+          const HostPrivacyScreenCapabilities.unavailable(
+            limitation: '当前构建未包含隐私屏后端',
+          );
+    } catch (error) {
+      _privacyScreenCapabilities = HostPrivacyScreenCapabilities.unavailable(
+        limitation: '隐私屏能力检测失败：$error',
+      );
+    }
+  }
+
+  Future<void> _activateRequiredPrivacyScreen() async {
+    final provider = _privacyScreenProvider;
+    await _refreshPrivacyScreenCapabilities();
+    if (provider == null ||
+        !_privacyScreenCapabilities.canStartStandardPrivacyScreen) {
+      throw StateError(
+        _privacyScreenCapabilities.limitation ?? '当前环境无法启用标准隐私屏',
+      );
+    }
+    _privacyScreenStatus = HostPrivacyScreenStatus(
+      phase: HostPrivacyScreenPhase.preparing,
+      coveredDisplayCount: 0,
+      expectedDisplayCount: _privacyScreenCapabilities.displayCount,
+      captureExcluded: false,
+    );
     notifyListeners();
+    try {
+      final status = await provider.activatePrivacyScreen(
+        sessionId: _kernel.sessionId ?? _trustedRouteSessionId ?? 'session',
+        controllerLabel: _remoteDeviceId ?? '远程设备',
+      );
+      if (!status.isFullyActive) {
+        throw StateError(status.failureReason ?? '隐私屏未覆盖全部显示器');
+      }
+      _privacyScreenStatus = status;
+      _startPrivacyScreenHealthMonitoring();
+      _publishHostState();
+      notifyListeners();
+    } catch (error) {
+      try {
+        await provider.deactivatePrivacyScreen();
+      } catch (_) {}
+      _privacyScreenStatus = HostPrivacyScreenStatus(
+        phase: HostPrivacyScreenPhase.failed,
+        coveredDisplayCount: 0,
+        expectedDisplayCount: _privacyScreenCapabilities.displayCount,
+        captureExcluded: false,
+        failureReason: error.toString(),
+      );
+      notifyListeners();
+      throw StateError('隐私屏启动失败，已拒绝远程连接：$error');
+    }
+  }
+
+  Future<void> _deactivatePrivacyScreen() async {
+    if (role != RemoteRole.host) return;
+    _privacyScreenHealthTimer?.cancel();
+    _privacyScreenHealthTimer = null;
+    final provider = _privacyScreenProvider;
+    if (provider == null) {
+      _privacyScreenStatus = const HostPrivacyScreenStatus.inactive();
+      return;
+    }
+    if (_privacyScreenStatus.phase != HostPrivacyScreenPhase.inactive) {
+      _privacyScreenStatus = HostPrivacyScreenStatus(
+        phase: HostPrivacyScreenPhase.restoring,
+        coveredDisplayCount: _privacyScreenStatus.coveredDisplayCount,
+        expectedDisplayCount: _privacyScreenStatus.expectedDisplayCount,
+        captureExcluded: _privacyScreenStatus.captureExcluded,
+      );
+      notifyListeners();
+    }
+    try {
+      await provider.deactivatePrivacyScreen();
+    } finally {
+      _privacyScreenStatus = const HostPrivacyScreenStatus.inactive();
+      notifyListeners();
+    }
+  }
+
+  void _startPrivacyScreenHealthMonitoring() {
+    _privacyScreenHealthTimer?.cancel();
+    _privacyScreenHealthTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_checkPrivacyScreenHealth()),
+    );
+  }
+
+  Future<void> _checkPrivacyScreenHealth() async {
+    if (_checkingPrivacyScreenHealth ||
+        _closing ||
+        _hostPrivacyMode != HostPrivacyMode.standardRequired ||
+        _localStream == null) {
+      return;
+    }
+    final provider = _privacyScreenProvider;
+    if (provider == null) return;
+    _checkingPrivacyScreenHealth = true;
+    try {
+      final status = await provider.getPrivacyScreenStatus();
+      _privacyScreenStatus = status;
+      if (!status.isFullyActive) {
+        _emitNotice('隐私屏覆盖失效，已安全终止远程会话', level: RemoteNoticeLevel.error);
+        await _closeSession(notifyPeer: true, closeSignaling: false);
+        return;
+      }
+      notifyListeners();
+    } catch (error) {
+      _privacyScreenStatus = HostPrivacyScreenStatus(
+        phase: HostPrivacyScreenPhase.failed,
+        coveredDisplayCount: 0,
+        expectedDisplayCount: _privacyScreenCapabilities.displayCount,
+        captureExcluded: false,
+        failureReason: error.toString(),
+      );
+      _emitNotice('无法确认隐私屏状态，已安全终止远程会话', level: RemoteNoticeLevel.error);
+      await _closeSession(notifyPeer: true, closeSignaling: false);
+    } finally {
+      _checkingPrivacyScreenHealth = false;
+    }
   }
 
   Future<void> _awaitHostRuntimeReady() async {
@@ -8011,6 +8289,8 @@ class RemoteSessionController extends ChangeNotifier
     _displaySwitchRequestTimer = null;
     _mediaStatsTimer?.cancel();
     _mediaStatsTimer = null;
+    _privacyScreenHealthTimer?.cancel();
+    _privacyScreenHealthTimer = null;
     _windowsCaptureRecoveryGeneration += 1;
     await _displayAddedSubscription?.cancel();
     _displayAddedSubscription = null;
@@ -8031,6 +8311,7 @@ class RemoteSessionController extends ChangeNotifier
     }
     await _localStream?.dispose();
     _localStream = null;
+    await _deactivatePrivacyScreen();
     _videoSender = null;
     _videoReceiver = null;
     _audioSender = null;
@@ -8081,6 +8362,8 @@ class RemoteSessionController extends ChangeNotifier
     _remoteSupportsMultiDisplayStreamV1 = false;
     _remoteSupportsSystemAudioCaptureV1 = false;
     _remoteSupportsAudioPlaybackV1 = false;
+    _remoteSupportsPrivacyScreenV1 = false;
+    _remotePrivacyScreenStatus = const HostPrivacyScreenStatus.inactive();
     _remoteSupportsTrustedDeviceAuthentication = false;
     _remoteSupportsTransactionalTrustedPairing = false;
     _remoteSupportsHostOwnedTrustedPolicy = false;
@@ -8115,6 +8398,8 @@ class RemoteSessionController extends ChangeNotifier
     _receiverColorConversion = null;
     _mediaDiagnostics = null;
     _mediaStatsAccumulator.reset();
+    _diagnosticMediaSampleCounter = 0;
+    _lastMediaStatsDiagnosticErrorAt = null;
     _qualityAdaptation.reset();
     _colorDiagnostics = null;
     if (role == RemoteRole.controller) {

@@ -249,7 +249,6 @@
 					33CC10EC2044A3C60003C045 = {
 						CreatedOnToolsVersion = 9.2;
 						LastSwiftMigration = 1100;
-						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.Sandbox = {
 								enabled = 1;
@@ -514,6 +513,7 @@
 				CDR_BASE_ENTITLEMENTS = Runner/DebugProfile.entitlements;
 				CDR_HARDWARE_ENTITLEMENTS = Runner/HardwareIdentityDebugProfile.entitlements;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 9QBFQT7ZG9;
@@ -646,6 +646,7 @@
 				CDR_BASE_ENTITLEMENTS = Runner/DebugProfile.entitlements;
 				CDR_HARDWARE_ENTITLEMENTS = Runner/HardwareIdentityDebugProfile.entitlements;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 9QBFQT7ZG9;
@@ -668,6 +669,7 @@
 				CDR_BASE_ENTITLEMENTS = Runner/Release.entitlements;
 				CDR_HARDWARE_ENTITLEMENTS = Runner/HardwareIdentityRelease.entitlements;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 9QBFQT7ZG9;

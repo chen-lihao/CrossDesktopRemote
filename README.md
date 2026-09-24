@@ -2,7 +2,7 @@
 
 CrossDesktopRemote 是一个面向个人远程办公、临时技术支持、无人值守运维和专业图形工作的跨平台远程桌面项目。目标是在 Windows、macOS、Linux、Android、iOS/iPadOS 之间提供低延迟、高帧率、2K–4K 画质、原文件传输、多显示器、剪贴板和安全会话能力。
 
-> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 启动并连接信令服务后自动进入可连接状态。每台客户端会生成不可编辑的安装级机器码；文本剪贴板和 Mac/Windows/iPad 显式文件传输已接入。桌面文件复制粘贴已改为统一的 `Offer → PasteIntent → DestinationLease → 显式传输 → Commit` 事务。会话具有稳定 `sessionId`，本地历史使用 SQLite 分页并以 AES-GCM 加密敏感元数据；远程画面从设备页拆为独立工作区。控制端现以 `stream + trackId + generation` 原子绑定远端视频并使用有界首帧门禁。macOS/Windows 被控端的系统声音已接入独立 WebRTC 音频轨道，默认关闭且由被控端权限控制；Windows MSVC 与三端音视频物理验收仍未完成。
+> 当前状态：**M0 工程基线已完成，M1 Apple 与 M1B Windows 双向原型进行中。** iPad→Mac 基本连接、画面和远程输入已验证；Mac/Windows 启动并连接信令服务后自动进入可连接状态。每台客户端会生成不可编辑的安装级机器码；文本剪贴板和 Mac/Windows/iPad 显式文件传输已接入。桌面文件复制粘贴已改为统一的 `Offer → PasteIntent → DestinationLease → 显式传输 → Commit` 事务。会话具有稳定 `sessionId`，本地历史使用 SQLite 分页并以 AES-GCM 加密敏感元数据；远程画面从设备页拆为独立工作区。控制端现以 `stream + trackId + generation` 原子绑定远端视频并使用有界首帧门禁。macOS/Windows 被控端的系统声音已接入独立 WebRTC 音频轨道，并新增失败关闭的标准隐私屏；Windows MSVC 与三端音视频/隐私屏物理验收仍未完成。
 
 ## 项目定位
 
@@ -81,6 +81,7 @@ flowchart LR
 - M1 Apple 原型由项目内维护的 `flutter_webrtc 1.6.0` fork 在原生层完成媒体与视频视图，Dart 只管理会话和小型控制消息；fork 明确约束 macOS SDR/Rec.709/Video-Range 采集，阶段结束后再根据性能数据决定继续维护或迁移到自有媒体适配器。
 - 视频走原生 GPU 采集、硬编、WebRTC、硬解和原生 Texture 路径。
 - 系统声音走独立原生采集与 WebRTC 音频轨道，不进入 Dart；音频生命周期不依附显示器切换。
+- 标准隐私屏先覆盖全部本机显示器并从屏幕采集中排除自身，再允许启动远程画面；覆盖失效立即终止会话。
 - 屏幕、输入、文件和剪贴板优先在两端 P2P 传输；TURN 只转发加密数据。
 - 生产目标仍是文件/剪贴板字节停留在 Rust 和平台原生层。阶段 3 桌面 MVP 因当前 `flutter_webrtc` DataChannel 只暴露 Dart API，使用独立应用服务转发有界 16 KiB 二进制帧，SHA-256 在工作 Isolate 执行且不进入 Widget 树；完成 20 GB 和输入 P95 门禁前需把磁盘数据泵下沉到 Rust/原生层。旧客户端缺少数据能力字段时仅关闭新增功能。
 - coturn 独立部署，不使用 Java 重写 STUN/TURN 数据面。
@@ -366,6 +367,7 @@ flutter build ios --simulator --debug
 - [Windows 被控端首轮验收](./docs/Windows被控端验收.md)
 - [文件与剪贴板传输协议](./docs/文件与剪贴板传输协议.md)
 - [可信设备认证](./docs/可信设备认证.md)
+- [诊断与日志](./docs/诊断与日志.md)
 
 ## 工程复现方式
 

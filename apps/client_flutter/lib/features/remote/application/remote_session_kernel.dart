@@ -16,33 +16,69 @@ class RemoteSessionKernel {
       StreamController<RemoteSessionDomainEvent>.broadcast(sync: true);
 
   String? _sessionId;
+  String? _traceId;
+  String? _attemptId;
   String? _remoteDeviceId;
   DateTime? _openedAt;
   bool _closed = false;
 
   Stream<RemoteSessionDomainEvent> get events => _events.stream;
   String? get sessionId => _sessionId;
+  String? get traceId => _traceId;
+  String? get attemptId => _attemptId;
   String? get remoteDeviceId => _remoteDeviceId;
   DateTime? get openedAt => _openedAt;
 
-  String begin({required String localDeviceId, DateTime? occurredAt}) {
+  String begin({
+    required String localDeviceId,
+    DateTime? occurredAt,
+    String? traceId,
+    String? attemptId,
+  }) {
     if (_sessionId != null && !_closed) {
       end(outcome: 'superseded', occurredAt: occurredAt);
     }
     final now = occurredAt ?? DateTime.now();
     _sessionId = _newOpaqueId();
+    _traceId = traceId ?? _newOpaqueId();
+    _attemptId = attemptId ?? _newOpaqueId();
     _remoteDeviceId = null;
     _openedAt = now;
     _closed = false;
     _emit(
       RemoteSessionOpenedEvent(
         sessionId: _sessionId!,
+        traceId: _traceId!,
+        attemptId: _attemptId!,
         occurredAt: now,
         role: role,
         localDeviceId: localDeviceId,
       ),
     );
     return _sessionId!;
+  }
+
+  void adoptConnectionTraceId(String? value, {DateTime? occurredAt}) {
+    final normalized = value?.trim().toLowerCase();
+    final sessionId = _sessionId;
+    if (sessionId == null ||
+        _closed ||
+        normalized == null ||
+        !RegExp(r'^[0-9a-f]{32}$').hasMatch(normalized) ||
+        normalized == _traceId) {
+      return;
+    }
+    final previous = _traceId!;
+    _traceId = normalized;
+    _emit(
+      RemoteSessionTraceChangedEvent(
+        sessionId: sessionId,
+        traceId: normalized,
+        attemptId: _attemptId!,
+        occurredAt: occurredAt ?? DateTime.now(),
+        previousTraceId: previous,
+      ),
+    );
   }
 
   void updatePeer(String? remoteDeviceId, {DateTime? occurredAt}) {
@@ -53,6 +89,8 @@ class RemoteSessionKernel {
     _emit(
       RemoteSessionPeerChangedEvent(
         sessionId: id,
+        traceId: _traceId!,
+        attemptId: _attemptId!,
         occurredAt: occurredAt ?? DateTime.now(),
         remoteDeviceId: _remoteDeviceId,
       ),
@@ -69,6 +107,8 @@ class RemoteSessionKernel {
     _emit(
       RemoteSessionStateChangedEvent(
         sessionId: id,
+        traceId: _traceId!,
+        attemptId: _attemptId!,
         occurredAt: occurredAt ?? DateTime.now(),
         state: state,
         message: message,
@@ -91,6 +131,8 @@ class RemoteSessionKernel {
     _emit(
       RemoteTransferChangedEvent(
         sessionId: id,
+        traceId: _traceId!,
+        attemptId: _attemptId!,
         occurredAt: occurredAt ?? DateTime.now(),
         transferId: transferId,
         direction: direction,
@@ -110,6 +152,8 @@ class RemoteSessionKernel {
     _emit(
       RemoteSessionClosedEvent(
         sessionId: id,
+        traceId: _traceId!,
+        attemptId: _attemptId!,
         occurredAt: occurredAt ?? DateTime.now(),
         outcome: outcome,
       ),
@@ -127,16 +171,22 @@ class RemoteSessionKernel {
 sealed class RemoteSessionDomainEvent {
   const RemoteSessionDomainEvent({
     required this.sessionId,
+    required this.traceId,
+    required this.attemptId,
     required this.occurredAt,
   });
 
   final String sessionId;
+  final String traceId;
+  final String attemptId;
   final DateTime occurredAt;
 }
 
 class RemoteSessionOpenedEvent extends RemoteSessionDomainEvent {
   const RemoteSessionOpenedEvent({
     required super.sessionId,
+    required super.traceId,
+    required super.attemptId,
     required super.occurredAt,
     required this.role,
     required this.localDeviceId,
@@ -146,9 +196,23 @@ class RemoteSessionOpenedEvent extends RemoteSessionDomainEvent {
   final String localDeviceId;
 }
 
+class RemoteSessionTraceChangedEvent extends RemoteSessionDomainEvent {
+  const RemoteSessionTraceChangedEvent({
+    required super.sessionId,
+    required super.traceId,
+    required super.attemptId,
+    required super.occurredAt,
+    required this.previousTraceId,
+  });
+
+  final String previousTraceId;
+}
+
 class RemoteSessionPeerChangedEvent extends RemoteSessionDomainEvent {
   const RemoteSessionPeerChangedEvent({
     required super.sessionId,
+    required super.traceId,
+    required super.attemptId,
     required super.occurredAt,
     required this.remoteDeviceId,
   });
@@ -159,6 +223,8 @@ class RemoteSessionPeerChangedEvent extends RemoteSessionDomainEvent {
 class RemoteSessionStateChangedEvent extends RemoteSessionDomainEvent {
   const RemoteSessionStateChangedEvent({
     required super.sessionId,
+    required super.traceId,
+    required super.attemptId,
     required super.occurredAt,
     required this.state,
     required this.message,
@@ -171,6 +237,8 @@ class RemoteSessionStateChangedEvent extends RemoteSessionDomainEvent {
 class RemoteSessionClosedEvent extends RemoteSessionDomainEvent {
   const RemoteSessionClosedEvent({
     required super.sessionId,
+    required super.traceId,
+    required super.attemptId,
     required super.occurredAt,
     required this.outcome,
   });
@@ -181,6 +249,8 @@ class RemoteSessionClosedEvent extends RemoteSessionDomainEvent {
 class RemoteTransferChangedEvent extends RemoteSessionDomainEvent {
   const RemoteTransferChangedEvent({
     required super.sessionId,
+    required super.traceId,
+    required super.attemptId,
     required super.occurredAt,
     required this.transferId,
     required this.direction,

@@ -19,6 +19,8 @@ void main() {
       deviceId: '0123456789abcdef0123456789abcdef',
       clientPlatform: 'Windows',
       clientCapabilities: const ['active-content-geometry-v2'],
+      traceId: '11111111111111111111111111111111',
+      attemptId: '22222222222222222222222222222222',
     );
 
     expect(endpoint.scheme, 'ws');
@@ -30,6 +32,14 @@ void main() {
       '0123456789abcdef0123456789abcdef',
     );
     expect(endpoint.queryParameters['platform'], 'windows');
+    expect(
+      endpoint.queryParameters['traceId'],
+      '11111111111111111111111111111111',
+    );
+    expect(
+      endpoint.queryParameters['attemptId'],
+      '22222222222222222222222222222222',
+    );
     expect(
       endpoint.queryParameters['capabilities'],
       'active-content-geometry-v2',

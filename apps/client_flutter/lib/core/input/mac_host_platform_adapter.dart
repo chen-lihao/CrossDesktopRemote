@@ -1,11 +1,19 @@
 import 'package:cross_desktop_remote/core/input/host_platform_adapter.dart';
 import 'package:cross_desktop_remote/core/input/mac_input_bridge.dart';
+import 'package:cross_desktop_remote/core/privacy/host_privacy_screen.dart';
 
 class MacHostPlatformAdapter
-    implements HostPlatformAdapter, HostRuntimeStateProvider {
-  const MacHostPlatformAdapter({this.bridge = const MacInputBridge()});
+    implements
+        HostPlatformAdapter,
+        HostRuntimeStateProvider,
+        HostPrivacyScreenProvider {
+  const MacHostPlatformAdapter({
+    this.bridge = const MacInputBridge(),
+    this.privacyBridge = const MethodChannelHostPrivacyScreenBridge(),
+  });
 
   final MacInputBridge bridge;
+  final HostPrivacyScreenBridge privacyBridge;
 
   @override
   HostPlatformType get type => HostPlatformType.macOS;
@@ -158,4 +166,24 @@ class MacHostPlatformAdapter
 
   @override
   Future<bool> openDisplaySettings() => bridge.openDisplaySettings();
+
+  @override
+  Future<HostPrivacyScreenCapabilities> getPrivacyScreenCapabilities() =>
+      privacyBridge.getCapabilities();
+
+  @override
+  Future<HostPrivacyScreenStatus> activatePrivacyScreen({
+    required String sessionId,
+    required String controllerLabel,
+  }) => privacyBridge.activate(
+    sessionId: sessionId,
+    controllerLabel: controllerLabel,
+  );
+
+  @override
+  Future<HostPrivacyScreenStatus> getPrivacyScreenStatus() =>
+      privacyBridge.getStatus();
+
+  @override
+  Future<void> deactivatePrivacyScreen() => privacyBridge.deactivate();
 }
