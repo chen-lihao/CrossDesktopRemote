@@ -6926,7 +6926,9 @@ class RemoteSessionController extends ChangeNotifier
       await _activateRequiredPrivacyScreen();
     }
     try {
+      _recordHostMediaStage('screen_capture_start_requested');
       final stream = await _captureDisplay(selectedSource);
+      _recordHostMediaStage('screen_capture_running');
       _localStream = stream;
       _screenCaptureGranted = true;
       for (final track in stream.getVideoTracks()) {
@@ -6940,7 +6942,15 @@ class RemoteSessionController extends ChangeNotifier
       _publishDisplayList();
       unawaited(_publishColorDiagnostics());
       notifyListeners();
-    } catch (_) {
+    } catch (error, stackTrace) {
+      _recordHostMediaStage(
+        'screen_capture_start_failed',
+        severity: DiagnosticSeverity.error,
+        attributes: {
+          'errorType': error.runtimeType.toString(),
+          'error': error.toString(),
+        },
+      );
       await _serializeSystemAudioMutation(_stopHostSystemAudio);
       final failedStream = _localStream;
       _localStream = null;
@@ -6949,7 +6959,7 @@ class RemoteSessionController extends ChangeNotifier
         await _disposeMediaStream(failedStream);
       }
       await _deactivatePrivacyScreen();
-      rethrow;
+      Error.throwWithStackTrace(error, stackTrace);
     }
   }
 
@@ -7148,6 +7158,25 @@ class RemoteSessionController extends ChangeNotifier
     );
   }
 
+  void _recordHostMediaStage(
+    String stage, {
+    DiagnosticSeverity severity = DiagnosticSeverity.info,
+    Map<String, Object?> attributes = const {},
+  }) {
+    DiagnosticHub.instance.record(
+      component: 'host.media_lifecycle',
+      name: stage,
+      severity: severity,
+      context: DiagnosticContext(
+        traceId: _kernel.traceId,
+        attemptId: _kernel.attemptId,
+        sessionId: _kernel.sessionId,
+        role: role.name,
+      ),
+      attributes: attributes,
+    );
+  }
+
   void _startPrivacyScreenHealthMonitoring() {
     _privacyScreenHealthTimer?.cancel();
     _privacyScreenHealthTimer = Timer.periodic(
@@ -7261,6 +7290,7 @@ class RemoteSessionController extends ChangeNotifier
       return;
     }
     _systemAudioState = RemoteSystemAudioState.requesting;
+    _recordHostMediaStage('system_audio_start_requested');
     notifyListeners();
     try {
       final stream = await _systemAudioCapture.start();
@@ -7280,10 +7310,19 @@ class RemoteSessionController extends ChangeNotifier
       await sender.replaceTrack(tracks.single);
       await _configureSystemAudioSender(sender);
       _systemAudioState = RemoteSystemAudioState.sending;
+      _recordHostMediaStage('system_audio_sending');
       _publishHostState();
       notifyListeners();
     } catch (error) {
       if (generation != _systemAudioGeneration) return;
+      _recordHostMediaStage(
+        'system_audio_start_failed',
+        severity: DiagnosticSeverity.warning,
+        attributes: {
+          'errorType': error.runtimeType.toString(),
+          'error': error.toString(),
+        },
+      );
       await _stopHostSystemAudio();
       _systemAudioState = RemoteSystemAudioState.failed;
       _emitNotice('系统声音共享不可用，视频会话继续：$error', level: RemoteNoticeLevel.warning);

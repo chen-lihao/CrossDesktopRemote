@@ -49,30 +49,60 @@ void main() {
     },
   );
 
-  test('privacy windows have one ARC owner and disable AppKit auto release', () {
-    final source = _source(runnerSource);
+  test('getDisplayMedia resolves only after ScreenCaptureKit is running', () {
+    final desktopSource = _source('$pluginRoot/FlutterRTCDesktopCapturer.m');
+    final captureSource = _source(
+      '$pluginRoot/FlutterScreenCaptureKitCapturer.m',
+    );
+    final systemAudioSource = _source(
+      '$pluginRoot/FlutterRTCSystemAudioCapturer.m',
+    );
 
     expect(
-      source,
-      contains(
-        'class CrossDesktopRemotePrivacyWindowController: NSWindowController',
-      ),
+      desktopSource,
+      contains('screenCaptureKitMediaResult = mediaResult'),
     );
-    expect(source, contains('privacyWindow.isReleasedWhenClosed = false'));
+    expect(desktopSource, contains('result(screenCaptureKitMediaResult)'));
     expect(
-      source,
-      contains(
-        'windowControllers: [CrossDesktopRemotePrivacyWindowController]',
-      ),
+      captureSource,
+      contains('self.captureLifecycleState = CDRCaptureLifecycleStateRunning'),
     );
-    expect(source, isNot(contains('private var windows: [NSWindow]')));
+    expect(captureSource, contains('- (BOOL)isCaptureRunning'));
+    expect(
+      systemAudioSource,
+      contains('if (!screenCapturer.isCaptureRunning)'),
+    );
   });
+
+  test(
+    'privacy windows have one ARC owner and disable AppKit auto release',
+    () {
+      final source = _source(runnerSource);
+
+      expect(
+        source,
+        contains(
+          'class CrossDesktopRemotePrivacyWindowController: NSWindowController',
+        ),
+      );
+      expect(source, contains('privacyWindow.isReleasedWhenClosed = false'));
+      expect(
+        source,
+        contains(
+          'windowControllers: [CrossDesktopRemotePrivacyWindowController]',
+        ),
+      );
+      expect(source, isNot(contains('private var windows: [NSWindow]')));
+    },
+  );
 
   test('all privacy-window teardown uses the controller close boundary', () {
     final source = _source(runnerSource);
     final closeBoundary = source.substring(
       source.indexOf('private func closePrivacyWindows()'),
-      source.indexOf('\n  }\n}\n\nfunc crossDesktopRemoteAbsolutePointerPosition'),
+      source.indexOf(
+        '\n  }\n}\n\nfunc crossDesktopRemoteAbsolutePointerPosition',
+      ),
     );
 
     expect(closeBoundary, contains('let controllers = windowControllers'));

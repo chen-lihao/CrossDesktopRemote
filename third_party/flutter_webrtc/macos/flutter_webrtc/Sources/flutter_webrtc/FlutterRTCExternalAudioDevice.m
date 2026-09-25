@@ -406,10 +406,11 @@ static OSStatus FlutterRTCPlayoutCallback(void* context,
 - (NSDictionary<NSString*, id>*)backendInfo {
   return @{
     @"backend" : @"screen-capture-kit-external-adm",
-    @"version" : @4,
+    @"version" : @5,
     @"microphoneFree" : @YES,
     @"deliveryMode" : @"capture-clock-render-block",
     @"captureOwner" : @"unified-screen-stream",
+    @"startupContract" : @"capture-ready-before-media-result",
     @"sampleRate" : @((NSInteger)FlutterRTCAudioSampleRate),
     @"channels" : @(FlutterRTCAudioChannels),
     @"sourceAttached" : @(self.isSystemAudioSourceAttached),

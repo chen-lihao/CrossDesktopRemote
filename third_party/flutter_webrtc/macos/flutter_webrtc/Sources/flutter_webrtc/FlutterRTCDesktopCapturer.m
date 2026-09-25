@@ -151,7 +151,8 @@ NSArray<RTCDesktopSource*>* _captureSources;
   }
   [videoProcessingAdapter setPreferredFramesPerSecond:fps];
   RTCDesktopCapturer* desktopCapturer;
-  FlutterScreenCaptureKitCapturer* screenCaptureKitCapturer = nil;
+  __block FlutterScreenCaptureKitCapturer* screenCaptureKitCapturer = nil;
+  __block NSDictionary* screenCaptureKitMediaResult = nil;
   RTCDesktopSource* source = nil;
   BOOL useScreenCaptureKit = NO;
 
@@ -186,9 +187,28 @@ NSArray<RTCDesktopSource*>* _captureSources;
                                           onStarted:^(NSError * _Nullable error) {
                                             if (error != nil) {
                                               NSLog(@"ScreenCaptureKit start failed: %@", error);
+                                              [self.screenCaptureKitCapturers
+                                                  removeObjectForKey:trackUUID];
+                                              [self.videoCapturerStopHandlers
+                                                  removeObjectForKey:trackUUID];
+                                              [self.localTracks removeObjectForKey:trackUUID];
+                                              [self.localStreams
+                                                  removeObjectForKey:mediaStreamId];
+                                              result([FlutterError
+                                                  errorWithCode:@"SCREEN_CAPTURE_START_FAILED"
+                                                         message:error.localizedDescription
+                                                         details:nil]);
                                             } else {
                                               NSLog(@"start screencapturekit capture: for  sourceId: %@, fps: %lu",
                                                     sourceId, fps);
+                                              if (screenCaptureKitMediaResult == nil) {
+                                                result([FlutterError
+                                                    errorWithCode:@"SCREEN_CAPTURE_START_FAILED"
+                                                           message:@"Screen capture started without a media result"
+                                                           details:nil]);
+                                              } else {
+                                                result(screenCaptureKitMediaResult);
+                                              }
                                             }
                                           }];
     } else {
@@ -243,8 +263,17 @@ NSArray<RTCDesktopSource*>* _captureSources;
   }
 
   self.localStreams[mediaStreamId] = mediaStream;
-  result(
-      @{@"streamId" : mediaStreamId, @"audioTracks" : audioTracks, @"videoTracks" : videoTracks});
+  NSDictionary* mediaResult =
+      @{@"streamId" : mediaStreamId, @"audioTracks" : audioTracks, @"videoTracks" : videoTracks};
+  if (screenCaptureKitCapturer != nil) {
+    // ScreenCaptureKit creation is asynchronous. Resolve getDisplayMedia only
+    // after startCapture has acknowledged a running native graph; returning a
+    // Dart track earlier lets dependent system-audio startup race an empty
+    // SCStream and violates the MediaDevices readiness contract.
+    screenCaptureKitMediaResult = mediaResult;
+  } else {
+    result(mediaResult);
+  }
 }
 
 - (void)switchDesktopCaptureSource:(NSDictionary*)argsMap result:(FlutterResult)result {

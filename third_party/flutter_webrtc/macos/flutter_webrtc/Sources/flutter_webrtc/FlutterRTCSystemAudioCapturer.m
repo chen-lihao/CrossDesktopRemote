@@ -98,9 +98,16 @@ static NSString* const FlutterSystemAudioErrorDomain = @"FlutterSystemAudioCaptu
                                  details:@{ @"activeScreenCapturers" : @(screenCapturers.count) }]);
       return;
     }
+    FlutterScreenCaptureKitCapturer* screenCapturer = screenCapturers.firstObject;
+    if (!screenCapturer.isCaptureRunning) {
+      result([FlutterError errorWithCode:@"SystemAudioScreenSessionNotReady"
+                                 message:@"System audio requires a running screen capture session"
+                                 details:nil]);
+      return;
+    }
     FlutterSystemAudioCapturer* capturer =
         [[FlutterSystemAudioCapturer alloc] initWithAudioDevice:audioDevice
-                                                screenCapturer:screenCapturers.firstObject];
+                                                screenCapturer:screenCapturer];
     self.systemAudioCapturer = capturer;
     __weak FlutterWebRTCPlugin* weakSelf = self;
     [capturer startWithCompletion:^(NSError* _Nullable error) {

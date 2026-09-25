@@ -7,6 +7,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface FlutterScreenCaptureKitCapturer : NSObject
 
+/// True only after ScreenCaptureKit has acknowledged startCapture. All media
+/// consumers use this readiness boundary instead of treating construction of
+/// the Dart video track as proof that the native capture graph is running.
+@property(nonatomic, readonly, getter=isCaptureRunning) BOOL captureRunning;
+
 - (instancetype)initWithDelegate:(id<RTCVideoCapturerDelegate>)delegate;
 
 /// Keeps ScreenCaptureKit's visible content geometry inside the canonical

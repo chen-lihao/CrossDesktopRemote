@@ -18,6 +18,13 @@
 typedef void (^CDRCaptureSwitchCompletion)(
     NSDictionary<NSString *, id> * _Nullable configuration,
     NSError * _Nullable error);
+
+typedef NS_ENUM(NSInteger, CDRCaptureLifecycleState) {
+  CDRCaptureLifecycleStateIdle,
+  CDRCaptureLifecycleStateStarting,
+  CDRCaptureLifecycleStateRunning,
+  CDRCaptureLifecycleStateStopping,
+};
 #endif
 
 @interface FlutterScreenCaptureKitCapturer ()
@@ -89,6 +96,8 @@ typedef void (^CDRCaptureSwitchCompletion)(
 @property(nonatomic, strong) SCStreamConfiguration *streamConfiguration;
 @property(nonatomic, strong) SCStreamConfiguration *pendingStreamConfiguration;
 @property(nonatomic, strong) SCStreamConfiguration *retiredStreamConfiguration;
+@property(nonatomic, assign) CDRCaptureLifecycleState captureLifecycleState;
+@property(nonatomic, assign) NSUInteger captureLifecycleGeneration;
 #endif
 @end
 
@@ -112,6 +121,8 @@ static NSString *CDRFourCCName(OSType pixelFormat) {
   NSString *fourCC = [NSString stringWithCString:value encoding:NSMacOSRomanStringEncoding];
   return fourCC ?: [NSString stringWithFormat:@"0x%08x", (unsigned int)pixelFormat];
 }
+
+static void *CDRCaptureQueueSpecificKey = &CDRCaptureQueueSpecificKey;
 
 static NSString *CDRPixelRangeName(OSType pixelFormat) {
   if (pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
@@ -504,16 +515,43 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
     _delegate = delegate;
     _capturer = [[RTCVideoCapturer alloc] initWithDelegate:delegate];
     _captureQueue = dispatch_queue_create("com.iperius.sck.capture", DISPATCH_QUEUE_SERIAL);
+    dispatch_queue_set_specific(
+        _captureQueue,
+        CDRCaptureQueueSpecificKey,
+        CDRCaptureQueueSpecificKey,
+        NULL);
     _excludedWindowIds = @[];
     if (@available(macOS 13.0, *)) {
       _audioOutputStreams = [NSHashTable weakObjectsHashTable];
     }
+#if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
+    _captureLifecycleState = CDRCaptureLifecycleStateIdle;
+    _captureLifecycleGeneration = 0;
+#endif
     id<MTLDevice> metalDevice = MTLCreateSystemDefaultDevice();
     _colorContext = metalDevice != nil
         ? [CIContext contextWithMTLDevice:metalDevice options:nil]
         : [CIContext contextWithOptions:nil];
   }
   return self;
+}
+
+- (BOOL)isCaptureRunning {
+#if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
+  if (@available(macOS 12.3, *)) {
+    if (dispatch_get_specific(CDRCaptureQueueSpecificKey) != NULL) {
+      return self.captureLifecycleState == CDRCaptureLifecycleStateRunning &&
+          self.stream != nil && self.streamConfiguration != nil;
+    }
+    __block BOOL running = NO;
+    dispatch_sync(self.captureQueue, ^{
+      running = self.captureLifecycleState == CDRCaptureLifecycleStateRunning &&
+          self.stream != nil && self.streamConfiguration != nil;
+    });
+    return running;
+  }
+#endif
+  return NO;
 }
 
 - (void)configureExcludedWindowIds:(NSArray<NSNumber *> *)windowIds {
@@ -533,12 +571,13 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
     dispatch_async(self.captureQueue, ^{
       SCStream *stream = self.stream;
       SCStreamConfiguration *configuration = self.streamConfiguration;
-      if (stream == nil || configuration == nil) {
+      if (self.captureLifecycleState != CDRCaptureLifecycleStateRunning ||
+          stream == nil || configuration == nil) {
         NSError *error = [NSError
             errorWithDomain:@"FlutterScreenCaptureKit"
                        code:-13
                    userInfo:@{NSLocalizedDescriptionKey:
-                                  @"Screen capture must be running before system audio starts"}];
+                                  @"System audio requires a running screen capture session"}];
         dispatch_async(dispatch_get_main_queue(), ^{ completion(error); });
         return;
       }
@@ -941,60 +980,127 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
                   onStarted:(void (^)(NSError * _Nullable error))onStarted {
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
   if (@available(macOS 12.3, *)) {
-    self.sourceId = sourceId ?: @"";
-    self.emittedColorDiagnostics = NO;
-    self.emittedFirstFrame = NO;
-    [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent *content, NSError *error) {
-      if (error != nil) {
-        onStarted(error);
+    __block NSUInteger lifecycleGeneration = 0;
+    __block NSError *busyError = nil;
+    dispatch_sync(self.captureQueue, ^{
+      if (self.captureLifecycleState != CDRCaptureLifecycleStateIdle) {
+        busyError = [NSError errorWithDomain:@"FlutterScreenCaptureKit"
+                                        code:-15
+                                    userInfo:@{
+                                      NSLocalizedDescriptionKey:
+                                          @"Screen capture lifecycle is already active"
+                                    }];
         return;
       }
+      self.captureLifecycleState = CDRCaptureLifecycleStateStarting;
+      self.captureLifecycleGeneration += 1;
+      lifecycleGeneration = self.captureLifecycleGeneration;
+      self.sourceId = sourceId ?: @"";
+      self.emittedColorDiagnostics = NO;
+      self.emittedFirstFrame = NO;
+    });
+    if (busyError != nil) {
+      dispatch_async(dispatch_get_main_queue(), ^{ onStarted(busyError); });
+      return;
+    }
 
-      SCDisplay *display = [self selectDisplayFromContent:content sourceId:sourceId];
-      if (display == nil) {
-        NSError *noDisplay = [NSError errorWithDomain:@"FlutterScreenCaptureKit"
-                                                 code:-1
-                                             userInfo:@{NSLocalizedDescriptionKey: @"No matching display"}];
-        onStarted(noDisplay);
-        return;
-      }
+    void (^completeStart)(NSError * _Nullable) = ^(NSError * _Nullable error) {
+      dispatch_async(dispatch_get_main_queue(), ^{ onStarted(error); });
+    };
+    NSError *(^cancelledError)(void) = ^NSError *{
+      return [NSError errorWithDomain:@"FlutterScreenCaptureKit"
+                                 code:-16
+                             userInfo:@{
+                               NSLocalizedDescriptionKey:
+                                   @"Screen capture start was superseded"
+                             }];
+    };
 
-      NSError *filterError = nil;
-      SCContentFilter *filter = [self contentFilterForContent:content
-                                                      display:display
-                                                        error:&filterError];
-      if (filter == nil) {
-        onStarted(filterError);
-        return;
-      }
-      SCStreamConfiguration *config =
-          [self streamConfigurationForDisplay:display
-                                       filter:filter
-                                          fps:fps
-                               targetLongEdge:targetLongEdge];
-
+    [SCShareableContent
+        getShareableContentWithCompletionHandler:^(SCShareableContent *content,
+                                                    NSError *error) {
       dispatch_async(self.captureQueue, ^{
+        if (lifecycleGeneration != self.captureLifecycleGeneration ||
+            self.captureLifecycleState != CDRCaptureLifecycleStateStarting) {
+          completeStart(cancelledError());
+          return;
+        }
+        if (error != nil) {
+          self.captureLifecycleState = CDRCaptureLifecycleStateIdle;
+          completeStart(error);
+          return;
+        }
+
+        SCDisplay *display = [self selectDisplayFromContent:content sourceId:sourceId];
+        if (display == nil) {
+          self.captureLifecycleState = CDRCaptureLifecycleStateIdle;
+          NSError *noDisplay = [NSError
+              errorWithDomain:@"FlutterScreenCaptureKit"
+                         code:-1
+                     userInfo:@{NSLocalizedDescriptionKey: @"No matching display"}];
+          completeStart(noDisplay);
+          return;
+        }
+
+        NSError *filterError = nil;
+        SCContentFilter *filter = [self contentFilterForContent:content
+                                                        display:display
+                                                          error:&filterError];
+        if (filter == nil) {
+          self.captureLifecycleState = CDRCaptureLifecycleStateIdle;
+          completeStart(filterError);
+          return;
+        }
+        SCStreamConfiguration *config =
+            [self streamConfigurationForDisplay:display
+                                         filter:filter
+                                            fps:fps
+                                 targetLongEdge:targetLongEdge];
         [self resetFrameGateForSourceId:self.sourceId];
         self.expectedFrameWidth = config.width;
         self.expectedFrameHeight = config.height;
         self.expectedFrameRate = MAX((NSInteger)1, fps);
+
+        SCStream *stream = [[SCStream alloc] initWithFilter:filter
+                                              configuration:config
+                                                   delegate:self];
+        self.stream = stream;
+        self.streamConfiguration = config;
+        NSError *addOutputError = nil;
+        [stream addStreamOutput:self
+                           type:SCStreamOutputTypeScreen
+             sampleHandlerQueue:self.captureQueue
+                          error:&addOutputError];
+        if (addOutputError != nil) {
+          self.stream = nil;
+          self.streamConfiguration = nil;
+          self.captureLifecycleState = CDRCaptureLifecycleStateIdle;
+          completeStart(addOutputError);
+          return;
+        }
+
+        [stream startCaptureWithCompletionHandler:^(NSError * _Nullable startError) {
+          dispatch_async(self.captureQueue, ^{
+            if (lifecycleGeneration != self.captureLifecycleGeneration ||
+                self.captureLifecycleState != CDRCaptureLifecycleStateStarting ||
+                self.stream != stream) {
+              completeStart(cancelledError());
+              return;
+            }
+            if (startError != nil) {
+              self.stream = nil;
+              self.streamConfiguration = nil;
+              self.captureLifecycleState = CDRCaptureLifecycleStateIdle;
+              [self stopAndDetachStream:stream completion:^{
+                completeStart(startError);
+              }];
+              return;
+            }
+            self.captureLifecycleState = CDRCaptureLifecycleStateRunning;
+            completeStart(nil);
+          });
+        }];
       });
-
-      self.stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:self];
-      self.streamConfiguration = config;
-      NSError *addOutputError = nil;
-      [self.stream addStreamOutput:self
-                              type:SCStreamOutputTypeScreen
-               sampleHandlerQueue:self.captureQueue
-                            error:&addOutputError];
-      if (addOutputError != nil) {
-        onStarted(addOutputError);
-        return;
-      }
-
-      [self.stream startCaptureWithCompletionHandler:^(NSError * _Nullable startError) {
-        onStarted(startError);
-      }];
     }];
     return;
   }
@@ -1496,6 +1602,8 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
   if (@available(macOS 12.3, *)) {
     dispatch_async(self.captureQueue, ^{
+      self.captureLifecycleGeneration += 1;
+      self.captureLifecycleState = CDRCaptureLifecycleStateStopping;
       NSMutableArray<SCStream *> *streams = [NSMutableArray array];
       if (self.stream != nil) [streams addObject:self.stream];
       if (self.pendingStream != nil) [streams addObject:self.pendingStream];
@@ -1539,6 +1647,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
         self.systemAudioEnabled = NO;
         self.systemAudioDevice = nil;
         [audioDevice detachSystemAudioSource];
+        self.captureLifecycleState = CDRCaptureLifecycleStateIdle;
         if (completion != nil) {
           dispatch_async(dispatch_get_main_queue(), completion);
         }
@@ -1561,6 +1670,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
           self.systemAudioEnabled = NO;
           self.systemAudioDevice = nil;
           [audioDevice detachSystemAudioSource];
+          self.captureLifecycleState = CDRCaptureLifecycleStateIdle;
           if (completion != nil) {
             dispatch_async(dispatch_get_main_queue(), completion);
           }
@@ -1750,6 +1860,15 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
     }
     if (stream == self.stream) {
       NSLog(@"CrossDesktopRemote active capture stream stopped: %@", error);
+      self.captureLifecycleGeneration += 1;
+      self.captureLifecycleState = CDRCaptureLifecycleStateIdle;
+      self.stream = nil;
+      self.streamConfiguration = nil;
+      self.systemAudioEnabled = NO;
+      FlutterRTCExternalAudioDevice *audioDevice = self.systemAudioDevice;
+      self.systemAudioDevice = nil;
+      [audioDevice detachSystemAudioSource];
+      [self.audioOutputStreams removeObject:stream];
     }
   });
 }
