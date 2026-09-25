@@ -32,6 +32,21 @@ void main() {
 
     expect(controller, contains('await peerConnection?.dispose();'));
     expect(controller, isNot(contains('await _peerConnection?.close();')));
+    expect(
+      controller,
+      isNot(contains('await videoSender?.replaceTrack(null);')),
+      reason:
+          'Terminal video teardown is owned by PeerConnection.dispose(); '
+          'pre-detaching the live ScreenCaptureKit track can over-release it.',
+    );
+    expect(
+      controller.indexOf('await peerConnection?.dispose();'),
+      lessThan(
+        controller.indexOf('await _disposeMediaStream(localVideoStream);'),
+      ),
+      reason:
+          'The capture stream must outlive the PeerConnection sender graph.',
+    );
     expect(controller, contains('Future<void>? _closeSessionFuture;'));
   });
 

@@ -85,6 +85,7 @@ class HostPrivacyScreenStatus {
     required this.coveredDisplayCount,
     required this.expectedDisplayCount,
     required this.captureExcluded,
+    this.excludedWindowIds = const <int>[],
     this.failureReason,
   });
 
@@ -94,6 +95,7 @@ class HostPrivacyScreenStatus {
         coveredDisplayCount: 0,
         expectedDisplayCount: 0,
         captureExcluded: false,
+        excludedWindowIds: const <int>[],
       );
 
   factory HostPrivacyScreenStatus.fromMap(Map<Object?, Object?> value) {
@@ -107,6 +109,12 @@ class HostPrivacyScreenStatus {
       expectedDisplayCount:
           (value['expectedDisplayCount'] as num?)?.toInt() ?? 0,
       captureExcluded: value['captureExcluded'] == true,
+      excludedWindowIds:
+          (value['excludedWindowIds'] as List<Object?>? ?? const <Object?>[])
+              .whereType<num>()
+              .map((item) => item.toInt())
+              .where((item) => item > 0)
+              .toList(growable: false),
       failureReason: value['failureReason'] as String?,
     );
   }
@@ -115,6 +123,7 @@ class HostPrivacyScreenStatus {
   final int coveredDisplayCount;
   final int expectedDisplayCount;
   final bool captureExcluded;
+  final List<int> excludedWindowIds;
   final String? failureReason;
 
   bool get isFullyActive =>
@@ -137,6 +146,14 @@ abstract interface class HostPrivacyScreenProvider {
   Future<void> deactivatePrivacyScreen();
 }
 
+/// Optional two-phase teardown used by capture backends whose exclusion
+/// filter still references the privacy windows while media callbacks drain.
+abstract interface class HostPrivacyScreenTeardownProvider {
+  Future<int?> preparePrivacyScreenDeactivation();
+
+  Future<void> commitPrivacyScreenDeactivation(int generation);
+}
+
 abstract interface class HostPrivacyScreenBridge {
   Future<HostPrivacyScreenCapabilities> getCapabilities();
 
@@ -150,7 +167,14 @@ abstract interface class HostPrivacyScreenBridge {
   Future<void> deactivate();
 }
 
-class MethodChannelHostPrivacyScreenBridge implements HostPrivacyScreenBridge {
+abstract interface class HostPrivacyScreenTransactionalBridge {
+  Future<int?> prepareDeactivation();
+
+  Future<void> commitDeactivation(int generation);
+}
+
+class MethodChannelHostPrivacyScreenBridge
+    implements HostPrivacyScreenBridge, HostPrivacyScreenTransactionalBridge {
   const MethodChannelHostPrivacyScreenBridge({MethodChannel? channel})
     : _channel =
           channel ??
@@ -200,4 +224,19 @@ class MethodChannelHostPrivacyScreenBridge implements HostPrivacyScreenBridge {
   @override
   Future<void> deactivate() =>
       _channel.invokeMethod<void>('deactivatePrivacyScreen');
+
+  @override
+  Future<int?> prepareDeactivation() async {
+    final value = await _channel.invokeMapMethod<Object?, Object?>(
+      'preparePrivacyScreenDeactivation',
+    );
+    if (value?['active'] != true) return null;
+    return (value?['generation'] as num?)?.toInt();
+  }
+
+  @override
+  Future<void> commitDeactivation(int generation) =>
+      _channel.invokeMethod<void>('commitPrivacyScreenDeactivation', {
+        'generation': generation,
+      });
 }

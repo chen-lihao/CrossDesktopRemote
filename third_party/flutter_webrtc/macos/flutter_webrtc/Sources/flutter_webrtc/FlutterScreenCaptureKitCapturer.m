@@ -10,37 +10,10 @@
 #import <string.h>
 
 #import "VideoProcessingAdapter.h"
+#import "FlutterRTCExternalAudioDevice.h"
 
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
-
-static NSString *const CDRPrivacyScreenDefaultsKey =
-    @"CrossDesktopRemotePrivacyScreenActive";
-
-static SCContentFilter *CDRContentFilterForDisplay(
-    SCShareableContent *content,
-    SCDisplay *display) API_AVAILABLE(macos(12.3)) {
-  if (![[NSUserDefaults standardUserDefaults]
-          boolForKey:CDRPrivacyScreenDefaultsKey]) {
-    return [[SCContentFilter alloc] initWithDisplay:display
-                                   excludingWindows:@[]];
-  }
-
-  NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
-  NSMutableArray<SCRunningApplication *> *excludedApplications =
-      [NSMutableArray array];
-  if (bundleIdentifier.length > 0) {
-    for (SCRunningApplication *application in content.applications) {
-      if ([application.bundleIdentifier isEqualToString:bundleIdentifier]) {
-        [excludedApplications addObject:application];
-      }
-    }
-  }
-  return [[SCContentFilter alloc]
-      initWithDisplay:display
-      excludingApplications:excludedApplications
-      exceptingWindows:@[]];
-}
 
 typedef void (^CDRCaptureSwitchCompletion)(
     NSDictionary<NSString *, id> * _Nullable configuration,
@@ -80,6 +53,9 @@ typedef void (^CDRCaptureSwitchCompletion)(
 @property(nonatomic, assign) NSUInteger captureFormatEpoch;
 @property(nonatomic, copy) NSString *lastFrameGateRejection;
 @property(nonatomic, assign) CFAbsoluteTime lastFrameGateNotificationAt;
+@property(nonatomic, copy) NSArray<NSNumber *> *excludedWindowIds;
+@property(nonatomic, weak) FlutterRTCExternalAudioDevice *systemAudioDevice;
+@property(nonatomic, assign) BOOL systemAudioEnabled;
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
 @property(nonatomic, strong) SCStream *stream API_AVAILABLE(macos(12.3));
 @property(nonatomic, strong) SCStream *pendingStream API_AVAILABLE(macos(12.3));
@@ -109,6 +85,10 @@ typedef void (^CDRCaptureSwitchCompletion)(
 @property(nonatomic, assign) CVPixelBufferRef retiredEncoderPixelBuffer;
 @property(nonatomic, assign) CGRect lastActiveContentRect;
 @property(nonatomic, assign) CGRect retiredActiveContentRect;
+@property(nonatomic, strong) NSHashTable<SCStream *> *audioOutputStreams;
+@property(nonatomic, strong) SCStreamConfiguration *streamConfiguration;
+@property(nonatomic, strong) SCStreamConfiguration *pendingStreamConfiguration;
+@property(nonatomic, strong) SCStreamConfiguration *retiredStreamConfiguration;
 #endif
 @end
 
@@ -524,12 +504,144 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
     _delegate = delegate;
     _capturer = [[RTCVideoCapturer alloc] initWithDelegate:delegate];
     _captureQueue = dispatch_queue_create("com.iperius.sck.capture", DISPATCH_QUEUE_SERIAL);
+    _excludedWindowIds = @[];
+    if (@available(macOS 13.0, *)) {
+      _audioOutputStreams = [NSHashTable weakObjectsHashTable];
+    }
     id<MTLDevice> metalDevice = MTLCreateSystemDefaultDevice();
     _colorContext = metalDevice != nil
         ? [CIContext contextWithMTLDevice:metalDevice options:nil]
         : [CIContext contextWithOptions:nil];
   }
   return self;
+}
+
+- (void)configureExcludedWindowIds:(NSArray<NSNumber *> *)windowIds {
+  NSMutableOrderedSet<NSNumber *> *validated = [NSMutableOrderedSet orderedSet];
+  for (id value in windowIds ?: @[]) {
+    if ([value isKindOfClass:[NSNumber class]] && [value unsignedIntValue] > 0) {
+      [validated addObject:value];
+    }
+  }
+  self.excludedWindowIds = validated.array;
+}
+
+- (void)startSystemAudioWithDevice:(FlutterRTCExternalAudioDevice *)audioDevice
+                        completion:(void (^)(NSError * _Nullable error))completion {
+#if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
+  if (@available(macOS 13.0, *)) {
+    dispatch_async(self.captureQueue, ^{
+      SCStream *stream = self.stream;
+      SCStreamConfiguration *configuration = self.streamConfiguration;
+      if (stream == nil || configuration == nil) {
+        NSError *error = [NSError
+            errorWithDomain:@"FlutterScreenCaptureKit"
+                       code:-13
+                   userInfo:@{NSLocalizedDescriptionKey:
+                                  @"Screen capture must be running before system audio starts"}];
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(error); });
+        return;
+      }
+      if (self.systemAudioEnabled && self.systemAudioDevice == audioDevice) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil); });
+        return;
+      }
+
+      NSError *outputError = nil;
+      if (![self.audioOutputStreams containsObject:stream]) {
+        BOOL attached = [stream addStreamOutput:self
+                                           type:SCStreamOutputTypeAudio
+                             sampleHandlerQueue:self.captureQueue
+                                          error:&outputError];
+        if (!attached || outputError != nil) {
+          NSError *error = outputError ?: [NSError
+              errorWithDomain:@"FlutterScreenCaptureKit"
+                         code:-14
+                     userInfo:@{NSLocalizedDescriptionKey:
+                                    @"Unable to attach system audio to screen stream"}];
+          dispatch_async(dispatch_get_main_queue(), ^{ completion(error); });
+          return;
+        }
+        [self.audioOutputStreams addObject:stream];
+      }
+
+      self.systemAudioDevice = audioDevice;
+      self.systemAudioEnabled = YES;
+      [audioDevice attachSystemAudioSource];
+      configuration.capturesAudio = YES;
+      configuration.sampleRate = 48000;
+      configuration.channelCount = 2;
+      configuration.excludesCurrentProcessAudio = YES;
+      [stream updateConfiguration:configuration
+               completionHandler:^(NSError * _Nullable error) {
+        dispatch_async(self.captureQueue, ^{
+          if (error != nil) {
+            self.systemAudioEnabled = NO;
+            self.systemAudioDevice = nil;
+            [audioDevice detachSystemAudioSource];
+            NSError *removeError = nil;
+            [stream removeStreamOutput:self
+                                  type:SCStreamOutputTypeAudio
+                                 error:&removeError];
+            [self.audioOutputStreams removeObject:stream];
+          }
+          dispatch_async(dispatch_get_main_queue(), ^{ completion(error); });
+        });
+      }];
+    });
+    return;
+  }
+#endif
+  NSError *error = [NSError errorWithDomain:@"FlutterScreenCaptureKit"
+                                       code:-2
+                                   userInfo:@{NSLocalizedDescriptionKey:
+                                                  @"System audio requires macOS 13 or later"}];
+  completion(error);
+}
+
+- (void)stopSystemAudioWithCompletion:(void (^)(void))completion {
+#if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
+  if (@available(macOS 13.0, *)) {
+    dispatch_async(self.captureQueue, ^{
+      FlutterRTCExternalAudioDevice *audioDevice = self.systemAudioDevice;
+      self.systemAudioEnabled = NO;
+      self.systemAudioDevice = nil;
+      SCStream *stream = self.stream;
+      SCStreamConfiguration *configuration = self.streamConfiguration;
+
+      void (^finish)(void) = ^{
+        dispatch_async(self.captureQueue, ^{
+          [audioDevice detachSystemAudioSource];
+          dispatch_async(dispatch_get_main_queue(), completion);
+        });
+      };
+      if (stream == nil || configuration == nil) {
+        finish();
+        return;
+      }
+
+      configuration.capturesAudio = NO;
+      [stream updateConfiguration:configuration
+               completionHandler:^(__unused NSError * _Nullable error) {
+        dispatch_async(self.captureQueue, ^{
+          if ([self.audioOutputStreams containsObject:stream]) {
+            NSError *removeError = nil;
+            [stream removeStreamOutput:self
+                                  type:SCStreamOutputTypeAudio
+                                 error:&removeError];
+            if (removeError != nil) {
+              NSLog(@"CrossDesktopRemote remove audio output failed: %@", removeError);
+            }
+            [self.audioOutputStreams removeObject:stream];
+          }
+          finish();
+        });
+      }];
+    });
+    return;
+  }
+#endif
+  completion();
 }
 
 - (void)dealloc {
@@ -550,6 +662,36 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
 }
 
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
+- (SCContentFilter * _Nullable)contentFilterForContent:(SCShareableContent *)content
+                                                display:(SCDisplay *)display
+                                                  error:(NSError **)error
+    API_AVAILABLE(macos(12.3)) {
+  NSSet<NSNumber *> *requiredIds = [NSSet setWithArray:self.excludedWindowIds ?: @[]];
+  NSMutableArray<SCWindow *> *excludedWindows = [NSMutableArray array];
+  if (requiredIds.count > 0) {
+    for (SCWindow *window in content.windows) {
+      if ([requiredIds containsObject:@(window.windowID)]) {
+        [excludedWindows addObject:window];
+      }
+    }
+    if (excludedWindows.count != requiredIds.count) {
+      if (error != NULL) {
+        *error = [NSError errorWithDomain:@"FlutterScreenCaptureKit"
+                                     code:-12
+                                 userInfo:@{
+                                   NSLocalizedDescriptionKey:
+                                       @"Privacy window exclusion lease is incomplete",
+                                   @"requiredWindowCount": @(requiredIds.count),
+                                   @"resolvedWindowCount": @(excludedWindows.count),
+                                 }];
+      }
+      return nil;
+    }
+  }
+  return [[SCContentFilter alloc] initWithDisplay:display
+                                 excludingWindows:excludedWindows];
+}
+
 - (void)publishFrameGateStatus:(NSString *)status
                rejectionReason:(NSString *)rejectionReason
                    pixelBuffer:(CVPixelBufferRef _Nullable)pixelBuffer
@@ -638,6 +780,18 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
     return;
   }
   NSError *removeError = nil;
+  if (@available(macOS 13.0, *)) {
+    if ([self.audioOutputStreams containsObject:stream]) {
+      NSError *audioRemoveError = nil;
+      [stream removeStreamOutput:self
+                            type:SCStreamOutputTypeAudio
+                           error:&audioRemoveError];
+      if (audioRemoveError != nil) {
+        NSLog(@"CrossDesktopRemote remove audio output failed: %@", audioRemoveError);
+      }
+      [self.audioOutputStreams removeObject:stream];
+    }
+  }
   [stream removeStreamOutput:self
                         type:SCStreamOutputTypeScreen
                        error:&removeError];
@@ -698,6 +852,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
         (unsigned long)generation,
         diagnostics);
   self.pendingStream = nil;
+  self.pendingStreamConfiguration = nil;
   self.pendingSourceId = nil;
   self.pendingSwitchCompletion = nil;
   self.pendingStableFrameCount = 0;
@@ -771,6 +926,10 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
   }
   if (@available(macOS 13.0, *)) {
     config.showsCursor = YES;
+    config.capturesAudio = self.systemAudioEnabled;
+    config.sampleRate = 48000;
+    config.channelCount = 2;
+    config.excludesCurrentProcessAudio = YES;
   }
   return config;
 }
@@ -800,7 +959,14 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
         return;
       }
 
-      SCContentFilter *filter = CDRContentFilterForDisplay(content, display);
+      NSError *filterError = nil;
+      SCContentFilter *filter = [self contentFilterForContent:content
+                                                      display:display
+                                                        error:&filterError];
+      if (filter == nil) {
+        onStarted(filterError);
+        return;
+      }
       SCStreamConfiguration *config =
           [self streamConfigurationForDisplay:display
                                        filter:filter
@@ -815,6 +981,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
       });
 
       self.stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:self];
+      self.streamConfiguration = config;
       NSError *addOutputError = nil;
       [self.stream addStreamOutput:self
                               type:SCStreamOutputTypeScreen
@@ -896,7 +1063,14 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
             onCompletion(nil, noDisplay);
             return;
           }
-          SCContentFilter *filter = CDRContentFilterForDisplay(content, display);
+          NSError *filterError = nil;
+          SCContentFilter *filter = [self contentFilterForContent:content
+                                                          display:display
+                                                            error:&filterError];
+          if (filter == nil) {
+            onCompletion(nil, filterError);
+            return;
+          }
           SCStreamConfiguration *configuration =
               [self streamConfigurationForDisplay:display
                                            filter:filter
@@ -930,8 +1104,22 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
               onCompletion(nil, addOutputError);
               return;
             }
+            if (self.systemAudioEnabled) {
+              NSError *audioOutputError = nil;
+              [candidate addStreamOutput:self
+                                    type:SCStreamOutputTypeAudio
+                      sampleHandlerQueue:self.captureQueue
+                                   error:&audioOutputError];
+              if (audioOutputError != nil) {
+                [self stopAndDetachStream:candidate completion:nil];
+                onCompletion(nil, audioOutputError);
+                return;
+              }
+              [self.audioOutputStreams addObject:candidate];
+            }
 
             self.pendingStream = candidate;
+            self.pendingStreamConfiguration = configuration;
             self.pendingSourceId = sourceId;
             self.pendingGeneration = generation;
             self.pendingExpectedFrameWidth = configuration.width;
@@ -1006,6 +1194,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
       }
       SCStream *retired = self.retiredStream;
       self.retiredStream = nil;
+      self.retiredStreamConfiguration = nil;
       self.retiredSourceId = nil;
       self.retiredExpectedFrameWidth = 0;
       self.retiredExpectedFrameHeight = 0;
@@ -1054,11 +1243,13 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
 
       SCStream *failedTarget = self.stream;
       self.stream = self.retiredStream;
+      self.streamConfiguration = self.retiredStreamConfiguration;
       self.sourceId = self.retiredSourceId ?: @"";
       self.expectedFrameWidth = self.retiredExpectedFrameWidth;
       self.expectedFrameHeight = self.retiredExpectedFrameHeight;
       self.expectedFrameRate = MAX((NSInteger)1, self.retiredFrameRate);
       self.retiredStream = nil;
+      self.retiredStreamConfiguration = nil;
       self.retiredSourceId = nil;
       self.retiredExpectedFrameWidth = 0;
       self.retiredExpectedFrameHeight = 0;
@@ -1224,7 +1415,15 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
                 onCompletion(nil, noDisplay);
                 return;
               }
-              SCContentFilter *filter = CDRContentFilterForDisplay(content, display);
+              NSError *filterError = nil;
+              SCContentFilter *filter = [self contentFilterForContent:content
+                                                              display:display
+                                                                error:&filterError];
+              if (filter == nil) {
+                self.captureFormatUpdateInProgress = NO;
+                onCompletion(nil, filterError);
+                return;
+              }
               SCStreamConfiguration *configuration =
                   [self streamConfigurationForDisplay:display
                                                filter:filter
@@ -1259,6 +1458,7 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
                            self.expectedFrameWidth = configuration.width;
                            self.expectedFrameHeight = configuration.height;
                            self.expectedFrameRate = MAX((NSInteger)1, fps);
+                           self.streamConfiguration = configuration;
                            self.freshCanvasFrameCount = 1;
                            self.awaitingStableSwitchFrames = YES;
                            self.emittedFirstFrame = NO;
@@ -1302,8 +1502,11 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
       if (self.retiredStream != nil) [streams addObject:self.retiredStream];
       CDRCaptureSwitchCompletion pendingCompletion = self.pendingSwitchCompletion;
       self.stream = nil;
+      self.streamConfiguration = nil;
       self.pendingStream = nil;
+      self.pendingStreamConfiguration = nil;
       self.retiredStream = nil;
+      self.retiredStreamConfiguration = nil;
       self.pendingSwitchCompletion = nil;
       self.pendingSourceId = nil;
       self.retiredSourceId = nil;
@@ -1332,7 +1535,13 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
         pendingCompletion(nil, cancelled);
       }
       if (uniqueStreams.count == 0) {
-        completion();
+        FlutterRTCExternalAudioDevice *audioDevice = self.systemAudioDevice;
+        self.systemAudioEnabled = NO;
+        self.systemAudioDevice = nil;
+        [audioDevice detachSystemAudioSource];
+        if (completion != nil) {
+          dispatch_async(dispatch_get_main_queue(), completion);
+        }
         return;
       }
       dispatch_group_t group = dispatch_group_create();
@@ -1342,7 +1551,21 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
           dispatch_group_leave(group);
         }];
       }
-      dispatch_group_notify(group, self.captureQueue, completion);
+      dispatch_group_notify(group, self.captureQueue, ^{
+        // Run one additional turn after every SCStream completion. This is a
+        // queue barrier for callbacks that were already enqueued when the
+        // outputs were detached and prevents callers from destroying privacy
+        // windows while ScreenCaptureKit still references their filter.
+        dispatch_async(self.captureQueue, ^{
+          FlutterRTCExternalAudioDevice *audioDevice = self.systemAudioDevice;
+          self.systemAudioEnabled = NO;
+          self.systemAudioDevice = nil;
+          [audioDevice detachSystemAudioSource];
+          if (completion != nil) {
+            dispatch_async(dispatch_get_main_queue(), completion);
+          }
+        });
+      });
     });
     return;
   }
@@ -1535,6 +1758,15 @@ static NSDictionary<NSString *, id> *CDRPixelBufferDiagnostics(
 didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         ofType:(SCStreamOutputType)type API_AVAILABLE(macos(12.3)) {
   if (type != SCStreamOutputTypeScreen) {
+    if (@available(macOS 13.0, *)) {
+      if (type == SCStreamOutputTypeAudio &&
+          stream == self.stream &&
+          self.systemAudioEnabled &&
+          CMSampleBufferIsValid(sampleBuffer) &&
+          CMSampleBufferDataIsReady(sampleBuffer)) {
+        [self.systemAudioDevice consumeSystemAudioSampleBuffer:sampleBuffer];
+      }
+    }
     return;
   }
 
@@ -1600,6 +1832,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     // first usable pixel buffer; the previous stream remains warm until the
     // controller confirms that new media arrived.
     self.retiredStream = self.stream;
+    self.retiredStreamConfiguration = self.streamConfiguration;
     self.retiredSourceId = self.sourceId ?: @"";
     self.retiredExpectedFrameWidth = self.expectedFrameWidth;
     self.retiredExpectedFrameHeight = self.expectedFrameHeight;
@@ -1612,12 +1845,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     self.lastActiveEncoderPixelBuffer = NULL;
     self.lastActiveContentRect = CGRectZero;
     self.stream = stream;
+    self.streamConfiguration = self.pendingStreamConfiguration;
     self.sourceId = self.pendingSourceId ?: @"";
     self.expectedFrameWidth = self.pendingExpectedFrameWidth;
     self.expectedFrameHeight = self.pendingExpectedFrameHeight;
     self.expectedFrameRate = MAX((NSInteger)1, self.pendingFrameRate);
     CDRCaptureSwitchCompletion completion = self.pendingSwitchCompletion;
     self.pendingStream = nil;
+    self.pendingStreamConfiguration = nil;
     self.pendingSourceId = nil;
     self.pendingSwitchCompletion = nil;
     const NSUInteger acceptedCompleteFrames = self.pendingCompleteFrameCount;

@@ -103,6 +103,7 @@ NSArray<RTCDesktopSource*>* _captureSources;
   NSInteger fps = 30;
   NSInteger targetLongEdge = 0;
   BOOL preserveVisibleContentGeometry = NO;
+  NSArray<NSNumber *> *excludedWindowIds = @[];
   id videoConstraints = constraints[@"video"];
   if ([videoConstraints isKindOfClass:[NSNumber class]] && [videoConstraints boolValue] == YES) {
     useDefaultScreen = YES;
@@ -134,6 +135,17 @@ NSArray<RTCDesktopSource*>* _captureSources;
       id preserveGeometry = mandatory[@"preserveVisibleContentGeometry"];
       if ([preserveGeometry isKindOfClass:[NSNumber class]]) {
         preserveVisibleContentGeometry = [preserveGeometry boolValue];
+      }
+      id requestedExcludedWindowIds = mandatory[@"excludedWindowIds"];
+      if ([requestedExcludedWindowIds isKindOfClass:[NSArray class]]) {
+        NSMutableArray<NSNumber *> *validatedWindowIds = [NSMutableArray array];
+        for (id value in (NSArray *)requestedExcludedWindowIds) {
+          if ([value isKindOfClass:[NSNumber class]] &&
+              [value unsignedIntValue] > 0) {
+            [validatedWindowIds addObject:value];
+          }
+        }
+        excludedWindowIds = validatedWindowIds;
       }
     }
   }
@@ -167,6 +179,7 @@ NSArray<RTCDesktopSource*>* _captureSources;
           [[FlutterScreenCaptureKitCapturer alloc] initWithDelegate:videoProcessingAdapter];
       [screenCaptureKitCapturer
           setPreserveVisibleContentGeometry:preserveVisibleContentGeometry];
+      [screenCaptureKitCapturer configureExcludedWindowIds:excludedWindowIds];
       [screenCaptureKitCapturer startCaptureWithFPS:fps
                                            sourceId:sourceId
                                      targetLongEdge:targetLongEdge

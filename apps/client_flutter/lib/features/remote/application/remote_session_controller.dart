@@ -7022,6 +7022,7 @@ class RemoteSessionController extends ChangeNotifier
         coveredDisplayCount: 0,
         expectedDisplayCount: _privacyScreenCapabilities.displayCount,
         captureExcluded: false,
+        excludedWindowIds: const <int>[],
         failureReason: error.toString(),
       );
       notifyListeners();
@@ -7044,6 +7045,7 @@ class RemoteSessionController extends ChangeNotifier
         coveredDisplayCount: _privacyScreenStatus.coveredDisplayCount,
         expectedDisplayCount: _privacyScreenStatus.expectedDisplayCount,
         captureExcluded: _privacyScreenStatus.captureExcluded,
+        excludedWindowIds: _privacyScreenStatus.excludedWindowIds,
       );
       notifyListeners();
     }
@@ -7053,6 +7055,97 @@ class RemoteSessionController extends ChangeNotifier
       _privacyScreenStatus = const HostPrivacyScreenStatus.inactive();
       notifyListeners();
     }
+  }
+
+  Future<int?> _preparePrivacyScreenForCaptureTeardown() async {
+    if (role != RemoteRole.host ||
+        _privacyScreenStatus.phase == HostPrivacyScreenPhase.inactive) {
+      return null;
+    }
+    final provider = _hostPlatform;
+    if (provider is! HostPrivacyScreenTeardownProvider) return null;
+    _privacyScreenHealthTimer?.cancel();
+    _privacyScreenHealthTimer = null;
+    _privacyScreenStatus = HostPrivacyScreenStatus(
+      phase: HostPrivacyScreenPhase.restoring,
+      coveredDisplayCount: _privacyScreenStatus.coveredDisplayCount,
+      expectedDisplayCount: _privacyScreenStatus.expectedDisplayCount,
+      captureExcluded: _privacyScreenStatus.captureExcluded,
+      excludedWindowIds: _privacyScreenStatus.excludedWindowIds,
+    );
+    _recordTeardownStage('privacy_prepare_started');
+    try {
+      final generation = await (provider as HostPrivacyScreenTeardownProvider)
+          .preparePrivacyScreenDeactivation();
+      _recordTeardownStage(
+        'privacy_prepare_completed',
+        attributes: {'generation': generation},
+      );
+      return generation;
+    } catch (error) {
+      _recordTeardownStage(
+        'privacy_prepare_failed',
+        severity: DiagnosticSeverity.warning,
+        attributes: {'errorType': error.runtimeType.toString()},
+      );
+      return null;
+    }
+  }
+
+  Future<void> _finishPrivacyScreenCaptureTeardown(int? generation) async {
+    if (role != RemoteRole.host) return;
+    final provider = _hostPlatform;
+    if (generation != null && provider is HostPrivacyScreenTeardownProvider) {
+      _recordTeardownStage(
+        'privacy_commit_started',
+        attributes: {'generation': generation},
+      );
+      try {
+        await (provider as HostPrivacyScreenTeardownProvider)
+            .commitPrivacyScreenDeactivation(generation);
+        _privacyScreenStatus = const HostPrivacyScreenStatus.inactive();
+        _recordTeardownStage(
+          'privacy_commit_completed',
+          attributes: {'generation': generation},
+        );
+        notifyListeners();
+        return;
+      } catch (error) {
+        _recordTeardownStage(
+          'privacy_commit_failed',
+          severity: DiagnosticSeverity.warning,
+          attributes: {'errorType': error.runtimeType.toString()},
+        );
+      }
+    }
+    try {
+      await _deactivatePrivacyScreen();
+    } catch (error) {
+      _recordTeardownStage(
+        'privacy_deactivate_failed',
+        severity: DiagnosticSeverity.error,
+        attributes: {'errorType': error.runtimeType.toString()},
+      );
+    }
+  }
+
+  void _recordTeardownStage(
+    String stage, {
+    DiagnosticSeverity severity = DiagnosticSeverity.info,
+    Map<String, Object?> attributes = const {},
+  }) {
+    DiagnosticHub.instance.record(
+      component: 'session.teardown',
+      name: stage,
+      severity: severity,
+      context: DiagnosticContext(
+        traceId: _kernel.traceId,
+        attemptId: _kernel.attemptId,
+        sessionId: _kernel.sessionId,
+        role: role.name,
+      ),
+      attributes: attributes,
+    );
   }
 
   void _startPrivacyScreenHealthMonitoring() {
@@ -7088,6 +7181,7 @@ class RemoteSessionController extends ChangeNotifier
         coveredDisplayCount: 0,
         expectedDisplayCount: _privacyScreenCapabilities.displayCount,
         captureExcluded: false,
+        excludedWindowIds: const <int>[],
         failureReason: error.toString(),
       );
       _emitNotice('无法确认隐私屏状态，已安全终止远程会话', level: RemoteNoticeLevel.error);
@@ -7316,6 +7410,8 @@ class RemoteSessionController extends ChangeNotifier
         'mandatory': {
           'frameRate': _sessionCaptureFrameRate.toDouble(),
           'targetLongEdge': _sessionCaptureLongEdge,
+          if (_privacyScreenStatus.excludedWindowIds.isNotEmpty)
+            'excludedWindowIds': _privacyScreenStatus.excludedWindowIds,
           if (_remoteSupportsActiveContentGeometry)
             'preserveVisibleContentGeometry': true,
         },
@@ -8035,9 +8131,10 @@ class RemoteSessionController extends ChangeNotifier
 
   Future<void> _disposeMediaStream(MediaStream stream) async {
     try {
-      for (final track in stream.getTracks()) {
-        track.stop();
-      }
+      // MediaStream owns the terminal capture operation on macOS. Calling
+      // track.stop() first removes flutter_webrtc's stop handler and releases
+      // the VideoProcessingAdapter before ScreenCaptureKit has drained its
+      // callbacks, which can become a native use-after-free.
       await stream.dispose();
     } catch (_) {
       // Media cleanup is best-effort and must not change transaction state.
@@ -8303,16 +8400,27 @@ class RemoteSessionController extends ChangeNotifier
         !identical(displayTransaction.previousStream, _localStream)) {
       await _disposeMediaStream(displayTransaction.previousStream);
     }
+    _recordTeardownStage('media_teardown_started');
+    final privacyTeardownGeneration =
+        await _preparePrivacyScreenForCaptureTeardown();
     if (role == RemoteRole.host) {
+      _recordTeardownStage('system_audio_stop_started');
       await _serializeSystemAudioMutation(_stopHostSystemAudio);
+      _recordTeardownStage('system_audio_stop_completed');
     }
-    for (final track in _localStream?.getTracks() ?? <MediaStreamTrack>[]) {
-      await track.stop();
-    }
-    await _localStream?.dispose();
+    final localVideoStream = _localStream;
     _localStream = null;
-    await _deactivatePrivacyScreen();
     _videoSender = null;
+    // Terminal teardown must not create an intermediate sender-without-track
+    // state. On macOS the screen track owns an asynchronous ScreenCaptureKit
+    // graph, while RTCRtpSender is owned by the PeerConnection. Calling
+    // replaceTrack(null) here makes both Dart and PeerConnection transition
+    // the same native track ownership during one run-loop turn and can
+    // over-release the Objective-C wrapper. PeerConnection.dispose() below is
+    // therefore the sole terminal owner of the RTP sender/receiver graph.
+    // The capture stream remains strongly retained until that operation has
+    // completed, then its awaitable native stop barrier drains SCK callbacks.
+    _recordTeardownStage('rtp_graph_shutdown_delegated');
     _videoReceiver = null;
     _audioSender = null;
     _remoteAudioTrack = null;
@@ -8332,10 +8440,27 @@ class RemoteSessionController extends ChangeNotifier
     // process-wide playback policy during disconnect.
     final peerConnection = _peerConnection;
     _peerConnection = null;
-    await peerConnection?.dispose();
+    _recordTeardownStage('peer_dispose_started');
+    try {
+      await peerConnection?.dispose();
+      _recordTeardownStage('peer_dispose_completed');
+    } catch (error) {
+      _recordTeardownStage(
+        'peer_dispose_failed',
+        severity: DiagnosticSeverity.warning,
+        attributes: {'errorType': error.runtimeType.toString()},
+      );
+    }
+    _recordTeardownStage('video_capture_stop_started');
+    if (localVideoStream != null) {
+      await _disposeMediaStream(localVideoStream);
+    }
+    _recordTeardownStage('video_capture_stop_completed');
     final remoteAudioPlayoutLease = _remoteAudioPlayoutLease;
     _remoteAudioPlayoutLease = null;
     await remoteAudioPlayoutLease?.release();
+    await _finishPrivacyScreenCaptureTeardown(privacyTeardownGeneration);
+    _recordTeardownStage('media_teardown_completed');
     _presentedVideoFrameSize = null;
     _remoteDescriptionSet = false;
     _mediaNegotiationSealed = false;

@@ -3,9 +3,6 @@ import ApplicationServices
 import FlutterMacOS
 import dnssd
 
-private let crossDesktopRemotePrivacyScreenDefaultsKey =
-  "CrossDesktopRemotePrivacyScreenActive"
-
 private final class CrossDesktopRemotePrivacyView: NSView {
   var controllerLabel = "远程设备"
 
@@ -37,25 +34,89 @@ private final class CrossDesktopRemotePrivacyView: NSView {
   }
 }
 
+/// Owns one privacy window for its complete AppKit lifetime.
+///
+/// Programmatically created NSWindow instances default to
+/// isReleasedWhenClosed = true. That ownership model is incompatible with a
+/// Swift collection retaining the same window: close() schedules an AppKit
+/// release while ARC later releases the collection entry a second time. A
+/// window controller gives AppKit one explicit owner, and disabling automatic
+/// close-release keeps ARC authoritative.
+private final class CrossDesktopRemotePrivacyWindowController: NSWindowController {
+  init(screen: NSScreen, controllerLabel: String) {
+    let privacyWindow = NSWindow(
+      contentRect: screen.frame,
+      styleMask: .borderless,
+      backing: .buffered,
+      defer: false,
+      screen: screen
+    )
+    privacyWindow.isReleasedWhenClosed = false
+    privacyWindow.level = .screenSaver
+    privacyWindow.backgroundColor = .black
+    privacyWindow.isOpaque = true
+    privacyWindow.ignoresMouseEvents = true
+    privacyWindow.collectionBehavior = [
+      .canJoinAllSpaces,
+      .fullScreenAuxiliary,
+      .stationary,
+      .ignoresCycle,
+    ]
+    let view = CrossDesktopRemotePrivacyView(frame: screen.frame)
+    view.controllerLabel = controllerLabel
+    privacyWindow.contentView = view
+    privacyWindow.setFrame(screen.frame, display: true)
+    super.init(window: privacyWindow)
+    shouldCascadeWindows = false
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) is unavailable")
+  }
+
+  func showPrivacyWindow() {
+    guard let window else { return }
+    window.orderFrontRegardless()
+    window.displayIfNeeded()
+  }
+
+  func closePrivacyWindow() {
+    guard let window else { return }
+    window.orderOut(nil)
+    close()
+  }
+}
+
 private final class CrossDesktopRemotePrivacyScreenCoordinator {
-  private var windows: [NSWindow] = []
+  private enum Phase {
+    case inactive
+    case active
+    case draining
+  }
+
+  private var windowControllers: [CrossDesktopRemotePrivacyWindowController] = []
   private var displayObserver: NSObjectProtocol?
   private var controllerLabel = "远程设备"
+  private var phase = Phase.inactive
+  private var generation = 0
   private(set) var failureReason: String?
 
   init() {
-    // A privacy window cannot survive process termination. Clearing this flag
-    // prevents a previous unclean exit from excluding the app from capture.
-    UserDefaults.standard.removeObject(
-      forKey: crossDesktopRemotePrivacyScreenDefaultsKey
-    )
     displayObserver = NotificationCenter.default.addObserver(
       forName: NSApplication.didChangeScreenParametersNotification,
       object: nil,
       queue: .main
     ) { [weak self] _ in
-      guard let self, !self.windows.isEmpty else { return }
-      self.rebuildWindows()
+      guard let self,
+            self.phase == .active,
+            !self.windowControllers.isEmpty else { return }
+      // The capture lease contains the exact CGWindowIDs created below.
+      // Replacing those windows behind ScreenCaptureKit would invalidate the
+      // exclusion contract and could expose the desktop. Fail closed instead;
+      // the Dart health monitor terminates the session before a new topology
+      // can be shared.
+      self.failureReason = "显示器配置已变化，请重新建立远程会话"
     }
   }
 
@@ -85,6 +146,7 @@ private final class CrossDesktopRemotePrivacyScreenCoordinator {
   }
 
   func activate(controllerLabel: String) -> [String: Any] {
+    assert(Thread.isMainThread)
     guard #available(macOS 12.3, *) else {
       return [
         "phase": "failed",
@@ -95,11 +157,9 @@ private final class CrossDesktopRemotePrivacyScreenCoordinator {
       ]
     }
     self.controllerLabel = String(controllerLabel.prefix(80))
+    generation += 1
+    phase = .active
     failureReason = nil
-    UserDefaults.standard.set(
-      true,
-      forKey: crossDesktopRemotePrivacyScreenDefaultsKey
-    )
     rebuildWindows()
     let status = status()
     if status["phase"] as? String != "active" {
@@ -109,26 +169,59 @@ private final class CrossDesktopRemotePrivacyScreenCoordinator {
   }
 
   func deactivate() {
-    UserDefaults.standard.removeObject(
-      forKey: crossDesktopRemotePrivacyScreenDefaultsKey
-    )
-    for window in windows {
-      window.orderOut(nil)
-      window.close()
+    assert(Thread.isMainThread)
+    let transaction = prepareDeactivation()
+    if transaction["active"] as? Bool == true,
+       let generation = transaction["generation"] as? Int {
+      commitDeactivation(generation: generation)
     }
-    windows.removeAll()
+  }
+
+  func prepareDeactivation() -> [String: Any] {
+    assert(Thread.isMainThread)
+    guard phase != .inactive else {
+      return ["active": false, "generation": generation]
+    }
+    phase = .draining
+    return ["active": true, "generation": generation]
+  }
+
+  func commitDeactivation(generation expectedGeneration: Int) {
+    assert(Thread.isMainThread)
+    guard generation == expectedGeneration, phase == .draining else { return }
+    phase = .inactive
+    closePrivacyWindows()
     failureReason = nil
   }
 
   func status() -> [String: Any] {
+    assert(Thread.isMainThread)
     let expected = NSScreen.screens.count
-    let covered = windows.filter { $0.isVisible }.count
-    let active = expected > 0 && covered == expected && failureReason == nil
+    let visibleWindows = windowControllers.compactMap(\.window).filter(\.isVisible)
+    let covered = visibleWindows.count
+    let excludedWindowIds = visibleWindows
+      .map(\.windowNumber)
+      .filter { $0 > 0 }
+    let fullyCovered = expected > 0 &&
+      covered == expected &&
+      excludedWindowIds.count == expected &&
+      failureReason == nil
+    let active = phase == .active && fullyCovered
+    let phaseName: String
+    switch phase {
+    case .inactive:
+      phaseName = "inactive"
+    case .active:
+      phaseName = active ? "active" : "failed"
+    case .draining:
+      phaseName = "restoring"
+    }
     var value: [String: Any] = [
-      "phase": active ? "active" : windows.isEmpty ? "inactive" : "failed",
+      "phase": phaseName,
       "coveredDisplayCount": covered,
       "expectedDisplayCount": expected,
-      "captureExcluded": active,
+      "captureExcluded": fullyCovered,
+      "excludedWindowIds": excludedWindowIds,
     ]
     if let failureReason {
       value["failureReason"] = failureReason
@@ -137,11 +230,8 @@ private final class CrossDesktopRemotePrivacyScreenCoordinator {
   }
 
   private func rebuildWindows() {
-    for window in windows {
-      window.orderOut(nil)
-      window.close()
-    }
-    windows.removeAll()
+    assert(Thread.isMainThread)
+    closePrivacyWindows()
 
     let screens = NSScreen.screens
     guard !screens.isEmpty else {
@@ -149,33 +239,24 @@ private final class CrossDesktopRemotePrivacyScreenCoordinator {
       return
     }
     for screen in screens {
-      let window = NSWindow(
-        contentRect: screen.frame,
-        styleMask: .borderless,
-        backing: .buffered,
-        defer: false,
-        screen: screen
+      let controller = CrossDesktopRemotePrivacyWindowController(
+        screen: screen,
+        controllerLabel: controllerLabel
       )
-      window.level = .screenSaver
-      window.backgroundColor = .black
-      window.isOpaque = true
-      window.ignoresMouseEvents = true
-      window.collectionBehavior = [
-        .canJoinAllSpaces,
-        .fullScreenAuxiliary,
-        .stationary,
-        .ignoresCycle,
-      ]
-      let view = CrossDesktopRemotePrivacyView(frame: screen.frame)
-      view.controllerLabel = controllerLabel
-      window.contentView = view
-      window.setFrame(screen.frame, display: true)
-      window.orderFrontRegardless()
-      window.displayIfNeeded()
-      windows.append(window)
+      controller.showPrivacyWindow()
+      windowControllers.append(controller)
     }
-    if windows.count != screens.count {
+    if windowControllers.count != screens.count {
       failureReason = "未能覆盖全部显示器"
+    }
+  }
+
+  private func closePrivacyWindows() {
+    assert(Thread.isMainThread)
+    let controllers = windowControllers
+    windowControllers.removeAll(keepingCapacity: false)
+    for controller in controllers {
+      controller.closePrivacyWindow()
     }
   }
 }
@@ -577,6 +658,20 @@ class MainFlutterWindow: NSWindow {
         result(self.privacyScreen.status())
       case "deactivatePrivacyScreen":
         self.privacyScreen.deactivate()
+        result(nil)
+      case "preparePrivacyScreenDeactivation":
+        result(self.privacyScreen.prepareDeactivation())
+      case "commitPrivacyScreenDeactivation":
+        let arguments = call.arguments as? [String: Any]
+        guard let generation = arguments?["generation"] as? Int else {
+          result(FlutterError(
+            code: "PRIVACY_TEARDOWN_ARGUMENT",
+            message: "Missing privacy teardown generation",
+            details: nil
+          ))
+          return
+        }
+        self.privacyScreen.commitDeactivation(generation: generation)
         result(nil)
       case "getColorDiagnostics":
         result(self.getColorDiagnostics())

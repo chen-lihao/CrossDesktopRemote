@@ -6,7 +6,8 @@ class MacHostPlatformAdapter
     implements
         HostPlatformAdapter,
         HostRuntimeStateProvider,
-        HostPrivacyScreenProvider {
+        HostPrivacyScreenProvider,
+        HostPrivacyScreenTeardownProvider {
   const MacHostPlatformAdapter({
     this.bridge = const MacInputBridge(),
     this.privacyBridge = const MethodChannelHostPrivacyScreenBridge(),
@@ -186,4 +187,25 @@ class MacHostPlatformAdapter
 
   @override
   Future<void> deactivatePrivacyScreen() => privacyBridge.deactivate();
+
+  @override
+  Future<int?> preparePrivacyScreenDeactivation() {
+    final bridge = privacyBridge;
+    if (bridge is! HostPrivacyScreenTransactionalBridge) {
+      return Future<int?>.value(null);
+    }
+    return (bridge as HostPrivacyScreenTransactionalBridge)
+        .prepareDeactivation();
+  }
+
+  @override
+  Future<void> commitPrivacyScreenDeactivation(int generation) {
+    final bridge = privacyBridge;
+    if (bridge is! HostPrivacyScreenTransactionalBridge) {
+      return Future<void>.value();
+    }
+    return (bridge as HostPrivacyScreenTransactionalBridge).commitDeactivation(
+      generation,
+    );
+  }
 }

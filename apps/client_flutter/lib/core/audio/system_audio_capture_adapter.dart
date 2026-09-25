@@ -23,8 +23,9 @@ bool isCompatibleAppleSystemAudioBackendInfo(Map<String, dynamic> info) {
   final version = info['version'];
   return info['backend'] == 'screen-capture-kit-external-adm' &&
       version is num &&
-      version >= 3 &&
+      version >= 4 &&
       info['microphoneFree'] == true &&
+      info['captureOwner'] == 'unified-screen-stream' &&
       info['deliveryMode'] == 'capture-clock-render-block' &&
       info['frameDurationMs'] == 10;
 }

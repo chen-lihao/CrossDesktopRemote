@@ -5,18 +5,13 @@
 #import "LocalAudioTrack.h"
 #import "FlutterRTCMediaStream.h"
 #import "FlutterRTCExternalAudioDevice.h"
-
-#import <CoreMedia/CoreMedia.h>
-#import <ScreenCaptureKit/ScreenCaptureKit.h>
+#import "FlutterScreenCaptureKitCapturer.h"
 
 static NSString* const FlutterSystemAudioErrorDomain = @"FlutterSystemAudioCapture";
 
-API_AVAILABLE(macos(13.0))
-@interface FlutterSystemAudioCapturer () <SCStreamOutput>
-
-@property(nonatomic, strong, nullable) SCStream* stream;
+@interface FlutterSystemAudioCapturer ()
 @property(nonatomic, weak) FlutterRTCExternalAudioDevice* audioDevice;
-@property(nonatomic, strong) dispatch_queue_t captureQueue;
+@property(nonatomic, strong) FlutterScreenCaptureKitCapturer* screenCapturer;
 @property(nonatomic, readwrite, getter=isActive) BOOL active;
 @property(nonatomic) BOOL cancelled;
 
@@ -25,11 +20,12 @@ API_AVAILABLE(macos(13.0))
 
 @implementation FlutterSystemAudioCapturer
 
-- (instancetype)initWithAudioDevice:(FlutterRTCExternalAudioDevice*)audioDevice {
+- (instancetype)initWithAudioDevice:(FlutterRTCExternalAudioDevice*)audioDevice
+                      screenCapturer:(FlutterScreenCaptureKitCapturer*)screenCapturer {
   self = [super init];
   if (self) {
     _audioDevice = audioDevice;
-    _captureQueue = dispatch_queue_create("com.crossdesktopremote.system-audio", DISPATCH_QUEUE_SERIAL);
+    _screenCapturer = screenCapturer;
   }
   return self;
 }
@@ -42,11 +38,8 @@ API_AVAILABLE(macos(13.0))
   if (@available(macOS 13.0, *)) {
     self.cancelled = NO;
     __weak FlutterSystemAudioCapturer* weakSelf = self;
-    [SCShareableContent
-        getShareableContentExcludingDesktopWindows:NO
-                                  onScreenWindowsOnly:NO
-                                    completionHandler:^(SCShareableContent* _Nullable content,
-                                                        NSError* _Nullable error) {
+    [self.screenCapturer startSystemAudioWithDevice:self.audioDevice
+                                         completion:^(NSError* _Nullable error) {
       FlutterSystemAudioCapturer* strongSelf = weakSelf;
       if (strongSelf == nil) {
         completion([NSError errorWithDomain:FlutterSystemAudioErrorDomain
@@ -55,58 +48,14 @@ API_AVAILABLE(macos(13.0))
         return;
       }
       if (strongSelf.cancelled) {
+        [strongSelf.screenCapturer stopSystemAudioWithCompletion:^{}];
         completion([NSError errorWithDomain:FlutterSystemAudioErrorDomain
                                        code:5
                                    userInfo:@{NSLocalizedDescriptionKey : @"System audio capture was cancelled"}]);
         return;
       }
-      if (error != nil || content.displays.count == 0) {
-        completion(error ?: [NSError errorWithDomain:FlutterSystemAudioErrorDomain
-                                                code:2
-                                            userInfo:@{NSLocalizedDescriptionKey : @"No display is available for system audio capture"}]);
-        return;
-      }
-
-      SCContentFilter* filter =
-          [[SCContentFilter alloc] initWithDisplay:content.displays.firstObject
-                                 excludingWindows:@[]];
-      SCStreamConfiguration* configuration = [[SCStreamConfiguration alloc] init];
-      configuration.capturesAudio = YES;
-      configuration.sampleRate = 48000;
-      configuration.channelCount = 2;
-      configuration.excludesCurrentProcessAudio = YES;
-      configuration.width = 2;
-      configuration.height = 2;
-      configuration.minimumFrameInterval = CMTimeMake(1, 1);
-      configuration.queueDepth = 3;
-
-      SCStream* stream = [[SCStream alloc] initWithFilter:filter
-                                           configuration:configuration
-                                                delegate:nil];
-      NSError* outputError = nil;
-      if (![stream addStreamOutput:strongSelf
-                              type:SCStreamOutputTypeAudio
-                sampleHandlerQueue:strongSelf.captureQueue
-                             error:&outputError]) {
-        completion(outputError ?: [NSError errorWithDomain:FlutterSystemAudioErrorDomain
-                                                   code:3
-                                               userInfo:@{NSLocalizedDescriptionKey : @"Unable to attach system audio output"}]);
-        return;
-      }
-      strongSelf.stream = stream;
-      [stream startCaptureWithCompletionHandler:^(NSError* _Nullable startError) {
-        if (strongSelf.cancelled && startError == nil) {
-          [stream stopCaptureWithCompletionHandler:nil];
-          startError = [NSError errorWithDomain:FlutterSystemAudioErrorDomain
-                                           code:5
-                                       userInfo:@{NSLocalizedDescriptionKey : @"System audio capture was cancelled"}];
-        }
-        strongSelf.active = startError == nil;
-        if (startError != nil) {
-          strongSelf.stream = nil;
-        }
-        completion(startError);
-      }];
+      strongSelf.active = error == nil;
+      completion(error);
     }];
   } else {
     completion([NSError errorWithDomain:FlutterSystemAudioErrorDomain
@@ -118,35 +67,7 @@ API_AVAILABLE(macos(13.0))
 - (void)stopWithCompletion:(void (^)(void))completion {
   self.cancelled = YES;
   self.active = NO;
-  [self.audioDevice detachSystemAudioSource];
-
-  if (@available(macOS 12.3, *)) {
-    SCStream* stream = self.stream;
-    self.stream = nil;
-    if (stream == nil) {
-      completion();
-      return;
-    }
-    [stream stopCaptureWithCompletionHandler:^(NSError* _Nullable error) {
-      if (error != nil) {
-        NSLog(@"System audio capture stop failed: %@", error);
-      }
-      completion();
-    }];
-  } else {
-    completion();
-  }
-}
-
-- (void)stream:(SCStream*)stream
-    didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
-                   ofType:(SCStreamOutputType)type API_AVAILABLE(macos(13.0)) {
-  if (!self.active || type != SCStreamOutputTypeAudio ||
-      !CMSampleBufferIsValid(sampleBuffer) ||
-      !CMSampleBufferDataIsReady(sampleBuffer)) {
-    return;
-  }
-  [self.audioDevice consumeSystemAudioSampleBuffer:sampleBuffer];
+  [self.screenCapturer stopSystemAudioWithCompletion:completion];
 }
 
 @end
@@ -169,10 +90,18 @@ API_AVAILABLE(macos(13.0))
                                  details:nil]);
       return;
     }
+    NSArray<FlutterScreenCaptureKitCapturer*>* screenCapturers =
+        self.screenCaptureKitCapturers.allValues;
+    if (screenCapturers.count != 1) {
+      result([FlutterError errorWithCode:@"SystemAudioScreenSessionUnavailable"
+                                 message:@"System audio requires exactly one active screen capture session"
+                                 details:@{ @"activeScreenCapturers" : @(screenCapturers.count) }]);
+      return;
+    }
     FlutterSystemAudioCapturer* capturer =
-        [[FlutterSystemAudioCapturer alloc] initWithAudioDevice:audioDevice];
+        [[FlutterSystemAudioCapturer alloc] initWithAudioDevice:audioDevice
+                                                screenCapturer:screenCapturers.firstObject];
     self.systemAudioCapturer = capturer;
-    [audioDevice attachSystemAudioSource];
     __weak FlutterWebRTCPlugin* weakSelf = self;
     [capturer startWithCompletion:^(NSError* _Nullable error) {
       dispatch_async(dispatch_get_main_queue(), ^{
@@ -185,7 +114,6 @@ API_AVAILABLE(macos(13.0))
           return;
         }
         if (error != nil) {
-          [audioDevice detachSystemAudioSource];
           strongSelf.systemAudioCapturer = nil;
           result([FlutterError errorWithCode:@"SystemAudioUnavailable"
                                      message:error.localizedDescription

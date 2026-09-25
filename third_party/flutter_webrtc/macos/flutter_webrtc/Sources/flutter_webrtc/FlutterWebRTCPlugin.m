@@ -917,36 +917,57 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     NSDictionary* argsMap = call.arguments;
     NSString* streamId = argsMap[@"streamId"];
     RTCMediaStream* stream = self.localStreams[streamId];
-    BOOL shouldCallResult = YES;
-    if (stream) {
-      for (RTCVideoTrack* track in stream.videoTracks) {
-        [_localTracks removeObjectForKey:track.trackId];
-        RTCVideoTrack* videoTrack = (RTCVideoTrack*)track;
-        FlutterRTCVideoRenderer *renderer = [self findRendererByTrackId:videoTrack.trackId];
-        if(renderer != nil) {
-          renderer.videoTrack = nil;
-        }
-        CapturerStopHandler stopHandler = self.videoCapturerStopHandlers[videoTrack.trackId];
-        if (stopHandler) {
-          shouldCallResult = NO;
-          stopHandler(^{
-            NSLog(@"video capturer stopped, trackID = %@", videoTrack.trackId);
-            self.videoCapturer = nil;
-            result(nil);
-          });
-          [self.videoCapturerStopHandlers removeObjectForKey:videoTrack.trackId];
-        }
+    if (stream == nil) {
+      result(nil);
+      return;
+    }
+
+    // Keep every LocalVideoTrack alive until its asynchronous capturer stop
+    // completes. LocalVideoTrack is the strong owner of VideoProcessingAdapter;
+    // releasing it before ScreenCaptureKit drains queued frames leaves the
+    // native capturer with a dangling delegate.
+    NSMutableArray<LocalVideoTrack*>* retainedVideoTracks =
+        [NSMutableArray array];
+    NSMutableArray<NSString*>* localTrackIds = [NSMutableArray array];
+    dispatch_group_t stopGroup = dispatch_group_create();
+
+    for (RTCVideoTrack* track in stream.videoTracks) {
+      NSString* trackId = [track.trackId copy];
+      [localTrackIds addObject:trackId];
+      LocalVideoTrack* localTrack = self.localTracks[trackId];
+      if (localTrack != nil) {
+        [retainedVideoTracks addObject:localTrack];
       }
-      for (RTCAudioTrack* track in stream.audioTracks) {
-        [_localTracks removeObjectForKey:track.trackId];
+      FlutterRTCVideoRenderer* renderer = [self findRendererByTrackId:trackId];
+      if (renderer != nil) {
+        renderer.videoTrack = nil;
+      }
+      CapturerStopHandler stopHandler = self.videoCapturerStopHandlers[trackId];
+      [self.videoCapturerStopHandlers removeObjectForKey:trackId];
+      if (stopHandler != nil) {
+        dispatch_group_enter(stopGroup);
+        stopHandler(^{
+          NSLog(@"video capturer stopped, trackID = %@", trackId);
+          dispatch_group_leave(stopGroup);
+        });
+      }
+    }
+    for (RTCAudioTrack* track in stream.audioTracks) {
+      [localTrackIds addObject:[track.trackId copy]];
+    }
+
+    dispatch_group_notify(stopGroup, dispatch_get_main_queue(), ^{
+      // Capturing this array intentionally extends the processing delegates'
+      // lifetime through the final ScreenCaptureKit callback.
+      (void)retainedVideoTracks.count;
+      for (NSString* trackId in localTrackIds) {
+        [self.localTracks removeObjectForKey:trackId];
       }
       [self.localStreams removeObjectForKey:streamId];
+      self.videoCapturer = nil;
       [self deactiveRtcAudioSession];
-    }
-    if (shouldCallResult) {
-      // do not call if will be called in stopCapturer above.
       result(nil);
-    }
+    });
   } else if ([@"mediaStreamTrackSetEnable" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* trackId = argsMap[@"trackId"];
