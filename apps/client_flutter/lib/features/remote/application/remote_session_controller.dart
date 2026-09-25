@@ -8343,6 +8343,8 @@ class RemoteSessionController extends ChangeNotifier
         'TRUSTED_MACHINE_CODE_INVALID' => '可信机器码格式无效',
         'CAPABILITY_MANIFEST_TOO_LARGE' => '客户端能力清单超出信令服务限制，请更新两端软件',
         'CAPABILITY_MANIFEST_INVALID' => '客户端能力清单格式无效，连接已安全终止',
+        _ when code == WebSocketStatus.messageTooBig =>
+          '信令消息超出接收限制，请更新并重启信令服务器及两端软件',
         'Invalid room or role' when role == RemoteRole.host =>
           '信令服务版本过旧，请更新并重启 Java 控制平面',
         _ => '信令连接已断开',

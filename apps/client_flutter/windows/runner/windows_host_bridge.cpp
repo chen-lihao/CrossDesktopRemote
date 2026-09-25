@@ -289,11 +289,6 @@ UINT SystemCommandForHitTest(HWND window, LRESULT hit_test) {
   return 0;
 }
 
-HWND RootWindowAtPoint(const POINT& point) {
-  const HWND target = WindowFromPoint(point);
-  return target == nullptr ? nullptr : GetAncestor(target, GA_ROOT);
-}
-
 bool IsCurrentProcessWindow(HWND window) {
   DWORD process_id = 0;
   GetWindowThreadProcessId(window, &process_id);
@@ -510,19 +505,21 @@ void WindowsHostBridge::HandleMethodCall(
   if (call.method_name() == "getPrivacyScreenCapabilities") {
     EncodableMap value;
     const int display_count = privacy_screen_.DisplayCount();
+    const std::string failure = WindowsPrivacyScreen::AvailabilityFailure();
     value[EncodableValue("available")] =
-        EncodableValue(display_count > 0);
+        EncodableValue(display_count > 0 && failure.empty());
     value[EncodableValue("assurance")] = EncodableValue("bestEffort");
     value[EncodableValue("supportsCaptureExclusion")] =
-        EncodableValue(true);
+        EncodableValue(failure.empty());
     value[EncodableValue("supportsInputSuppression")] =
         EncodableValue(false);
     value[EncodableValue("secureDesktopCoverage")] =
         EncodableValue(false);
     value[EncodableValue("displayCount")] =
         EncodableValue(static_cast<int32_t>(display_count));
-    value[EncodableValue("limitation")] = EncodableValue(
-        "标准隐私屏不覆盖登录、锁屏、UAC 安全桌面或其他用户会话");
+    value[EncodableValue("limitation")] = EncodableValue(failure.empty()
+        ? "标准隐私屏不覆盖登录、锁屏、UAC 安全桌面或其他用户会话"
+        : failure);
     result->Success(EncodableValue(value));
     return;
   }
@@ -537,6 +534,8 @@ void WindowsHostBridge::HandleMethodCall(
             static_cast<int32_t>(status.expected_display_count));
         value[EncodableValue("captureExcluded")] =
             EncodableValue(status.capture_excluded);
+        value[EncodableValue("inputTransparent")] =
+            EncodableValue(status.input_transparent);
         if (!status.failure_reason.empty()) {
           value[EncodableValue("failureReason")] =
               EncodableValue(status.failure_reason);
@@ -771,7 +770,7 @@ bool WindowsHostBridge::HandlePointer(const EncodableMap& arguments,
 }
 
 bool WindowsHostBridge::BeginOwnWindowCommand(const POINT& screen_point) {
-  const HWND window = RootWindowAtPoint(screen_point);
+  const HWND window = privacy_screen_.InputTargetAtPoint(screen_point);
   if (window == nullptr || !IsCurrentProcessWindow(window)) {
     return false;
   }
@@ -791,7 +790,7 @@ bool WindowsHostBridge::CompleteOwnWindowCommand(const POINT& screen_point) {
   if (pending_window == nullptr || !IsWindow(pending_window)) {
     return false;
   }
-  const HWND release_window = RootWindowAtPoint(screen_point);
+  const HWND release_window = privacy_screen_.InputTargetAtPoint(screen_point);
   if (release_window != pending_window ||
       HitTestWindow(pending_window, screen_point) != pending_hit_test) {
     return false;

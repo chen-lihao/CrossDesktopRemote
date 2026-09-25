@@ -60,3 +60,29 @@ flutter build windows --debug
 ## 进入下一阶段的条件
 
 Windows Debug 原生构建通过且上述单屏闭环稳定后，才进入多显示器事务：建立目标采集流、目标首帧就绪、同一 Sender `replaceTrack()`、控制端提交几何、成功后释放旧流。画质调整只作用于 Sender，并在切屏事务期间采用 last-write-wins 延后应用。
+
+## 隐私屏与大信令消息回归（2026-09-25）
+
+先更新并重启 Java 服务，再构建 Windows 客户端。不要通过删除可信记录、降低验签要求或关闭隐私屏替代验收。
+
+在仓库根目录的 Windows 开发终端执行独立原生测试（不依赖 Flutter）：
+
+```powershell
+cmake -S apps/client_flutter/windows/tests -B apps/client_flutter/build/windows-native-tests
+cmake --build apps/client_flutter/build/windows-native-tests --config Debug
+ctest --test-dir apps/client_flutter/build/windows-native-tests -C Debug --output-on-failure
+```
+
+测试需要解锁的交互桌面及 Windows 10 build 19041+；会暂时显示全屏遮罩、移动鼠标并点击自建测试窗口，请勿同时操作鼠标。验证跨 UI 线程点击穿透、左右键/滚轮、30 次激活/重建/销毁、窗口泄漏、点击目标解析、透明样式丢失和 `WDA_MONITOR` 降级拒绝。它不能替代以下双机验收：
+
+- 隐私屏开启后，控制端、本机鼠标均可点击跨进程应用；拖动、多选和滚轮保持正常。
+- 远程操作本软件标题栏最小化、最大化/还原和关闭管理窗口，不发生鼠标状态卡住。
+- 单屏、多屏、负坐标和不同 DPI；热插拔失败时安全终止，成功时不提前撤去旧遮罩。
+- Mac/iPad 可信连接 Windows 与连接码连接均成功；诊断不再出现 8356 字节 Offer 后关闭码 1009。
+- 音视频、文件传输、剪贴板、权限限制与断开重连保持正常。
+
+Java 信令门禁（真实 WebSocket 容器，无需数据库）：
+
+```shell
+./services/control-plane-java/gradlew -p services/control-plane-java test --tests '*signaling.*'
+```

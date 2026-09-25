@@ -13,6 +13,7 @@ class WindowsPrivacyScreen {
     int covered_display_count = 0;
     int expected_display_count = 0;
     bool capture_excluded = false;
+    bool input_transparent = false;
     std::string failure_reason;
   };
 
@@ -27,6 +28,11 @@ class WindowsPrivacyScreen {
   void Refresh();
   Status GetStatus() const;
   int DisplayCount() const;
+  static std::string AvailabilityFailure();
+
+  // Used only for the application's own caption-command arbitration. Actual
+  // pointer input stays in SendInput; the visual overlay never forwards it.
+  HWND InputTargetAtPoint(const POINT& point) const;
 
  private:
   bool Rebuild();
@@ -34,7 +40,6 @@ class WindowsPrivacyScreen {
   std::vector<HWND> windows_;
   std::wstring controller_label_;
   std::string failure_reason_;
-  bool capture_excluded_ = false;
   bool active_ = false;
 };
 

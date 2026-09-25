@@ -29,7 +29,6 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 	private static final Logger LOG = LoggerFactory.getLogger(SignalingWebSocketHandler.class);
 
-	private static final int MAX_MESSAGE_BYTES = 64 * 1024;
 	private static final int MAX_CAPABILITY_COUNT = 64;
 	private static final int MAX_CAPABILITY_MANIFEST_BYTES = 4 * 1024;
 	private static final Set<String> ALLOWED_MESSAGE_TYPES = Set.of(
@@ -223,8 +222,11 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 
 	@Override
 	protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
-		if (message.getPayloadLength() > MAX_MESSAGE_BYTES) {
-			session.close(CloseStatus.TOO_BIG_TO_PROCESS);
+		var payloadBytes = message.getPayload().getBytes(StandardCharsets.UTF_8).length;
+		if (payloadBytes > SignalingMessageLimits.MAX_TEXT_BYTES) {
+			LOG.warn("Signaling envelope rejected: bytes={} limit={}",
+					payloadBytes, SignalingMessageLimits.MAX_TEXT_BYTES);
+			session.close(CloseStatus.TOO_BIG_TO_PROCESS.withReason(SignalingMessageLimits.TOO_LARGE_REASON));
 			return;
 		}
 
@@ -239,7 +241,7 @@ final class SignalingWebSocketHandler extends TextWebSocketHandler {
 				traceId(session),
 				attemptId(session),
 				messageType,
-				message.getPayloadLength());
+				payloadBytes);
 
 		var roomCode = roomCode(session);
 		var role = role(session);

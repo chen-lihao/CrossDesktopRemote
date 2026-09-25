@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:cross_desktop_remote/core/diagnostics/diagnostic_event.dart';
 import 'package:cross_desktop_remote/core/diagnostics/diagnostic_hub.dart';
+import 'package:cross_desktop_remote/core/signaling/signaling_message_limits.dart';
 
 typedef SignalingMessageHandler = FutureOr<void> Function(
   Map<String, dynamic> message,
@@ -96,13 +97,17 @@ class SignalingClient {
       onDone(socket.closeCode, socket.closeReason);
     }
 
+    var rejectedMessage = false;
     _subscription = socket.listen(
       (dynamic payload) {
         _messageQueue = _messageQueue
             .then((_) async {
-              if (generation != _connectionGeneration || payload is! String) {
+              if (generation != _connectionGeneration ||
+                  rejectedMessage ||
+                  payload is! String) {
                 return;
               }
+              final payloadBytes = SignalingMessageLimits.validate(payload);
               final decoded = jsonDecode(payload);
               if (decoded is Map<String, dynamic>) {
                 DiagnosticHub.instance.record(
@@ -112,24 +117,31 @@ class SignalingClient {
                   context: context,
                   attributes: {
                     'type': decoded['type'] as String? ?? 'unknown',
-                    'payloadBytes': utf8.encode(payload).length,
+                    'payloadBytes': payloadBytes,
                   },
                 );
                 await onMessage(decoded);
               }
             })
             .catchError((Object error, StackTrace stackTrace) async {
+              final tooLarge = error is SignalingMessageTooLarge;
+              rejectedMessage = true;
               DiagnosticHub.instance.recordError(
                 component: 'signaling.message',
                 name: 'decode_or_dispatch_failed',
                 error: error,
                 stackTrace: stackTrace,
-                errorCode: 'CDR-SIGNAL-003',
+                errorCode: tooLarge ? 'CDR-SIGNAL-004' : 'CDR-SIGNAL-003',
                 context: context,
               );
               if (generation == _connectionGeneration &&
                   socket.readyState == WebSocket.open) {
-                await socket.close(WebSocketStatus.invalidFramePayloadData);
+                await socket.close(
+                  tooLarge
+                      ? WebSocketStatus.messageTooBig
+                      : WebSocketStatus.invalidFramePayloadData,
+                  tooLarge ? SignalingMessageLimits.closeReason : null,
+                );
               }
             });
       },
@@ -145,6 +157,20 @@ class SignalingClient {
       throw StateError('信令连接尚未建立');
     }
     final payload = jsonEncode(message);
+    late final int payloadBytes;
+    try {
+      payloadBytes = SignalingMessageLimits.validate(payload);
+    } on SignalingMessageTooLarge catch (error, stackTrace) {
+      DiagnosticHub.instance.recordError(
+        component: 'signaling.message',
+        name: 'outbound_message_too_large',
+        error: error,
+        stackTrace: stackTrace,
+        errorCode: 'CDR-SIGNAL-004',
+        context: _diagnosticContext,
+      );
+      rethrow;
+    }
     DiagnosticHub.instance.record(
       component: 'signaling.message',
       name: 'sent',
@@ -152,7 +178,7 @@ class SignalingClient {
       context: _diagnosticContext,
       attributes: {
         'type': message['type'] as String? ?? 'unknown',
-        'payloadBytes': utf8.encode(payload).length,
+        'payloadBytes': payloadBytes,
       },
     );
     socket.add(payload);

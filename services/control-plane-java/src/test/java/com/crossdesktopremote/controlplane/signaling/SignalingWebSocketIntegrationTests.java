@@ -6,6 +6,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
@@ -19,7 +20,13 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.context.ActiveProfiles;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+// Exercise the production WebSocket endpoint and embedded Tomcat, without
+// unrelated database services. Signaling registries are process-local.
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
+		"spring.autoconfigure.exclude=org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
+				+ "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration,"
+				+ "org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration"
+})
 @ActiveProfiles("test")
 class SignalingWebSocketIntegrationTests {
 
@@ -248,6 +255,78 @@ class SignalingWebSocketIntegrationTests {
 				"{\"type\":\"trusted-auth-start\",\"authSuiteVersion\":2}");
 		controller.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
 		host.sendClose(WebSocket.NORMAL_CLOSURE, "test complete").join();
+	}
+
+	@Test
+	void relaysLargeTrustedOffersAndFragmentedAnswersWithoutChangingTheirContents() throws Exception {
+		var hostMessages = new RecordingListener();
+		var controllerMessages = new RecordingListener();
+		var client = HttpClient.newHttpClient();
+		var machineCode = "CDR2-1234-5678-9ABC-DEFG";
+		var capabilities = List.of(
+				"device-identity-v1", "trusted-device-auth-v1", "signed-webrtc-binding-v1");
+		var host = client.newWebSocketBuilder()
+				.buildAsync(URI.create("ws://127.0.0.1:" + port
+						+ "/ws/signaling?role=host&trustedMachineCode=" + machineCode
+						+ capabilityQuery(capabilities)), hostMessages).join();
+		try {
+			assertThat(hostMessages.next()).contains("\"type\":\"ready\"");
+			var controller = connectTrustedController(client, machineCode, capabilities, controllerMessages);
+			try {
+				assertThat(controllerMessages.next()).contains("\"type\":\"ready\"");
+				assertThat(hostMessages.next()).contains("\"type\":\"peer-joined\"");
+				assertThat(controllerMessages.next()).contains("\"type\":\"peer-joined\"");
+				// 8356 bytes reproduces the captured Windows failure. The relay
+				// must also preserve a full-size signed envelope byte for byte.
+				for (var size : List.of(8356, 32 * 1024, 64 * 1024)) {
+					var offer = asciiMessage("trusted-offer", size);
+					host.sendText(offer, true).join();
+					assertThat(controllerMessages.next()).isEqualTo(offer);
+					var answer = asciiMessage("trusted-answer", size);
+					for (var offset = 0; offset < answer.length(); offset += 3000) {
+						var end = Math.min(offset + 3000, answer.length());
+						controller.sendText(answer.substring(offset, end), end == answer.length()).join();
+					}
+					assertThat(hostMessages.next()).isEqualTo(answer);
+				}
+			} finally {
+				controller.abort();
+			}
+		} finally {
+			host.abort();
+		}
+	}
+
+	@Test
+	void rejectsOversizedCompleteMessagesIncludingMultibyteAndFragmentedPayloads() throws Exception {
+		var client = HttpClient.newHttpClient();
+		for (var payload : List.of(
+				asciiMessage("trusted-offer", 64 * 1024 + 1),
+				"{\"type\":\"trusted-offer\",\"sdp\":\"" + "界".repeat(23000) + "\"}")) {
+			assertThat(payload.getBytes(StandardCharsets.UTF_8).length).isGreaterThan(64 * 1024);
+			for (var fragmented : List.of(false, true)) {
+				var messages = new RecordingListener();
+				var socket = connectHost(client, messages);
+				try {
+					assertThat(messages.next()).contains("\"type\":\"ready\"");
+					if (fragmented) {
+						var split = payload.length() / 2;
+						socket.sendText(payload.substring(0, split), false).join();
+						socket.sendText(payload.substring(split), true).join();
+					} else {
+						socket.sendText(payload, true).join();
+					}
+					assertThat(messages.nextClose()).startsWith("1009:");
+				} finally {
+					socket.abort();
+				}
+			}
+		}
+	}
+
+	private static String asciiMessage(String type, int bytes) {
+		var prefix = "{\"type\":\"" + type + "\",\"sdp\":\"";
+		return prefix + "a".repeat(bytes - prefix.length() - 2) + "\"}";
 	}
 
 	@Test
